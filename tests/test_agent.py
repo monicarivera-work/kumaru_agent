@@ -163,7 +163,6 @@ class TestAgentConfig:
     def test_default_config_is_used_when_none_provided(self):
         """Agent should be constructable with only a mock LLM (no config needed)."""
         llm = EchoLLM([_text_response("ok")])
-        # We patch OpenAIClient import to avoid needing an API key.
         agent = Agent(llm=llm)
         assert agent.run("hi") == "ok"
 
@@ -172,3 +171,34 @@ class TestAgentConfig:
         config = AgentConfig(system_prompt="You are a pirate.")
         agent = Agent(config=config, llm=llm)
         assert agent.memory.get_messages()[0].content == "You are a pirate."
+
+    def test_default_provider_is_ollama(self):
+        config = AgentConfig()
+        assert config.llm.provider == "ollama"
+        assert config.llm.model == "llama3.1"
+
+    def test_default_agent_uses_ollama_client(self, monkeypatch):
+        class DummyLLM(BaseLLMClient):
+            def __init__(self, config):
+                self.config = config
+
+            def chat(self, messages, tools=None):
+                return _text_response("ok")
+
+        monkeypatch.setattr("kumaru.agent.OllamaClient", DummyLLM)
+        agent = Agent(config=AgentConfig())
+        assert isinstance(agent._llm, DummyLLM)
+
+    def test_openai_provider_uses_openai_client(self, monkeypatch):
+        class DummyLLM(BaseLLMClient):
+            def __init__(self, config):
+                self.config = config
+
+            def chat(self, messages, tools=None):
+                return _text_response("ok")
+
+        monkeypatch.setattr("kumaru.agent.OpenAIClient", DummyLLM)
+        config = AgentConfig()
+        config.llm.provider = "openai"
+        agent = Agent(config=config)
+        assert isinstance(agent._llm, DummyLLM)

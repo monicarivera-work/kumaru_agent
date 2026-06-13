@@ -34,16 +34,25 @@ class LLMConfig:
 
     Concept: LLM hyper-parameters
     ------------------------------
-    * model       – which checkpoint to use (e.g. "gpt-4o", "gpt-3.5-turbo")
+    * provider    – which backend to use (e.g. "ollama", "openai")
+    * model       – which checkpoint to use (e.g. "llama3.1", "gpt-4o")
     * temperature – randomness of the output (0 = deterministic, 1 = creative)
     * max_tokens  – upper bound on the response length (cost control)
     * timeout     – seconds to wait for the API before giving up
     """
 
-    model: str = "gpt-4o"
+    provider: str = field(
+        default_factory=lambda: os.getenv("KUMARU_LLM_PROVIDER", "ollama")
+    )
+    model: str = field(
+        default_factory=lambda: os.getenv("KUMARU_LLM_MODEL", "llama3.1")
+    )
     temperature: float = 0.0          # 0 keeps the agent's reasoning consistent
     max_tokens: int = 4096
     timeout: int = 60
+    base_url: str = field(
+        default_factory=lambda: os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    )
     api_key: Optional[str] = field(
         default_factory=lambda: os.getenv("OPENAI_API_KEY")
     )

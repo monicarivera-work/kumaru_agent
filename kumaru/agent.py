@@ -41,6 +41,7 @@ from typing import Any, Optional
 
 from kumaru.config import AgentConfig
 from kumaru.llm.base import BaseLLMClient, Message
+from kumaru.llm.ollama_client import OllamaClient
 from kumaru.llm.openai_client import OpenAIClient
 from kumaru.logger import get_logger
 from kumaru.memory.conversation import ConversationMemory
@@ -76,7 +77,7 @@ class Agent:
         tools: Optional[list[BaseTool]] = None,
     ) -> None:
         self._config = config or AgentConfig()
-        self._llm = llm or OpenAIClient(self._config.llm)
+        self._llm = llm or self._build_default_llm(self._config)
         self._log = get_logger(__name__, verbose=self._config.verbose)
 
         # Build a lookup dict so we can dispatch tool calls by name quickly.
@@ -166,6 +167,18 @@ class Agent:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _build_default_llm(self, config: AgentConfig) -> BaseLLMClient:
+        """Create the default LLM client from configuration."""
+        provider = config.llm.provider.lower()
+        if provider == "ollama":
+            return OllamaClient(config.llm)
+        if provider == "openai":
+            return OpenAIClient(config.llm)
+        raise ValueError(
+            f"Unsupported LLM provider '{config.llm.provider}'. "
+            "Supported providers: ollama, openai."
+        )
 
     def _reason(self, tool_schemas: list[dict[str, Any]]):
         """Send the current conversation to the LLM and return its response."""
