@@ -1,4 +1,4 @@
-# Core LLM provider SDK (OpenAI is the default)
+# Optional SDK for the OpenAI provider
 openai>=1.0.0
 
 # HTTP client used by tools that call external APIs

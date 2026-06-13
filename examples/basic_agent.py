@@ -4,7 +4,8 @@ examples/basic_agent.py
 The simplest possible Kumaru agent.
 
 Run:
-    export OPENAI_API_KEY="sk-..."
+    ollama pull llama3.1
+    ollama serve
     python examples/basic_agent.py
 
 What this demonstrates:
@@ -25,7 +26,7 @@ config = AgentConfig(verbose=True)
 # ── 2. Create the agent ───────────────────────────────────────────────────────
 #
 # The Agent constructor wires together:
-#   * The LLM client (OpenAIClient by default)
+#   * The LLM client (OllamaClient by default)
 #   * The conversation memory
 #   * The tool registry
 agent = Agent(config=config)

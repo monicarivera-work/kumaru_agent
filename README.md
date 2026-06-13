@@ -59,6 +59,7 @@ kumaru/
 ├── logger.py         ← Structured JSON logging for production
 ├── llm/
 │   ├── base.py       ← Abstract interface (swap providers without code changes)
+│   ├── ollama_client.py ← Native Ollama implementation (default)
 │   └── openai_client.py ← OpenAI implementation with retry logic
 ├── memory/
 │   └── conversation.py  ← Rolling list of messages = agent's working memory
@@ -108,9 +109,10 @@ can "remember" previous turns.  In production you'd persist this to a database.
 
 ### 5 · LLM abstraction
 
-`BaseLLMClient` is an interface.  `OpenAIClient` is one implementation.  To
-swap to Anthropic, Cohere, or a local Ollama model you create a new subclass
-and pass it to the `Agent` constructor — no other code changes needed.
+`BaseLLMClient` is an interface.  `OllamaClient` and `OpenAIClient` are two
+implementations.  To swap to Anthropic, Cohere, or another local model you
+create a new subclass and pass it to the `Agent` constructor — no other code
+changes needed.
 
 ---
 
@@ -148,8 +150,9 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 pip install -e .             # installs the kumaru package in editable mode
 
-# 4. Set your OpenAI API key
-export OPENAI_API_KEY="sk-..."   # or add it to a .env file
+# 4. Start Ollama and pull the default model
+ollama pull llama3.1
+ollama serve
 ```
 
 Minimal usage:
@@ -161,6 +164,18 @@ from kumaru.tools import CalculatorTool
 agent = Agent(tools=[CalculatorTool()])
 reply = agent.run("What is 123 * 456?")
 print(reply)  # → "123 * 456 = 56088"
+```
+
+The default configuration expects Ollama at `http://localhost:11434` and uses
+the `llama3.1` model.  To switch back to OpenAI:
+
+```python
+from kumaru.config import AgentConfig, LLMConfig
+
+config = AgentConfig(
+    llm=LLMConfig(provider="openai", model="gpt-4o")
+)
+agent = Agent(config=config)
 ```
 
 ---

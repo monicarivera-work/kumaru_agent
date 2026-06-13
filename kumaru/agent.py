@@ -55,8 +55,8 @@ class Agent:
         config: :class:`~kumaru.config.AgentConfig` instance.
                 Uses sensible defaults if not provided.
         llm:    A :class:`~kumaru.llm.base.BaseLLMClient` instance.
-                Defaults to :class:`~kumaru.llm.openai_client.OpenAIClient`
-                built from ``config.llm``.
+                Defaults to a provider-specific client built from ``config.llm``
+                (Ollama by default, OpenAI when ``provider="openai"``).
         tools:  List of :class:`~kumaru.tools.base.BaseTool` instances the
                 agent may call.  Empty by default.
 

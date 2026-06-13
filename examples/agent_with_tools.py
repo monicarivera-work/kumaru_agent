@@ -4,7 +4,8 @@ examples/agent_with_tools.py
 A Kumaru agent equipped with the built-in Calculator and WebSearch tools.
 
 Run:
-    export OPENAI_API_KEY="sk-..."
+    ollama pull llama3.1
+    ollama serve
     python examples/agent_with_tools.py
 
 What this demonstrates:
