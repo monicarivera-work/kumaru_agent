@@ -1,0 +1,15 @@
+# Optional SDK for the OpenAI provider
+openai>=1.0.0
+
+# HTTP client used by tools that call external APIs
+requests>=2.31.0
+
+# For loading .env files that hold your API keys
+python-dotenv>=1.0.0
+
+# Type-checking helpers available at runtime
+typing_extensions>=4.9.0
+
+# ---- Development / testing ----
+pytest>=7.4.0
+pytest-mock>=3.12.0
