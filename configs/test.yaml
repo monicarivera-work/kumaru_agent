@@ -1,0 +1,30 @@
+# Profile: no model, no GPU, no downloads.
+#
+# The `echo` backend returns a deterministic canned reply. Use it to:
+#   * verify an install end to end in under a second
+#   * develop and test the UI, routing, and streaming without a GPU
+#   * bisect a failure — if echo works, the bug is in the model layer
+#
+#   kumaru serve -c test
+#   kumaru chat  -c test -q "hello"
+
+backend:
+  name: echo
+  model: echo
+  max_context_length: 8192
+  extra:
+    delay_s: 0.01          # simulated inter-token delay; 0 for instant
+
+generation:
+  max_tokens: 256
+  temperature: 0.0
+
+agent:
+  max_history_tokens: 2048
+
+server:
+  port: 8080
+  max_concurrent_requests: 16
+
+telemetry:
+  log_level: DEBUG

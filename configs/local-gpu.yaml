@@ -1,0 +1,48 @@
+# Profile: single consumer GPU with 24 GB VRAM (RTX 3090 / 4090 / A5000).
+#
+# Runs a 7B model in bfloat16 with room left for a long context.
+#
+# VRAM budget, measured rather than guessed:
+#   weights        7.6B params x 2 bytes (bf16)          ~15.2 GB
+#   KV cache       28 layers x 4 kv-heads x 128 dim
+#                  x 2 (K and V) x 2 bytes x 16k tokens  ~0.9 GB
+#   activations + fragmentation                          ~1.5 GB
+#   ------------------------------------------------------------
+#   total                                                ~17.6 GB of 24 GB
+#
+# Qwen2.5 uses grouped-query attention (4 KV heads, not 28), which is why the
+# KV cache is small enough to afford a 16k window here. On an older model with
+# full multi-head attention the same window would cost ~6 GB.
+#
+#   kumaru serve -c local-gpu
+
+backend:
+  name: transformers
+  model: Qwen/Qwen2.5-7B-Instruct
+  device: cuda
+  dtype: bfloat16          # Ampere+; wider exponent range than fp16, no inf/NaN
+  max_context_length: 16384
+  # Uncomment after `pip install flash-attn --no-build-isolation` (needs a CUDA
+  # toolchain). Cuts attention memory from O(n^2) to O(n) and speeds up long
+  # prompts substantially.
+  # attn_implementation: flash_attention_2
+
+generation:
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.95
+
+agent:
+  max_history_tokens: 12288
+  memory_policy: sliding_window
+
+server:
+  host: 127.0.0.1
+  port: 8080
+  # One GPU decodes one batch at a time. Admitting more than a handful of
+  # concurrent requests adds queueing latency without adding throughput — for
+  # real concurrency, move to vLLM (see configs/vllm.yaml).
+  max_concurrent_requests: 4
+
+telemetry:
+  log_level: INFO

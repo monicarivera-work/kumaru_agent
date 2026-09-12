@@ -1,0 +1,50 @@
+# Fast LoRA run on a 0.5B model — for validating the pipeline, not for quality.
+#
+# Purpose: prove the whole training path works (data loads, masking is correct,
+# loss decreases, adapter saves, adapter loads back into the server) in a few
+# minutes and ~2 GB of VRAM, before you commit hours to the 7B run.
+#
+# Do this first. Every time. A masking bug found here costs five minutes; the
+# same bug found on the 7B run costs an evening.
+#
+#   kumaru train configs/train/lora-small.yaml --dry-run
+#   kumaru train configs/train/lora-small.yaml
+#   kumaru chat --model Qwen/Qwen2.5-0.5B-Instruct --adapter runs/lora-small/adapter
+#
+# Requires: pip install "kumaru[train]"    (no bitsandbytes needed)
+
+task: lora
+base_model: Qwen/Qwen2.5-0.5B-Instruct
+output_dir: runs/lora-small
+run_name: qwen0.5b-smoke
+
+load_in_4bit: false        # 0.5B in bf16 is ~1 GB; quantization buys nothing here
+
+data:
+  train_file: data/samples/chat_train.jsonl
+  eval_split: 0.1
+  max_seq_length: 1024
+  train_on_completions_only: true
+
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+optim:
+  epochs: 3
+  per_device_batch_size: 2
+  gradient_accumulation_steps: 4     # effective batch = 8
+  learning_rate: 2.0e-4
+  lr_scheduler: cosine
+  warmup_ratio: 0.05
+  gradient_checkpointing: false      # unnecessary at this size; keeps it fast
+  optimizer: adamw_torch
+  bf16: true
+  seed: 42
+
+logging_steps: 2
+eval_steps: 10
+save_steps: 50
+save_total_limit: 1

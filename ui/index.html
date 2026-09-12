@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Kumaru</title>
+<link rel="stylesheet" href="/static/styles.css" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>" />
+</head>
+<body>
+<div id="app">
+
+  <!-- ─────────────── Sidebar: status + controls ─────────────── -->
+  <aside id="sidebar">
+    <header class="brand">
+      <span class="mark">◈</span>
+      <div>
+        <h1>Kumaru</h1>
+        <p id="version">local agent</p>
+      </div>
+    </header>
+
+    <section class="panel">
+      <div class="panel-title">Status</div>
+      <div class="status-row">
+        <span id="status-dot" class="dot loading"></span>
+        <span id="status-text">connecting…</span>
+      </div>
+      <dl class="kv" id="model-facts">
+        <dt>model</dt><dd id="fact-model">—</dd>
+        <dt>backend</dt><dd id="fact-backend">—</dd>
+        <dt>device</dt><dd id="fact-device">—</dd>
+        <dt>dtype</dt><dd id="fact-dtype">—</dd>
+        <dt>context</dt><dd id="fact-context">—</dd>
+      </dl>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">Last response</div>
+      <dl class="kv">
+        <dt>first token</dt><dd id="stat-ttft">—</dd>
+        <dt>speed</dt><dd id="stat-tps">—</dd>
+        <dt>tokens</dt><dd id="stat-tokens">—</dd>
+      </dl>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">Decoding</div>
+      <label class="slider">
+        <span>temperature <b id="val-temp">0.70</b></span>
+        <input type="range" id="temperature" min="0" max="1.5" step="0.05" value="0.7" />
+        <small>0 = deterministic. Raise for creative work, lower for factual.</small>
+      </label>
+      <label class="slider">
+        <span>max tokens <b id="val-max">1024</b></span>
+        <input type="range" id="max-tokens" min="64" max="8192" step="64" value="1024" />
+        <small>Hard cap on reply length.</small>
+      </label>
+      <label class="slider">
+        <span>top-p <b id="val-topp">0.95</b></span>
+        <input type="range" id="top-p" min="0.1" max="1" step="0.01" value="0.95" />
+        <small>Nucleus sampling: consider the smallest set of tokens totalling this probability.</small>
+      </label>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">System prompt</div>
+      <textarea id="system-prompt" rows="4" placeholder="Optional. Added on top of the server's prompt."></textarea>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">Model</div>
+      <input type="text" id="swap-model" placeholder="Qwen/Qwen2.5-7B-Instruct" />
+      <select id="swap-backend"></select>
+      <button id="swap-btn" class="secondary">Load model</button>
+      <small class="muted">Swaps in place. Frees VRAM before loading.</small>
+    </section>
+
+    <footer class="side-footer">
+      <button id="clear-btn" class="ghost">Clear conversation</button>
+      <a href="/docs" target="_blank" rel="noopener">API docs ↗</a>
+    </footer>
+  </aside>
+
+  <!-- ─────────────── Main: conversation ─────────────── -->
+  <main id="main">
+    <div id="messages">
+      <div class="empty-state">
+        <h2>Ask anything</h2>
+        <p>Running entirely on your machine. Nothing leaves this computer.</p>
+        <div class="suggestions">
+          <button class="chip">Explain what a KV cache is and why it matters</button>
+          <button class="chip">Write a Python function to parse an ISO 8601 duration</button>
+          <button class="chip">What's the difference between LoRA and full fine-tuning?</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="composer">
+      <div class="composer-inner">
+        <textarea id="input" rows="1" placeholder="Message Kumaru…  (Enter to send, Shift+Enter for newline)"></textarea>
+        <button id="send-btn" title="Send">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path d="M3 20l18-8L3 4v6l12 2-12 2v6z" fill="currentColor"/></svg>
+        </button>
+        <button id="stop-btn" class="hidden" title="Stop">
+          <svg viewBox="0 0 24 24" width="16" height="16"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/></svg>
+        </button>
+      </div>
+      <p class="hint" id="hint">Local model · your data stays on device</p>
+    </div>
+  </main>
+
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+# Profile: delegate inference to vLLM — the production throughput step.
+#
+# Why this exists
+# ---------------
+# The `transformers` backend decodes one request at a time. vLLM adds two things
+# that matter at scale:
+#
+#   * Continuous batching — new requests join the running batch at the next
+#     decode step instead of waiting for the current one to finish. Because
+#     model weights are read once per *step* rather than per *sequence*, serving
+#     16 users costs barely more than serving 1.
+#   * PagedAttention — the KV cache is stored in fixed-size pages instead of one
+#     contiguous per-sequence slab, cutting memory fragmentation from ~60-80%
+#     waste to a few percent. More usable cache means a larger batch.
+#
+# Together these are typically 10-24x the throughput of naive HF generation on
+# identical hardware.
+#
+# Start the engine first (Linux/WSL; vLLM has no native Windows build):
+#
+#   pip install vllm
+#   vllm serve Qwen/Qwen2.5-7B-Instruct \
+#     --port 8000 \
+#     --max-model-len 16384 \
+#     --gpu-memory-utilization 0.90
+#
+# Then:  kumaru serve -c vllm
+#
+# Scaling past one GPU is a vLLM flag, not a Kumaru change:
+#   --tensor-parallel-size 4     split one model across 4 GPUs
+#   --pipeline-parallel-size 2   split across nodes
+
+backend:
+  name: openai_compat
+  model: Qwen/Qwen2.5-7B-Instruct   # must match what vLLM was started with
+  base_url: http://127.0.0.1:8000/v1
+  api_key: null
+  timeout_s: 300
+  max_context_length: 16384
+
+generation:
+  max_tokens: 2048
+
+agent:
+  max_history_tokens: 12288
+
+server:
+  port: 8080
+  # vLLM does the real admission control; Kumaru just forwards, so this can be
+  # far higher than on a local-GPU profile.
+  max_concurrent_requests: 64
+
+telemetry:
+  log_format: json         # you are running a service now; make logs parseable

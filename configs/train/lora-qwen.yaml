@@ -1,0 +1,60 @@
+# QLoRA fine-tune of Qwen2.5-7B-Instruct on a single 24 GB GPU (RTX 3090/4090).
+#
+# Measured footprint on a 3090 with these settings: ~9-11 GB VRAM.
+# Expect ~20-40 minutes per epoch on ~1,000 examples of ~1k tokens each.
+#
+#   kumaru train configs/train/lora-qwen.yaml --dry-run   # validate first, always
+#   kumaru train configs/train/lora-qwen.yaml
+#   kumaru chat --model Qwen/Qwen2.5-7B-Instruct --adapter runs/lora-qwen/adapter
+#
+# Requires: pip install "kumaru[train,quant]"
+
+task: lora
+base_model: Qwen/Qwen2.5-7B-Instruct
+output_dir: runs/lora-qwen
+run_name: qwen7b-lora-v1
+
+# Freeze the base model in 4-bit NF4, train the adapter in bf16. This is QLoRA.
+# It cuts base-weight memory from ~15 GB to ~4.5 GB with minimal quality loss.
+load_in_4bit: true
+
+data:
+  train_file: data/samples/chat_train.jsonl
+  eval_file: null
+  eval_split: 0.1          # held out deterministically; watch this loss, not train loss
+  max_seq_length: 2048     # longer examples are dropped, not truncated
+  train_on_completions_only: true   # loss on assistant turns only — see train/data.py
+
+lora:
+  r: 16                    # 8-16 for style/format; 32-64 to teach new domain behaviour
+  alpha: 32                # convention: alpha = 2 * r
+  dropout: 0.05
+  target_modules:          # attention + MLP; better than attention-only
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  bias: none
+
+optim:
+  epochs: 3                # 2-4 is the usual range; more overfits small datasets fast
+  per_device_batch_size: 1 # 2048-token sequences; 1 is the realistic ceiling at 24 GB
+  gradient_accumulation_steps: 16   # effective batch = 1 x 16 = 16
+  learning_rate: 2.0e-4    # LoRA tolerates ~10x the LR of a full fine-tune
+  lr_scheduler: cosine
+  warmup_ratio: 0.03
+  weight_decay: 0.0        # LoRA is already heavily constrained by its rank
+  max_grad_norm: 1.0
+  gradient_checkpointing: true      # ~30% slower, ~40% less activation memory
+  optimizer: paged_adamw_8bit       # needs bitsandbytes; use adamw_torch without it
+  bf16: true
+  seed: 42
+
+logging_steps: 5
+eval_steps: 50
+save_steps: 100
+save_total_limit: 3
+report_to: []              # ["tensorboard"] to get curves: tensorboard --logdir runs/

@@ -1,0 +1,94 @@
+# Kumaru default configuration.
+#
+# This file documents every knob. It is also the file `load_config()` falls back
+# to conceptually — the values here match the field defaults in
+# src/kumaru/core/config.py, so you can read either one and get the same answer.
+#
+# Precedence, lowest to highest:
+#   field defaults  <  this YAML  <  KUMARU_* env vars  <  CLI flags
+#
+# Check what actually won with:  kumaru config -c default
+
+backend:
+  # Which engine loads the model.
+  #   transformers   local GPU/CPU via Hugging Face        (default; best for dev)
+  #   llamacpp       quantized GGUF, low VRAM or CPU-only
+  #   openai_compat  remote server: vLLM, Ollama, TGI      (best for throughput)
+  #   echo           no model at all                       (tests, install checks)
+  name: transformers
+
+  # Hugging Face repo id, or a local directory containing the weights.
+  model: Qwen/Qwen2.5-7B-Instruct
+
+  device: auto        # auto | cuda | cuda:0 | cpu | mps
+  dtype: auto         # auto | bfloat16 | float16 | float32
+
+  # 4-bit NF4 quantization. Roughly quarters VRAM use and nearly doubles
+  # single-stream speed, at a small quality cost. Requires: pip install kumaru[quant]
+  load_in_4bit: false
+  load_in_8bit: false
+
+  # Hard cap on the context window. Lower it to reduce KV-cache VRAM; the
+  # backend also clamps this to whatever the checkpoint actually supports.
+  max_context_length: 8192
+
+  # Path to a LoRA adapter produced by `kumaru train`. This is how a fine-tune
+  # gets deployed: a few hundred MB layered over the untouched base weights.
+  adapter_path: null
+
+  trust_remote_code: false
+  attn_implementation: null   # e.g. flash_attention_2 when installed
+
+  # -- openai_compat only --
+  base_url: null              # http://127.0.0.1:8000/v1 for vLLM, :11434/v1 for Ollama
+  api_key: null
+  timeout_s: 300
+
+  # -- llamacpp only --
+  model_path: null            # absolute path to a .gguf file
+  n_gpu_layers: -1            # -1 offloads as many layers as fit in VRAM
+  n_threads: null
+
+generation:
+  max_tokens: 1024
+  temperature: 0.7            # 0 = greedy/deterministic
+  top_p: 0.95                 # nucleus sampling
+  top_k: 50
+  repetition_penalty: 1.05    # >1 discourages loops; above ~1.2 degrades quality
+  stop: []
+  seed: null                  # set for reproducible sampling
+
+agent:
+  system_prompt: >-
+    You are Kumaru, a precise and helpful assistant. Answer directly and
+    concisely. Lead with the answer, then justify it. If you are uncertain, say
+    so plainly and state what would resolve the uncertainty. Never invent
+    citations, APIs, file paths, or numbers.
+
+  # Token budget for conversation history. Must leave room for the reply:
+  # max_history_tokens + generation.max_tokens should stay under
+  # backend.max_context_length.
+  max_history_tokens: 6144
+
+  # sliding_window  keep system prompt + newest turns, drop the middle (default)
+  # drop_oldest     trim strictly from the front
+  # none            never trim; raise when it does not fit
+  memory_policy: sliding_window
+
+  enabled_tools: []           # v0.1 is chat-only; see src/kumaru/agent/tools.py
+  max_tool_iterations: 4
+
+server:
+  host: 127.0.0.1             # 0.0.0.0 exposes to your LAN — set api_key first
+  port: 8080
+  cors_origins: ["*"]
+  max_concurrent_requests: 8  # bounded admission; prevents CUDA OOM under load
+  request_timeout_s: 600
+  serve_ui: true
+  api_key: null               # when set, clients must send Authorization: Bearer <key>
+
+telemetry:
+  log_level: INFO             # DEBUG | INFO | WARNING | ERROR
+  log_format: console         # console | json (use json when aggregating logs)
+  metrics_enabled: true
+  trace_file: null            # JSONL of every request, for offline analysis

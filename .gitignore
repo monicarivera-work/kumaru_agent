@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Kumaru runtime artifacts
+runs/
+checkpoints/
+adapters/
+.cache/
+models/
+*.gguf
+*.safetensors
+*.bin
+*.pt
+
+# Data (keep the tiny committed samples in data/samples/)
+data/*
+!data/samples/
+!data/samples/**
+
+# Logs & local state
+logs/
+*.log
+.kumaru/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
