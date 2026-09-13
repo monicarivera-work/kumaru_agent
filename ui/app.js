@@ -37,13 +37,24 @@ const statusText = el("status-text");
 const SESSION_KEY = "kumaru.session";
 const THEME_KEY = "kumaru.theme";
 
+function newSessionId() {
+  // Session ids name a conversation, but they are also all that separates one
+  // tab's history from another's, so generate them with the CSPRNG rather than
+  // Math.random().
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  throw new Error("this browser has no Web Crypto API");
+}
+
 const sessionId =
   localStorage.getItem(SESSION_KEY) ||
   (() => {
-    const id =
-      typeof crypto !== "undefined" && crypto.randomUUID
-        ? crypto.randomUUID()
-        : `s-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const id = newSessionId();
     localStorage.setItem(SESSION_KEY, id);
     return id;
   })();

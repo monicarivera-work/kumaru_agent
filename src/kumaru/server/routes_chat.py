@@ -77,9 +77,14 @@ def chat_stream(body: ChatRequestModel, request: Request) -> StreamingResponse:
         except KumaruError as exc:
             log.warning("stream failed: %s", exc.message)
             yield _sse(exc.to_dict())
-        except Exception as exc:  # noqa: BLE001 - never leak a traceback to the UI
+        except Exception:  # noqa: BLE001 - never leak a traceback to the UI
             log.exception("unexpected stream failure")
-            yield _sse({"error": "InternalError", "message": str(exc)})
+            yield _sse(
+                {
+                    "error": "InternalError",
+                    "message": "generation failed; see the server logs for details",
+                }
+            )
 
     return StreamingResponse(
         events(),
