@@ -1,0 +1,22 @@
+# A real model on a laptop with no GPU, via a quantised GGUF file.
+#
+# 1. pip install -e '.[llamacpp]'
+# 2. download a 4-bit GGUF (roughly 5 GB for a 7-8B model) into ./models/
+# 3. kumaru serve -c configs/cpu-only.yaml
+#
+# Expect ~5-15 tokens/second on a modern 8-core CPU.
+
+backend:
+  name: llamacpp
+  model: models/qwen2.5-7b-instruct-q4_k_m.gguf
+  context_length: 4096
+  n_threads: 0      # 0 = use every core
+  gpu_layers: 0     # pure CPU
+
+agent:
+  max_tokens: 512
+  temperature: 0.7
+
+server:
+  host: 127.0.0.1
+  port: 8000

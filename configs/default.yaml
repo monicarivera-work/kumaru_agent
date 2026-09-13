@@ -1,0 +1,30 @@
+# Kumaru default configuration.
+#
+# Every value here matches the built-in defaults, so this file is really a
+# documented starting point: copy it, edit it, pass it with `kumaru serve -c`.
+#
+# Precedence: defaults < this file < KUMARU_* environment variables < CLI flags.
+
+backend:
+  # echo | openai_compat | transformers | llamacpp
+  name: echo
+  model: ""
+
+agent:
+  system_prompt: |
+    You are Kumaru, a helpful local assistant.
+    Today is {date}. Answer accurately and concisely.
+    If you are not sure about something, say so instead of guessing.
+  max_tokens: 512
+  temperature: 0.7
+  top_p: 0.95
+  max_history_turns: 12
+  max_history_chars: 12000
+
+server:
+  host: 127.0.0.1   # loopback only; do not expose an unauthenticated LLM
+  port: 8000
+  serve_ui: true
+
+log_level: INFO
+log_json: false

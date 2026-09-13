@@ -1,0 +1,24 @@
+# Point Kumaru at any server speaking the OpenAI chat-completions API:
+# Ollama, llama.cpp's llama-server, LM Studio, vLLM, or OpenAI itself.
+#
+# Ollama:      base_url http://localhost:11434/v1, model llama3.1:8b
+# llama-server base_url http://localhost:8080/v1
+# vLLM:        base_url http://localhost:8000/v1
+#
+# Secrets are never stored here: the key is read from the environment
+# variable named by api_key_env.
+
+backend:
+  name: openai_compat
+  model: llama3.1:8b
+  base_url: http://localhost:11434/v1
+  api_key_env: KUMARU_API_KEY
+  timeout_s: 120
+
+agent:
+  max_tokens: 1024
+  temperature: 0.7
+
+server:
+  host: 127.0.0.1
+  port: 8000
