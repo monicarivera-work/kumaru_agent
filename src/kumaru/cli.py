@@ -37,7 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
     # Common flags live on a parent parser so they are accepted both before
     # and after the subcommand: `kumaru -c x.yaml serve` and
     # `kumaru serve -c x.yaml` both work, which is what people actually type.
-    common = argparse.ArgumentParser(add_help=False)
+    #
+    # argparse.SUPPRESS is essential here: without it the subparser would write
+    # its own `None` default over a value already parsed before the subcommand,
+    # so `kumaru --model m config` would silently lose the model.
+    common = argparse.ArgumentParser(add_help=False, argument_default=argparse.SUPPRESS)
     common.add_argument(
         "-c", "--config", help="path to a YAML config file (see configs/)"
     )
@@ -78,13 +82,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _config_from_args(args: argparse.Namespace) -> KumaruConfig:
-    config = load_config(args.config)
+    # Flags use argparse.SUPPRESS, so an unset flag is an *absent* attribute.
+    config = load_config(getattr(args, "config", None))
     # CLI flags sit above env vars: they are the most explicit signal.
-    if args.backend:
+    if getattr(args, "backend", None):
         config.backend.name = args.backend
-    if args.model:
+    if getattr(args, "model", None):
         config.backend.model = args.model
-    if args.log_level:
+    if getattr(args, "log_level", None):
         config.log_level = args.log_level
     if getattr(args, "host", None):
         config.server.host = args.host
