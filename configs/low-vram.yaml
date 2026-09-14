@@ -1,0 +1,19 @@
+# 6-8 GB of VRAM: keep a quantised model mostly on the GPU.
+#
+# Tuning loop: raise gpu_layers until loading fails or the machine swaps,
+# then drop back by 4. Lower context_length first if you hit OOM - KV cache
+# grows linearly with it.
+
+backend:
+  name: llamacpp
+  model: models/qwen2.5-7b-instruct-q4_k_m.gguf
+  context_length: 4096
+  gpu_layers: 20
+
+agent:
+  max_tokens: 512
+  temperature: 0.7
+
+server:
+  host: 127.0.0.1
+  port: 8000

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kumaru</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="logo" aria-hidden="true">K</span>
+          <h1>Kumaru</h1>
+        </div>
+
+        <div class="status" id="status" role="status" aria-live="polite">
+          <span class="dot" id="status-dot"></span>
+          <span id="status-text">connecting...</span>
+        </div>
+
+        <div class="actions">
+          <button id="theme-btn" class="ghost" type="button" title="Toggle light / dark">
+            Theme
+          </button>
+          <button id="clear-btn" class="ghost" type="button" title="Clear this conversation">
+            Clear
+          </button>
+        </div>
+      </header>
+
+      <main id="messages" class="messages" aria-live="polite">
+        <div class="empty" id="empty-state">
+          <h2>Ask Kumaru something</h2>
+          <p>
+            Everything runs on your machine. Swap the model by changing the
+            backend in your config file - this page does not need to change.
+          </p>
+          <div class="suggestions">
+            <button class="suggestion" type="button">
+              Explain the difference between a process and a thread.
+            </button>
+            <button class="suggestion" type="button">
+              Write a Python function that merges two sorted lists.
+            </button>
+            <button class="suggestion" type="button">
+              What does the gpu_layers setting do?
+            </button>
+          </div>
+        </div>
+      </main>
+
+      <footer class="composer">
+        <form id="chat-form">
+          <textarea
+            id="input"
+            rows="1"
+            placeholder="Send a message  (Enter to send, Shift+Enter for a new line)"
+            autocomplete="off"
+            autofocus
+          ></textarea>
+          <button id="send-btn" type="submit" title="Send">Send</button>
+          <button id="stop-btn" type="button" class="stop hidden" title="Stop generating">
+            Stop
+          </button>
+        </form>
+        <div class="meta">
+          <span id="usage"></span>
+          <span id="hint"></span>
+        </div>
+      </footer>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

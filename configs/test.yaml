@@ -1,0 +1,17 @@
+# Deterministic settings for tests and CI: no weights, no network, no sleep.
+
+backend:
+  name: echo
+
+agent:
+  system_prompt: "You are Kumaru (test mode)."
+  max_tokens: 64
+  temperature: 0.0
+  max_history_turns: 4
+  max_history_chars: 2000
+
+server:
+  host: 127.0.0.1
+  port: 8765
+
+log_level: WARNING
