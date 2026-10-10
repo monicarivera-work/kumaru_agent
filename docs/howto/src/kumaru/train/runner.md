@@ -101,10 +101,10 @@ If the new task needs a different data file, update the `data_file` selection so
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `Training data not found` | `data.train_file`/`data.text_file` path is wrong relative to current directory | Run from repo root or update the YAML path. |
-| `PyTorch is not installed` | Training extra missing | Install `pip install "kumaru[train]"`. |
+| `PyTorch is not installed` | Training extra missing | `.\scripts\setup.ps1 -Gpu`; elsewhere `pip install -e ".[train]"` in the Kumaru folder. The hint (`install_command('train')`) says the same. |
 | Warning: no CUDA device visible | CPU-only PyTorch or driver/CUDA issue | Run `kumaru info`; install CUDA-enabled PyTorch. |
 | Warning: bf16 requested but unsupported | GPU or PyTorch build lacks bf16 | Set `optim.bf16: false`; for LoRA consider `optim.fp16: true`. |
-| `load_in_4bit requires bitsandbytes` | Quantization dependency missing | Install `pip install "kumaru[quant]"` or set `load_in_4bit: false`. |
+| `load_in_4bit requires bitsandbytes` | Quantization dependency missing | `.\scripts\setup.ps1 -Quant`, or `pip install -e ".[quant]"` in the Kumaru folder (`install_command('quant')`); or set `load_in_4bit: false`. |
 | `Unknown training task` | YAML `task` not implemented | Use `lora` or `pretrain`, or add a dispatch branch. |
 
 ## Related files

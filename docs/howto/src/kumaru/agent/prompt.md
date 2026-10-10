@@ -22,7 +22,7 @@ The system prompt is the fastest way to change answer behavior without fine-tuni
 | Name | Signature | What it's for |
 |---|---|---|
 | `QUALITY_DIRECTIVES` | `str` | Shared behavioral guardrails appended to every system prompt. |
-| `build_system_prompt` | `build_system_prompt(config: AgentConfig, *, tool_descriptions: Sequence[str] = (), extra_context: str | None = None, include_date: bool = True) -> str` | Builds the complete system prompt string for a request. |
+| `build_system_prompt` | `build_system_prompt(config: AgentConfig, *, tool_descriptions: Sequence[str] = (), extra_context: str \| None = None, include_date: bool = True) -> str` | Builds the complete system prompt string for a request. |
 | `ensure_system_message` | `ensure_system_message(messages: Sequence[Message], system_prompt: str) -> list[Message]` | Returns a new list with exactly one merged system message at index 0. |
 
 ## How to use it

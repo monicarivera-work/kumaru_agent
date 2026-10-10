@@ -21,7 +21,7 @@ Without this package boundary, callers would import implementation modules direc
 
 | Name | Signature | What it's for |
 |---|---|---|
-| `ChatAgent` | `class ChatAgent(backend: Backend, config: KumaruConfig)` | Orchestrates one chat turn by preparing messages, calling a backend, and reporting configuration. Re-exported from `kumaru.agent.chat`. |
+| `ChatAgent` | `class ChatAgent(backend: Backend, config: KumaruConfig)` | Orchestrates one chat turn: `prepare` builds the system prompt and fits history to the context budget, `resolve_params` merges generation settings (since v0.2 including the `thinking_mode` preset), and `complete`/`stream` call the backend. `describe` reports configuration. Re-exported from `kumaru.agent.chat`; see [chat.md](chat.md). |
 | `__all__` | `list[str] = ["ChatAgent"]` | Defines the intentional public import surface for `from kumaru.agent import *`. |
 
 ## How to use it
@@ -29,18 +29,25 @@ Without this package boundary, callers would import implementation modules direc
 ### Import the agent from the package boundary
 
 ```python
+import asyncio
+
 from kumaru.agent import ChatAgent
 from kumaru.core.config import load_config
 from kumaru.core.registry import BACKENDS
 from kumaru.core.types import Message
 
-config = load_config("test")
-backend = BACKENDS.create(config.backend.name, config.backend)
-await backend.load()
 
-agent = ChatAgent(backend, config)
-result = await agent.complete([Message.user("Say hello in five words.")])
-print(result.message.content)
+async def main() -> None:
+    config = load_config("test")
+    backend = BACKENDS.create(config.backend.name, config.backend)
+    await backend.load()
+
+    agent = ChatAgent(backend, config)
+    result = await agent.complete([Message.user("Say hello in five words.")])
+    print(result.message.content)
+
+
+asyncio.run(main())
 ```
 
 ### Keep server code independent of submodules

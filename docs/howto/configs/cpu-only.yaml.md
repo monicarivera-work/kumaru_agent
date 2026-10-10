@@ -32,10 +32,10 @@ Use it on CPU-only desktops, laptops, CI-like smoke environments where `echo` is
 
 ## How to use it
 
-Prerequisites:
+Prerequisites, in the Kumaru folder (the `Requires:` line of `configs\cpu-only.yaml`):
 
 ```powershell
-pip install "kumaru[gguf]"
+.\scripts\setup.ps1 -Gguf    # llama-cpp-python; or: pip install -e ".[gguf]"
 ```
 
 Run:
@@ -68,7 +68,7 @@ kumaru config -c cpu-only
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `llama_cpp` import error | GGUF extra is missing. | Install `pip install "kumaru[gguf]"`. |
+| `Optional dependency 'llama-cpp-python' is not installed.` | The `gguf` extra is missing. | `.\scripts\setup.ps1 -Gguf`, or `pip install -e ".[gguf]"` in the Kumaru folder. |
 | Model download cannot find a file | `gguf_filename` pattern does not match repo files. | Choose a model repo with matching GGUF files or change the pattern. |
 | Host becomes unresponsive | llama.cpp uses all cores. | Set `backend.n_threads` lower. |
 | Very slow replies | CPU inference is inherently slow or model is too large. | Use a smaller model or GPU/remote backend. |

@@ -25,7 +25,7 @@
 # Multi-GPU (same loop, no code change):
 #   torchrun --nproc_per_node=4 -m kumaru.train.pretrain_nano configs/train/pretrain-nano.yaml
 #
-# Requires: pip install "kumaru[train]"
+# Requires: .\scripts\setup.ps1 -Gpu   (elsewhere: pip install -e ".[train]")
 
 task: pretrain
 output_dir: runs/nano

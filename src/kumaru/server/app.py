@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import mimetypes
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -32,12 +33,18 @@ from kumaru import __version__
 from kumaru.agent.chat import ChatAgent
 from kumaru.backends.base import Backend
 from kumaru.core.config import REPO_ROOT, KumaruConfig, load_config
-from kumaru.core.errors import KumaruError
+from kumaru.core.errors import BackendError, KumaruError
 from kumaru.core.logging import get_logger, setup_logging
 from kumaru.core.registry import BACKENDS
 
 logger = get_logger(__name__)
 UI_DIR = REPO_ROOT / "ui"
+
+# Python takes MIME types from the Windows registry, where some installers map
+# .js or .css to text/plain, and browsers refuse a stylesheet served that way.
+# Pin the types the UI depends on so it loads the same on every machine.
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
 
 
 class Metrics:
@@ -124,12 +131,12 @@ class AppState:
                 await asyncio.wait_for(asyncio.shield(self._load_task), timeout=timeout_s)
 
         if self.load_error:
-            raise KumaruError(
+            raise BackendError(
                 f"Backend failed to load: {self.load_error}",
                 hint="Check the server logs, or try `--backend echo` to verify the rest of the stack.",
             )
         if self.agent is None:
-            raise KumaruError("Backend is still loading.", hint="Retry in a few seconds.")
+            raise BackendError("Backend is still loading.", hint="Retry in a few seconds.")
         return self.agent
 
     async def swap_backend(self, **overrides: Any) -> None:
@@ -152,7 +159,7 @@ class AppState:
 
         await self._load()
         if self.load_error:
-            raise KumaruError(f"Failed to load new backend: {self.load_error}")
+            raise BackendError(f"Failed to load new backend: {self.load_error}")
 
     async def shutdown(self) -> None:
         if self._load_task is not None:

@@ -55,10 +55,10 @@ Use it for mechanism tests and education on one GPU. The comments note that prop
 
 ## How to use it
 
-Prerequisites:
+Prerequisites, in the Kumaru folder:
 
 ```powershell
-pip install "kumaru[train]"
+.\scripts\setup.ps1 -Gpu    # elsewhere: pip install -e ".[train]"
 ```
 
 Validate:

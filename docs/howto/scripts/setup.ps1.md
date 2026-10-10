@@ -8,27 +8,27 @@
 
 ## What it does
 
-Creates a virtual environment in the repo root, installs Kumaru in editable mode, and — on request — installs PyTorch with the correct CUDA wheel plus the training, quantization, and GGUF extras. It finishes by running `kumaru info` so you see immediately whether the GPU was detected.
+Creates a virtual environment in the repo root, installs Kumaru in editable mode together with its test tools (the `dev` extra: pytest, ruff, mypy), and — on request — installs PyTorch with the correct CUDA wheel plus the training, quantization, and GGUF extras. It finishes by running `kumaru info` so you see immediately whether the GPU was detected.
 
 ## Why it exists
 
 PyTorch cannot be a normal dependency. The correct wheel depends on your CUDA version, and pip has no way to determine that. Installing plain `pip install torch` on Windows commonly yields a CPU-only build, which then silently runs your 7B model at 3 tokens/second with no error message. This script makes the CUDA index URL explicit and verifies the outcome, converting a silent misconfiguration into a visible one.
 
-It also keeps the base install genuinely light. `pip install -e .` pulls only pure-Python packages and finishes in seconds, so you can prove the stack works before committing to a multi-gigabyte download.
+It also keeps the base install genuinely light. `pip install -e ".[dev]"` pulls only pure-Python packages and prebuilt wheels, needs no compiler, and finished in 95 seconds in a fresh virtual environment with an empty pip cache, so you can prove the stack works before committing to a multi-gigabyte download. The test tools are included because `scripts/verify.ps1`, the next step, runs the test suite.
 
 ## Parameters
 
 | Parameter | Type | Default | Effect |
 |---|---|---|---|
-| `-Gpu` | switch | off | Installs PyTorch with CUDA plus `kumaru[train]` (transformers, peft, accelerate, datasets) |
-| `-Quant` | switch | off | Installs `kumaru[quant]` — bitsandbytes, required for `load_in_4bit` and QLoRA |
-| `-Gguf` | switch | off | Installs `kumaru[gguf]` — llama-cpp-python, for the GGUF backend |
+| `-Gpu` | switch | off | Installs PyTorch from the CUDA index named by `-CudaVersion`, then runs `pip install -e ".[train]"` (transformers, peft, accelerate, datasets) |
+| `-Quant` | switch | off | Runs `pip install -e ".[quant]"`: bitsandbytes, required for `load_in_4bit` and QLoRA |
+| `-Gguf` | switch | off | Runs `pip install -e ".[gguf]"`: llama-cpp-python, for the in-process `llamacpp` backend (`llamacpp_server` needs no Python extra) |
 | `-CudaVersion` | string | `cu126` | Which PyTorch CUDA index to use |
 
 ## How to use it
 
 ```powershell
-# Minimal: server, UI, CLI. No GPU deps. ~20 seconds.
+# Minimal: server, UI, CLI and test tools. No GPU deps. About 1.5 minutes.
 .\scripts\setup.ps1
 
 # Standard for an NVIDIA GPU: adds PyTorch CUDA + the training stack.
@@ -66,7 +66,7 @@ The `CUDA Version` in the top-right is the **maximum** your driver supports. Pic
 kumaru info
 ```
 
-You want a `cuda:0` row naming your GPU with its VRAM and `bf16=yes`. If it says `unavailable (CPU only)` while you have an NVIDIA card, the CPU wheel got installed — re-run with `-Gpu`.
+You want a `cuda:0` row naming your GPU with its VRAM and `bf16=yes`. If it says `unavailable (CPU only)` while you have an NVIDIA card, a CPU-only torch got installed (for example by a plain `pip install -e ".[train]"` before `-Gpu`). Re-running `-Gpu` alone keeps it, because pip sees torch is already installed. Run `.\.venv\Scripts\python.exe -m pip uninstall -y torch` first, then `.\scripts\setup.ps1 -Gpu`.
 
 ## Failure modes
 
@@ -75,7 +75,7 @@ You want a `cuda:0` row naming your GPU with its VRAM and `bf16=yes`. If it says
 | `python : The term 'python' is not recognized` | Python not on PATH | Install Python 3.10+ and tick "Add to PATH" |
 | `running scripts is disabled on this system` | PowerShell execution policy | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
 | `[WinError 32] ... kumaru.exe ... used by another process` | A `kumaru serve` is running | Stop it, then re-run |
-| Install succeeds but `cuda: unavailable` | CPU-only torch wheel | Re-run with `-Gpu`, or check `-CudaVersion` against your driver |
+| Install succeeds but `cuda: unavailable` | CPU-only torch wheel, or a `-CudaVersion` newer than your driver supports | `pip uninstall -y torch`, then re-run with `-Gpu` (pip never replaces an installed torch on its own); check `-CudaVersion` against your driver |
 | `bitsandbytes` fails to build | No prebuilt wheel for your platform | Skip `-Quant`; set `load_in_4bit: false` and use bf16 |
 | Very slow download | PyTorch CUDA wheels are ~2.5 GB | Expected; it happens once |
 

@@ -20,7 +20,8 @@ for years without rotting.
 Third-party extension
 ---------------------
 `load_entry_points()` discovers components installed by *other* pip packages
-that declare the `kumaru.backends` / `kumaru.tools` entry-point group. That means
+that declare the `kumaru.backends` / `kumaru.tools` / `kumaru.benchmarks`
+entry-point group. That means
 someone can `pip install kumaru-mamba` and the backend shows up in your UI's
 dropdown with no change to this repository.
 """
@@ -177,3 +178,18 @@ BACKENDS.register_lazy(
     "kumaru.backends.openai_compat:OpenAICompatBackend",
     aliases=("ollama", "vllm", "remote"),
 )
+BACKENDS.register_lazy(
+    "llamacpp_server",
+    "kumaru.backends.llamacpp_server:LlamaServerBackend",
+    aliases=("llama-server", "llama_server"),
+)
+
+# Benchmarks for `kumaru bench`. Lazy for the same reason: listing them must not
+# import `datasets` (seconds) or download anything.
+BENCHMARKS: Registry[Any] = Registry("benchmark", entry_point_group="kumaru.benchmarks")
+
+BENCHMARKS.register_lazy("gsm8k", "kumaru.eval.benchmarks.gsm8k:GSM8K")
+BENCHMARKS.register_lazy("mmlu_pro", "kumaru.eval.benchmarks.mmlu_pro:MMLUPro", aliases=("mmlu-pro",))
+BENCHMARKS.register_lazy("ifeval", "kumaru.eval.benchmarks.ifeval:IFEval")
+BENCHMARKS.register_lazy("humaneval", "kumaru.eval.benchmarks.humaneval:HumanEval")
+BENCHMARKS.register_lazy("golden", "kumaru.eval.benchmarks.golden:GoldenSet")

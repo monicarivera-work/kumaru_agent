@@ -203,7 +203,7 @@ Then pass `config.optim.min_lr_ratio` into `lr_at_step()` in `pretrain_nano.py`.
 | `Training config not found` | Wrong config path | Run from repo root or pass an absolute path. |
 | Eval loss missing during LoRA | No eval file, split disabled, or fewer than 20 rows | Provide `data.eval_file` or enough rows. |
 | All examples dropped | `data.max_seq_length` too small | Increase it or shorten examples. |
-| 7B run requires bitsandbytes | 4-bit or paged optimizer without quant deps | Install `kumaru[quant]` or use `adamw_torch` and no 4-bit. |
+| 7B run requires bitsandbytes | 4-bit or paged optimizer without quant deps | Add the `quant` extra (`.\scripts\setup.ps1 -Quant`, or `pip install -e ".[quant]"` in the Kumaru folder), or use `adamw_torch` and no 4-bit. |
 | bf16 warning in preflight | GPU/PyTorch lacks bf16 | Set `optim.bf16: false`; consider fp16 for LoRA. |
 
 ## Related files

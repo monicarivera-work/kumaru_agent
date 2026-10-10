@@ -1,8 +1,9 @@
 # Kumaru default configuration.
 #
-# This file documents every knob. It is also the file `load_config()` falls back
-# to conceptually — the values here match the field defaults in
-# src/kumaru/core/config.py, so you can read either one and get the same answer.
+# This file documents every knob. Kumaru reads it only when you pass
+# `-c default`; with no -c it uses the field defaults in
+# src/kumaru/core/config.py, which hold the same values, so either file answers
+# "what is the default?".
 #
 # Precedence, lowest to highest:
 #   field defaults  <  this YAML  <  KUMARU_* env vars  <  CLI flags
@@ -11,10 +12,12 @@
 
 backend:
   # Which engine loads the model.
-  #   transformers   local GPU/CPU via Hugging Face        (default; best for dev)
-  #   llamacpp       quantized GGUF, low VRAM or CPU-only
-  #   openai_compat  remote server: vLLM, Ollama, TGI      (best for throughput)
-  #   echo           no model at all                       (tests, install checks)
+  #   transformers     local GPU/CPU via Hugging Face      (default; best for dev)
+  #   llamacpp_server  managed llama.cpp server: GGUF, newest architectures,
+  #                    thinking models (the qwen36 profile; best local quality)
+  #   llamacpp         quantized GGUF in-process, low VRAM or CPU-only
+  #   openai_compat    remote server: vLLM, Ollama, TGI    (best for throughput)
+  #   echo             no model at all                     (tests, install checks)
   name: transformers
 
   # Hugging Face repo id, or a local directory containing the weights.
@@ -24,7 +27,7 @@ backend:
   dtype: auto         # auto | bfloat16 | float16 | float32
 
   # 4-bit NF4 quantization. Roughly quarters VRAM use and nearly doubles
-  # single-stream speed, at a small quality cost. Requires: pip install kumaru[quant]
+  # single-stream speed, at a small quality cost. Requires: .\scripts\setup.ps1 -Quant
   load_in_4bit: false
   load_in_8bit: false
 
@@ -39,15 +42,43 @@ backend:
   trust_remote_code: false
   attn_implementation: null   # e.g. flash_attention_2 when installed
 
-  # -- openai_compat only --
+  # -- openai_compat; llamacpp_server uses base_url to attach to a server you started --
   base_url: null              # http://127.0.0.1:8000/v1 for vLLM, :11434/v1 for Ollama
   api_key: null
   timeout_s: 300
 
-  # -- llamacpp only --
+  # -- llamacpp and llamacpp_server --
   model_path: null            # absolute path to a .gguf file
-  n_gpu_layers: -1            # -1 offloads as many layers as fit in VRAM
+  # -1: llamacpp_server lets llama.cpp fit as many layers as free VRAM allows;
+  #     llamacpp offloads every layer and fails to load if they do not fit.
+  n_gpu_layers: -1            # 0 = CPU only; N = exactly N layers on the GPU
   n_threads: null
+
+  # -- llamacpp_server only --
+  # Where "org/repo:QUANT" model specs are looked up, and downloaded to if
+  # missing. Point it at your biggest fast disk:
+  #   setx KUMARU_BACKEND__MODELS_DIR D:\kumaru\models
+  models_dir: ~/.cache/kumaru/models
+  llama_server:
+    binary: null              # null = tools\llama.cpp\ (get-llama-server.ps1), then PATH
+    host: 127.0.0.1
+    port: null                # null = any free port
+    parallel: 4               # concurrent requests, batched into one forward pass
+    kv_unified: true          # one shared KV pool: a single chat can use the whole window
+    flash_attn: "on"          # on | off | auto
+    cache_type_k: null        # null = f16 | q8_0 halves KV memory | q4_0
+    cache_type_v: null
+    # Mixture-of-Experts models only: keep the expert weights of the first N
+    # layers in system RAM. Fits a big MoE on a smaller GPU, or next to a game.
+    n_cpu_moe: null
+    batch_size: null          # -b,  logical prompt batch (null = llama.cpp default)
+    ubatch_size: null         # -ub, physical prompt batch
+    # Injected when a thinking budget runs out, so the model answers instead of
+    # stopping mid-thought.
+    reasoning_budget_message: "\n\nI have used my thinking budget, so I will now give my best final answer.\n"
+    startup_timeout_s: 900    # load-to-healthy limit; a download finishes before it starts
+    log_file: null            # null = runs\logs\llama-server-<port>.log
+    extra_args: []            # appended verbatim to the llama-server command line
 
 generation:
   max_tokens: 1024
@@ -55,8 +86,27 @@ generation:
   top_p: 0.95                 # nucleus sampling
   top_k: 50
   repetition_penalty: 1.05    # >1 discourages loops; above ~1.2 degrades quality
+  # null = not sent; the engine uses its own default.
+  min_p: null                 # drop tokens below min_p x p(most likely token)
+  presence_penalty: null      # flat penalty on tokens already in the output
   stop: []
   seed: null                  # set for reproducible sampling
+  # Reasoning models only (Qwen3.x, ...): think privately before answering.
+  thinking: null              # null = model default | true | false
+  thinking_budget: null       # max thinking tokens, then answer; null = unlimited
+
+# Sampling preset applied only when thinking is on; unset fields fall through
+# to `generation`. Precedence: generation < thinking_mode < per-request values.
+# See configs/qwen36.yaml for a filled-in example (the vendor's two presets).
+thinking_mode:
+  max_tokens: null
+  temperature: null
+  top_p: null
+  top_k: null
+  min_p: null
+  presence_penalty: null
+  repetition_penalty: null
+  thinking_budget: null
 
 agent:
   system_prompt: >-
@@ -75,7 +125,7 @@ agent:
   # none            never trim; raise when it does not fit
   memory_policy: sliding_window
 
-  enabled_tools: []           # v0.1 is chat-only; see src/kumaru/agent/tools.py
+  enabled_tools: []           # chat-only so far; see src/kumaru/agent/tools.py
   max_tool_iterations: 4
 
 server:
@@ -88,7 +138,7 @@ server:
   api_key: null               # when set, clients must send Authorization: Bearer <key>
 
 telemetry:
-  log_level: INFO             # DEBUG | INFO | WARNING | ERROR
+  log_level: INFO             # DEBUG | INFO | WARNING | ERROR | CRITICAL
   log_format: console         # console | json (use json when aggregating logs)
   metrics_enabled: true
   trace_file: null            # JSONL of every request, for offline analysis

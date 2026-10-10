@@ -60,9 +60,34 @@ class ChatCompletionRequest(BaseModel):
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, ge=0.0, le=1.0)
     top_k: int | None = Field(default=None, ge=0)
+    min_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
     repetition_penalty: float | None = Field(default=None, ge=0.5, le=2.0)
     stop: list[str] | str | None = None
     seed: int | None = None
+
+    # Reasoning ("thinking") controls. Three spellings are accepted because
+    # clients differ: Kumaru's own `thinking`; vLLM/SGLang's
+    # `chat_template_kwargs.enable_thinking`; OpenAI's `reasoning_effort`
+    # ("none" turns thinking off, any other value turns it on).
+    thinking: bool | None = None
+    thinking_budget: int | None = Field(default=None, ge=0)
+    chat_template_kwargs: dict[str, Any] | None = None
+    reasoning_effort: str | None = None
+
+    def resolved_thinking(self) -> bool | None:
+        """The client's thinking choice, or None to use the server default."""
+        if self.thinking is not None:
+            return self.thinking
+        enabled = (self.chat_template_kwargs or {}).get("enable_thinking")
+        if isinstance(enabled, str):  # some clients send "false", and bool("false") is True
+            return enabled.strip().lower() in {"true", "1", "yes", "on"}
+        if enabled is not None:
+            return bool(enabled)
+        effort = (self.reasoning_effort or "").strip().lower()
+        if effort:
+            return effort != "none"
+        return None
 
     def generation_overrides(self) -> dict[str, Any]:
         stop = [self.stop] if isinstance(self.stop, str) else self.stop
@@ -71,9 +96,13 @@ class ChatCompletionRequest(BaseModel):
             "temperature": self.temperature,
             "top_p": self.top_p,
             "top_k": self.top_k,
+            "min_p": self.min_p,
+            "presence_penalty": self.presence_penalty,
             "repetition_penalty": self.repetition_penalty,
             "stop": stop,
             "seed": self.seed,
+            "thinking": self.resolved_thinking(),
+            "thinking_budget": self.thinking_budget,
         }
 
     def to_domain(self) -> list[Message]:
@@ -107,16 +136,14 @@ class ChatCompletionResponse(BaseModel):
 
     @classmethod
     def from_result(cls, result: ChatResult) -> ChatCompletionResponse:
+        message: dict[str, Any] = {"role": "assistant", "content": result.message.content}
+        if result.message.reasoning:
+            message["reasoning_content"] = result.message.reasoning
         return cls(
             id=result.id,
             created=result.created,
             model=result.model,
-            choices=[
-                ChoiceOut(
-                    message={"role": "assistant", "content": result.message.content},
-                    finish_reason=result.finish_reason,
-                )
-            ],
+            choices=[ChoiceOut(message=message, finish_reason=result.finish_reason)],
             usage=UsageOut(
                 prompt_tokens=result.usage.prompt_tokens,
                 completion_tokens=result.usage.completion_tokens,
@@ -139,27 +166,30 @@ def sse_chunk(
     completion_id: str,
     model: str,
     delta: str | None = None,
+    reasoning: str | None = None,
     role: str | None = None,
     finish_reason: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build one `chat.completion.chunk` event body."""
+    """Build one `chat.completion.chunk` event body.
+
+    Thinking text travels in `delta.reasoning_content`, the field vLLM,
+    llama.cpp and DeepSeek use; clients that do not know it ignore it.
+    """
+    if role:
+        body: dict[str, Any] = {"role": role}
+    else:
+        body = {}
+        if reasoning:
+            body["reasoning_content"] = reasoning
+        if delta is not None:
+            body["content"] = delta
     payload: dict[str, Any] = {
         "id": completion_id,
         "object": "chat.completion.chunk",
         "created": int(time.time()),
         "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "delta": (
-                    {"role": role}
-                    if role
-                    else ({"content": delta} if delta is not None else {})
-                ),
-                "finish_reason": finish_reason,
-            }
-        ],
+        "choices": [{"index": 0, "delta": body, "finish_reason": finish_reason}],
     }
     if extra:
         payload["kumaru"] = extra

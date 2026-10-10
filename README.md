@@ -14,10 +14,10 @@ Chat today on one GPU. Fine-tune tonight. Serve a cluster later — without rewr
 
 Kumaru is a complete, running LLM system you own end to end:
 
-- **Chat** — a web UI and an OpenAI-compatible API, streaming, running entirely on your machine.
+- **Chat** — a web UI and an OpenAI-compatible API, streaming, running entirely on your machine. On a 24 GB GPU the default model is Qwen3.6-35B-A3B, with an optional **Think** mode for hard problems.
 - **Train** — LoRA/QLoRA fine-tuning on a single consumer GPU, plus a from-scratch transformer trainer that scales to multi-GPU.
-- **Measure** — an eval harness, so "is it better?" has a number attached.
-- **Extend** — a plugin registry for backends and tools; new capabilities are additive, never surgical.
+- **Measure** — public benchmarks (`kumaru bench`) with confidence intervals and significance tests, plus a fast eval harness, so "is it better?" has a number attached.
+- **Extend** — a plugin registry for backends, tools and benchmarks; new capabilities are additive, never surgical.
 
 Every source file has a companion how-to in [`docs/howto/`](docs/howto/) explaining what it does, why it exists, how to operate it, how to extend it, and how it fails.
 
@@ -30,7 +30,7 @@ It does not train a frontier model from scratch. That costs millions of GPU-hour
 ## Sixty-second start
 
 ```powershell
-.\scripts\setup.ps1           # creates .venv, installs base package
+.\scripts\setup.ps1           # creates .venv, installs the package and its test tools
 .\.venv\Scripts\Activate.ps1
 
 kumaru serve -c test          # no model, no download — proves the install works
@@ -38,7 +38,14 @@ kumaru serve -c test          # no model, no download — proves the install wor
 
 Open **http://127.0.0.1:8080**. You should get a streaming reply immediately.
 
-Now the real thing:
+Now the real thing, on an NVIDIA GPU with 24 GB:
+
+```powershell
+.\scripts\get-llama-server.ps1    # llama.cpp's inference server, once; no PyTorch needed
+kumaru serve -c qwen36            # Qwen3.6-35B-A3B; downloads 17.7 GB on first run
+```
+
+For fine-tuning, or a smaller GPU, add PyTorch:
 
 ```powershell
 .\scripts\setup.ps1 -Gpu -Quant   # PyTorch CUDA + training stack
@@ -56,7 +63,7 @@ Full walkthrough with troubleshooting: [`docs/QUICKSTART.md`](docs/QUICKSTART.md
 
 ---
 
-## The six commands
+## The seven commands
 
 | Command | What it does |
 |---|---|
@@ -66,6 +73,7 @@ Full walkthrough with troubleshooting: [`docs/QUICKSTART.md`](docs/QUICKSTART.md
 | `kumaru config` | Print the fully merged configuration — run this when something ignores your settings |
 | `kumaru train` | LoRA fine-tune or from-scratch pretrain |
 | `kumaru eval` | Latency, throughput, and quality regression checks |
+| `kumaru bench` | Public benchmarks with error bars; compares two runs with significance tests |
 
 ---
 
@@ -73,7 +81,8 @@ Full walkthrough with troubleshooting: [`docs/QUICKSTART.md`](docs/QUICKSTART.md
 
 | Your machine | Profile | Command |
 |---|---|---|
-| 24 GB GPU (3090/4090) | `local-gpu` | `kumaru serve -c local-gpu` |
+| 24 GB GPU (3090/4090) | `qwen36` (**recommended**) | `kumaru serve -c qwen36` |
+| 24 GB GPU, fine-tuning | `local-gpu` | `kumaru serve -c local-gpu` |
 | 8–12 GB GPU | `low-vram` | `kumaru serve -c low-vram` |
 | No GPU | `cpu-only` | `kumaru serve -c cpu-only` |
 | Many users / a real server | `vllm` | `kumaru serve -c vllm` |
@@ -95,6 +104,7 @@ flowchart TD
     AG["<b>Agent</b><br/><i>agent/</i><br/>prompt · memory budget · tools"] --> BE
 
     BE{"<b>Backend</b><br/><i>backends/</i><br/>one interface"}
+    BE --> S["llama-server<br/><i>Qwen3.6, thinking, batching</i>"]
     BE --> T["transformers<br/><i>local GPU</i>"]
     BE --> L["llama.cpp<br/><i>GGUF, low VRAM</i>"]
     BE --> V["openai_compat<br/><i>vLLM, Ollama, remote</i>"]
@@ -121,6 +131,7 @@ Start here, in this order:
 | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Get it running on my machine, right now |
 | [`GUIDE.md`](GUIDE.md) | How do I actually *use* this as a tool, day to day |
 | [`docs/TRAINING.md`](docs/TRAINING.md) | How do I train it, what does it cost, what should I expect |
+| [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | How good is it really, and did my change help? Measured results and method |
 | [`docs/SCALABILITY.md`](docs/SCALABILITY.md) | Where are the ceilings, and what do I do at each one |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Why is it built this way |
 | [`docs/howto/`](docs/howto/) | One page per source file — API, usage, extension points, failure modes |
@@ -136,18 +147,20 @@ src/kumaru/
   agent/       prompt assembly, memory budgeting, tool seam
   server/      FastAPI, OpenAI-compatible, SSE streaming
   train/       LoRA fine-tuning + from-scratch transformer
-  eval/        speed and quality measurement
+  eval/        speed and quality measurement; public benchmarks (eval/benchmarks/)
 ui/            zero-build web client (3 files, no npm)
 configs/       hardware profiles and training recipes, heavily commented
-scripts/       setup.ps1 (install) and verify.ps1 (layered self-check)
+data/          sample training data and the golden benchmark questions
+scripts/       setup.ps1 (install), verify.ps1 (layered self-check),
+               get-llama-server.ps1 (inference engine), check_graders.py (grader proof)
 docs/howto/    a page for every source file
-tests/         pytest suite, runs with no GPU in ~3 seconds
+tests/         pytest suite (373 tests), runs with no GPU in under a minute
 ```
 
 ## Requirements
 
 - Python 3.10+
-- Optional: an NVIDIA GPU. 8 GB gets you a quantized 7B; 24 GB gets you a comfortable 7B *and* QLoRA fine-tuning.
+- Optional: an NVIDIA GPU. 8 GB gets you a quantized 7B; 24 GB gets you Qwen3.6-35B-A3B, or a comfortable 7B *and* QLoRA fine-tuning.
 - No GPU is fine — use `-c cpu-only`.
 
 ## License

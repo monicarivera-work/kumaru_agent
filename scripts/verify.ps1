@@ -51,7 +51,7 @@ Check "environment" { & $kumaru info | Out-Host }
 
 # 2. Config resolution ------------------------------------------------------
 Check "config" {
-    foreach ($profile in @("default", "test", "local-gpu", "low-vram", "cpu-only", "vllm")) {
+    foreach ($profile in @("default", "test", "local-gpu", "low-vram", "cpu-only", "vllm", "qwen36", "qwen25-7b-gguf")) {
         & $kumaru config -c $profile *> $null
         if ($LASTEXITCODE -ne 0) { throw "profile '$profile' failed to load" }
     }
@@ -109,8 +109,41 @@ print(f"  healthz ok, completion ok, {frames} SSE frames, UI served")
     }
 }
 
-# 6. Real model on real hardware -------------------------------------------
+# 6. llama-server binary (optional) -----------------------------------------
+# The engine behind GGUF profiles such as qwen36. Found where Kumaru looks:
+# the copy get-llama-server.ps1 installs, then PATH. --version loads the binary
+# and its DLLs without a model or any GPU memory.
+$llamaServer = Join-Path $repo "tools\llama.cpp\llama-server.exe"
+if (-not (Test-Path $llamaServer)) {
+    $onPath = Get-Command llama-server -ErrorAction SilentlyContinue
+    $llamaServer = if ($onPath) { $onPath.Source } else { $null }
+}
+if ($llamaServer) {
+    Check "llama-server binary" {
+        $out = (& $llamaServer --version 2>&1) | Out-String
+        if ($LASTEXITCODE -ne 0) { throw "llama-server --version exited with $LASTEXITCODE" }
+        # "version: 0.6.0-dev (build 11541, commit ...)" today; "version: 4567 (abc123)" in older builds.
+        if ($out -match "\(build (\d+)" -or $out -match "version:\s*(\d+)\s*\(") {
+            Write-Host "   build b$($Matches[1]): $llamaServer"
+        }
+        else { throw "unexpected --version output: $($out.Trim())" }
+    }
+} else {
+    Write-Host "`n>> llama-server binary" -ForegroundColor Cyan
+    Write-Host "   not installed; skipped (.\scripts\get-llama-server.ps1 installs it)" -ForegroundColor DarkGray
+}
+
+# 7. Real model on real hardware -------------------------------------------
 if ($Full) {
+    if ($llamaServer) {
+        Check "llama-server sees the GPU" {
+            $devices = (& $llamaServer --list-devices 2>&1) | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "llama-server --list-devices exited with $LASTEXITCODE" }
+            $gpu = ($devices -split "`n") | Where-Object { $_ -match "CUDA\d+:" } | Select-Object -First 1
+            if (-not $gpu) { throw "no CUDA device listed; check nvidia-smi and get-llama-server.ps1 -Flavor" }
+            Write-Host "   $($gpu.Trim())"
+        }
+    }
     Check "training pipeline (dry run)" {
         & $kumaru train configs/train/lora-small.yaml --dry-run | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "training dry run failed" }

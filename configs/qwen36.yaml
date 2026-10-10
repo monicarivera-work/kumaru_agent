@@ -1,0 +1,83 @@
+# Profile: Qwen3.6-35B-A3B on one 24 GB GPU, served by llama.cpp.
+# Kumaru's "smart" profile, and the default recommendation for an RTX 3090/4090.
+#
+#   .\scripts\get-llama-server.ps1        # once: installs tools/llama.cpp/
+#   kumaru serve -c qwen36                # UI at http://127.0.0.1:8080
+#   kumaru chat  -c qwen36 --think -q "How many primes are below 100?"
+#
+# Why this model
+# --------------
+# A mixture-of-experts (MoE): 35B parameters in total, but a router picks only
+# 8 of 256 experts (+1 shared) per token, so ~3B parameters do the work for any
+# given token. Knowledge scales with *total* parameters; speed scales with
+# *active* ones. It answers like a large model at the speed of a small one
+# (~110 tok/s single-stream measured on a 3090).
+#
+# Why 131k context fits in 24 GB
+# ------------------------------
+# Only 10 of its 40 layers use classic attention (with a KV cache that grows
+# with context); the other 30 are Gated DeltaNet "linear attention" layers whose
+# state has a fixed size no matter how long the conversation gets.
+#   KV cache: 10 layers x 2 KV heads x 256 dim x 2 (K,V) x 2 bytes = 20 KiB/token
+#             x 131,072 tokens                                     =  2.5 GiB
+#   weights (UD-IQ4_XS: a 17.7 GB file, ~4 bits/param)             = 16.5 GiB
+#   compute buffers + DeltaNet state + CUDA context                = ~0.7 GiB
+#   llama-server alone, measured                                   = ~19.7 GiB
+# That leaves ~4 GiB of the card for Windows and whatever else is open.
+# (Qwen2.5-7B, a dense model 1/5 the size, needs 56 KiB/token of KV cache.)
+#
+# Smaller GPU, or sharing it with a game? Set llama_server.n_cpu_moe to keep
+# the expert weights of the first N layers in system RAM (~0.37 GiB of VRAM
+# freed per layer; e.g. 20 for 16 GB, 30 for 12 GB) and/or lower the context.
+# Never let VRAM overflow: Windows silently spills into shared system memory
+# and speed collapses (measured: ~110 -> 7 tok/s). Measured on a 3090 next to
+# World of Warcraft (4.2 GiB): 11.9 GiB VRAM, ~27 tok/s, no spill:
+#   $env:KUMARU_BACKEND__LLAMA_SERVER__N_CPU_MOE = '18'
+#   kumaru serve -c qwen36 --context 65536
+
+backend:
+  name: llamacpp_server
+  # "org/repo:QUANT": found under backend.models_dir, downloaded if missing.
+  # Point models_dir at a big disk: setx KUMARU_BACKEND__MODELS_DIR D:\kumaru\models
+  model: unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS
+  # Qwen advises >= 128k so long reasoning traces are never cut off.
+  max_context_length: 131072
+  llama_server:
+    parallel: 4          # 4 concurrent requests share one batched forward pass
+    kv_unified: true     # one KV pool, so a single chat can use the full window
+    flash_attn: "on"
+
+# Qwen's recommended "instruct" (non-thinking) preset, from the model card.
+generation:
+  thinking: false        # fast by default; the UI toggle / --think turns it on
+  max_tokens: 32768      # vendor recommendation; generation stops long before
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  min_p: 0.0             # must be explicit: llama.cpp's own default is 0.05
+  presence_penalty: 1.5  # curbs the repetition loops quantized models fall into
+  repetition_penalty: 1.0
+
+# Qwen's recommended thinking preset. Applied on top of `generation` only when
+# thinking is on (precedence: generation < thinking_mode < request).
+thinking_mode:
+  max_tokens: 32768
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 20
+  min_p: 0.0
+  presence_penalty: 1.5
+  repetition_penalty: 1.0
+
+agent:
+  max_history_tokens: 65536
+  memory_policy: sliding_window
+
+server:
+  host: 127.0.0.1
+  port: 8080
+  # More than `parallel` is fine: llama-server queues the extra requests.
+  max_concurrent_requests: 8
+
+telemetry:
+  log_level: INFO

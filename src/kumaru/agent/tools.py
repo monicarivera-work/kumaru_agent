@@ -1,8 +1,8 @@
 """The tool seam: how Kumaru grows from "chat" into "agent".
 
-Status in v0.1
---------------
-Deliberately **inert**. `agent.enabled_tools` is empty, so the chat path never
+Status
+------
+Deliberately **inert** (v0.1 and v0.2 are chat-only). `agent.enabled_tools` is empty, so the chat path never
 touches this module. The machinery exists now because retrofitting tool calling
 later means changing the message schema, the streaming protocol, and the agent
 loop all at once — whereas building the seam up front costs one file and makes

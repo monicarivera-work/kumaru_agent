@@ -41,12 +41,24 @@ class ChatAgent:
 
     # -- prompt assembly ----------------------------------------------------
 
-    def prepare(self, messages: Sequence[Message], *, extra_context: str | None = None) -> list[Message]:
+    def prepare(
+        self,
+        messages: Sequence[Message],
+        *,
+        extra_context: str | None = None,
+        reserve_tokens: int | None = None,
+    ) -> list[Message]:
         """Normalize and budget the conversation. Pure and side-effect free.
 
         Kept public and separate from generation so tests can assert on the
         exact prompt without running a model — the fastest way to catch the
         class of bug where the model is fine but the prompt is wrong.
+
+        `reserve_tokens` is the room kept free for the reply; it defaults to the
+        configured `max_tokens`. Thinking replies are far longer, so the
+        generation methods pass the effective value for the current request.
+        At most half the window is reserved: `max_tokens` is a ceiling, not a
+        forecast, and the generation methods trim it to the room actually left.
         """
         system_prompt = build_system_prompt(
             self.config.agent,
@@ -56,15 +68,49 @@ class ChatAgent:
         normalized = ensure_system_message(messages, system_prompt)
 
         # Reserve room for the answer: the budget must cover prompt *and*
-        # completion, or generation is truncated right after it starts.
+        # completion, or generation is truncated right after it starts. Capped
+        # at half the window: reserving qwen36's 32k cap in full would leave a
+        # 32k window only the 512-token floor for history.
         window = self.backend.context_length
-        reserved = self.config.generation.max_tokens
+        reserved = reserve_tokens if reserve_tokens is not None else self.config.generation.max_tokens
+        reserved = min(reserved, window // 2)
         budget = min(self.config.agent.max_history_tokens, max(512, window - reserved - 128))
 
         return self.memory.apply(normalized, budget, self.backend.count_tokens)
 
-    def _params(self, **overrides) -> GenerationParams:
-        return self.config.generation.merged(**overrides)
+    def resolve_params(self, **overrides) -> GenerationParams:
+        """Resolve the decoding parameters for one request.
+
+        Precedence, lowest to highest: ``generation`` (config), then
+        ``thinking_mode`` (config, applied only when thinking is on), then the
+        per-request overrides. Reasoning models want different sampling when
+        they think — Qwen recommends temperature 1.0 thinking vs 0.7 not — and
+        many more output tokens, so one flat preset cannot serve both modes.
+
+        Public so the benchmark runner decodes exactly the way chat does.
+        """
+        base = self.config.generation
+        thinking = overrides.get("thinking")
+        if thinking is None:
+            thinking = base.thinking
+        if thinking:
+            base = base.merged(**self.config.thinking_mode.model_dump(exclude_none=True))
+        return base.merged(**overrides)
+
+    def _fit(
+        self, messages: Sequence[Message], extra_context: str | None, overrides: dict
+    ) -> tuple[list[Message], GenerationParams]:
+        """Resolve the params, budget the history, then cap the reply to the room left.
+
+        Strict servers (vLLM, OpenAI) reject a request whose prompt plus
+        `max_tokens` exceeds the window instead of stopping at its end.
+        """
+        params = self.resolve_params(**overrides)
+        prepared = self.prepare(messages, extra_context=extra_context, reserve_tokens=params.max_tokens)
+        room = self.backend.context_length - self.backend.count_tokens(prepared)
+        if params.max_tokens > room:
+            params = params.merged(max_tokens=max(room, 1))
+        return prepared, params
 
     # -- generation ---------------------------------------------------------
 
@@ -76,8 +122,8 @@ class ChatAgent:
         **overrides,
     ) -> ChatResult:
         """Produce a full reply."""
-        prepared = self.prepare(messages, extra_context=extra_context)
-        result = await self.backend.generate(prepared, self._params(**overrides))
+        prepared, params = self._fit(messages, extra_context, overrides)
+        result = await self.backend.generate(prepared, params)
         logger.info(
             "completed: %d prompt + %d completion tokens in %.0fms (%.1f tok/s)",
             result.usage.prompt_tokens,
@@ -100,17 +146,18 @@ class ChatAgent:
         speed far more than total tokens/second does, so it is measured and
         logged on every request.
         """
-        prepared = self.prepare(messages, extra_context=extra_context)
-        params = self._params(**overrides)
+        prepared, params = self._fit(messages, extra_context, overrides)
 
         started = time.perf_counter()
         ttft_ms: float | None = None
         emitted = 0
 
         async for chunk in self.backend.stream(prepared, params):
-            if chunk.delta and ttft_ms is None:
-                ttft_ms = (time.perf_counter() - started) * 1000
-            if chunk.delta:
+            # With thinking on, the first token is a thought, and that is what
+            # the user perceives as "it started answering".
+            if chunk.delta or chunk.reasoning:
+                if ttft_ms is None:
+                    ttft_ms = (time.perf_counter() - started) * 1000
                 emitted += 1
             yield chunk
 
@@ -132,4 +179,5 @@ class ChatAgent:
             "max_history_tokens": self.config.agent.max_history_tokens,
             "tools": list(self.tools.tools),
             "generation": self.config.generation.model_dump(),
+            "thinking_mode": self.config.thinking_mode.model_dump(exclude_none=True),
         }

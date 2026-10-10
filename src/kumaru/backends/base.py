@@ -20,14 +20,16 @@ concurrent engines (vLLM, TGI) without changing a single caller.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import queue
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Sequence
 from typing import Any, TypeVar
 
 from kumaru.core.config import BackendConfig
+from kumaru.core.errors import ConfigError
 from kumaru.core.logging import get_logger
 from kumaru.core.types import (
     BackendInfo,
@@ -48,7 +50,7 @@ async def iterate_in_thread(
     make_iterator: Any,
     *,
     queue_size: int = 256,
-) -> AsyncIterator[Any]:
+) -> AsyncGenerator[Any, None]:
     """Run a *blocking* iterator on a worker thread and yield its items async.
 
     `make_iterator` is a zero-argument callable returning an iterable. It is
@@ -57,19 +59,52 @@ async def iterate_in_thread(
 
     Backpressure is real: the bounded queue means a fast GPU cannot run
     thousands of tokens ahead of a slow HTTP client and exhaust memory.
+
+    Abandoning the stream stops the work. When the consumer stops early (the
+    user pressed Stop, the client hung up, a caller broke out of its loop), the
+    worker notices at its next item, stops pulling, and closes the iterator *on
+    the worker thread*, so a generator's ``finally`` block runs there. That is
+    where a backend halts ``model.generate`` or releases its model lock, so
+    generation ends about a token later instead of running on to
+    ``max_tokens``. A producer's exception reaches the consumer only if the
+    consumer is still listening.
     """
     loop = asyncio.get_running_loop()
     items: queue.Queue[Any] = queue.Queue(maxsize=queue_size)
     error: list[BaseException] = []
+    abandoned = threading.Event()
+
+    def put(item: Any) -> bool:
+        """Queue `item`, waiting for room; False once the consumer has gone."""
+        while not abandoned.is_set():
+            try:
+                items.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
 
     def worker() -> None:
+        iterator: Iterator[Any] | None = None
         try:
-            for item in make_iterator():
-                items.put(item)
+            iterator = iter(make_iterator())
+            for item in iterator:
+                if not put(item):
+                    break
         except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread
             error.append(exc)
         finally:
-            items.put(_SENTINEL)
+            close = getattr(iterator, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - nobody is left to receive it
+                    logger.warning("closing an abandoned generation failed", exc_info=True)
+            if not put(_SENTINEL):
+                # An executor thread may still be blocked in items.get() for a
+                # consumer that was cancelled mid-wait; this releases it.
+                with contextlib.suppress(queue.Full):
+                    items.put_nowait(_SENTINEL)
 
     thread = threading.Thread(target=worker, name="kumaru-generate", daemon=True)
     thread.start()
@@ -83,8 +118,9 @@ async def iterate_in_thread(
                 break
             yield item
     finally:
-        if error:
-            raise error[0]
+        abandoned.set()
+    if error:
+        raise error[0]
 
 
 class Backend(ABC):
@@ -104,26 +140,47 @@ class Backend(ABC):
 
     #: Registry name, set by subclasses. Used in logs and `/v1/models`.
     name: str = "base"
+    #: True if the backend attaches `backend.adapter_path` (a LoRA adapter from
+    #: `kumaru train`). `load()` refuses an adapter everywhere else, because a
+    #: backend that ignored one would quietly serve, or benchmark, the base model.
+    supports_adapters: bool = False
 
     def __init__(self, config: BackendConfig) -> None:
         self.config = config
         self._loaded = False
+        self._load_lock: asyncio.Lock | None = None
 
     # -- lifecycle ----------------------------------------------------------
 
     async def load(self) -> None:
-        """Prepare the backend for inference. Idempotent."""
+        """Prepare the backend for inference. Idempotent and concurrency-safe.
+
+        The lock matters for process-backed engines: four requests arriving
+        before the first load finishes must not start four model servers.
+        """
         if self._loaded:
             return
-        started = time.perf_counter()
-        await self._load()
-        self._loaded = True
-        logger.info(
-            "backend '%s' ready: %s (%.1fs)",
-            self.name,
-            self.config.model,
-            time.perf_counter() - started,
-        )
+        if self._load_lock is None:
+            self._load_lock = asyncio.Lock()
+        async with self._load_lock:
+            if self._loaded:
+                return
+            if self.config.adapter_path and not self.supports_adapters:
+                raise ConfigError(
+                    f"The {self.name} backend cannot attach a LoRA adapter "
+                    f"(backend.adapter_path is {self.config.adapter_path!r}).",
+                    hint="Use a transformers profile, such as -c default, with the adapter's base model. "
+                    "GGUF models need the adapter converted first: see docs/TRAINING.md.",
+                )
+            started = time.perf_counter()
+            await self._load()
+            self._loaded = True
+            logger.info(
+                "backend '%s' ready: %s (%.1fs)",
+                self.name,
+                self.config.model,
+                time.perf_counter() - started,
+            )
 
     @abstractmethod
     async def _load(self) -> None:
@@ -182,13 +239,16 @@ class Backend(ABC):
         started = time.perf_counter()
         first_token_at: float | None = None
         parts: list[str] = []
+        reasoning_parts: list[str] = []
         finish_reason: Any = "stop"
         usage = Usage()
 
         async for chunk in self.stream(messages, params):
+            if (chunk.delta or chunk.reasoning) and first_token_at is None:
+                first_token_at = time.perf_counter()
+            if chunk.reasoning:
+                reasoning_parts.append(chunk.reasoning)
             if chunk.delta:
-                if first_token_at is None:
-                    first_token_at = time.perf_counter()
                 parts.append(chunk.delta)
             if chunk.finish_reason:
                 finish_reason = chunk.finish_reason
@@ -196,18 +256,19 @@ class Backend(ABC):
                 usage = chunk.usage
 
         text = "".join(parts)
+        reasoning = "".join(reasoning_parts)
         elapsed_ms = (time.perf_counter() - started) * 1000
 
         if usage.total_tokens == 0:
             # Backend gave us no accounting; estimate so dashboards stay useful.
             usage = Usage(
                 prompt_tokens=self.count_tokens(messages),
-                completion_tokens=max(1, len(text) // 4),
+                completion_tokens=max(1, (len(text) + len(reasoning)) // 4),
             )
 
         return ChatResult(
             model=self.config.model,
-            message=Message.assistant(text),
+            message=Message.assistant(text, reasoning=reasoning or None),
             finish_reason=finish_reason,
             usage=usage,
             latency_ms=elapsed_ms,
@@ -280,6 +341,116 @@ class StopSequenceTracker:
         """Emit whatever remains once generation has finished."""
         out, self._buffer = self._buffer, ""
         return "" if self.stopped else out
+
+
+def _partial_suffix_len(text: str, tag: str) -> int:
+    """Length of the longest suffix of `text` that is a proper prefix of `tag`."""
+    for k in range(min(len(text), len(tag) - 1), 0, -1):
+        if text.endswith(tag[:k]):
+            return k
+    return 0
+
+
+class ReasoningSplitter:
+    """Split a raw token stream into *reasoning* and *answer* streams.
+
+    Engines without native reasoning parsing return the model's thinking inline,
+    wrapped in tags: ``<think>\\n...\\n</think>\\n\\nThe answer``. This parser
+    routes text before ``</think>`` to the reasoning channel and the rest to the
+    answer channel, incrementally: tags split across chunks ("</th" + "ink>") are
+    handled by holding back only the shortest ambiguous tail, so nothing is
+    delayed by more than a few characters.
+
+    An opening tag is recognised only at the very start of the output, which is
+    the only place reasoning models emit one; a literal "<think>" later in an
+    answer (say, in an HTML example) passes through untouched.
+
+    ``start_in_reasoning=True`` is for chat templates that pre-open the block in
+    the prompt (the generation prompt already ends in ``<think>``), so the
+    output begins mid-thought and only the closing tag ever appears.
+    """
+
+    def __init__(
+        self,
+        *,
+        start_in_reasoning: bool = False,
+        open_tag: str = "<think>",
+        close_tag: str = "</think>",
+    ) -> None:
+        self.open_tag = open_tag
+        self.close_tag = close_tag
+        self._state = "reasoning" if start_in_reasoning else "start"
+        self._strip_leading = start_in_reasoning
+        # A pre-opened block may still be re-opened by the model; tolerate it.
+        self._allow_reopen = start_in_reasoning
+        self._buffer = ""
+
+    @property
+    def in_reasoning(self) -> bool:
+        return self._state == "reasoning"
+
+    def push(self, delta: str) -> tuple[str, str]:
+        """Feed raw text; return ``(reasoning, answer)`` that is safe to emit now."""
+        self._buffer += delta
+        reasoning: list[str] = []
+        answer: list[str] = []
+
+        while self._buffer:
+            if self._state == "start":
+                head = self._buffer.lstrip()
+                if not head:
+                    break  # only whitespace so far: undecided
+                if head.startswith(self.open_tag):
+                    self._buffer = head[len(self.open_tag) :]
+                    self._state, self._strip_leading = "reasoning", True
+                    continue
+                if self.open_tag.startswith(head):
+                    break  # could still become "<think>"
+                self._state = "answer"
+                continue
+
+            if self._strip_leading:
+                self._buffer = self._buffer.lstrip()
+                if not self._buffer:
+                    break
+                self._strip_leading = False
+
+            if self._state == "reasoning":
+                if self._allow_reopen:
+                    if self._buffer.startswith(self.open_tag):
+                        self._buffer = self._buffer[len(self.open_tag) :]
+                        self._strip_leading = True
+                        continue
+                    if self.open_tag.startswith(self._buffer):
+                        break
+                    self._allow_reopen = False
+                idx = self._buffer.find(self.close_tag)
+                if idx != -1:
+                    reasoning.append(self._buffer[:idx])
+                    self._buffer = self._buffer[idx + len(self.close_tag) :]
+                    self._state, self._strip_leading = "answer", True
+                    continue
+                hold = _partial_suffix_len(self._buffer, self.close_tag)
+                cut = len(self._buffer) - hold
+                reasoning.append(self._buffer[:cut])
+                self._buffer = self._buffer[cut:]
+                break
+
+            answer.append(self._buffer)
+            self._buffer = ""
+
+        return "".join(reasoning), "".join(answer)
+
+    def flush(self) -> tuple[str, str]:
+        """Release anything held back once generation has finished.
+
+        Unterminated reasoning (the model ran out of tokens mid-thought) stays
+        reasoning: it was never an answer, and showing it as one would mislead.
+        """
+        rest, self._buffer = self._buffer, ""
+        if self._state == "reasoning":
+            return rest, ""
+        return "", rest.lstrip() if self._strip_leading else rest
 
 
 def chunks_from_text(text: str, size: int = 4) -> Iterator[str]:

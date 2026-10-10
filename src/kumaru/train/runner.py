@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kumaru.core.errors import ConfigError
+from kumaru.core.errors import ConfigError, install_command
 from kumaru.core.logging import get_logger
 from kumaru.train.config import TrainConfig, load_train_config
 
@@ -66,7 +66,7 @@ def preflight(config: TrainConfig) -> None:
     except ImportError:
         raise ConfigError(
             "PyTorch is not installed.",
-            hint='Install it with: pip install "kumaru[train]"',
+            hint=f"Install it with: {install_command('train')}",
         ) from None
 
     if config.load_in_4bit:
@@ -75,7 +75,7 @@ def preflight(config: TrainConfig) -> None:
         except ImportError:
             raise ConfigError(
                 "load_in_4bit requires bitsandbytes.",
-                hint='Install it with: pip install "kumaru[quant]"',
+                hint=f"Install it with: {install_command('quant')}",
             ) from None
 
 

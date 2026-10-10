@@ -8,7 +8,7 @@
 
 ## What it does
 
-Runs six checks in dependency order — environment, config resolution, unit tests, the agent stack, the HTTP server with real SSE streaming, and (with `-Full`) the training and GPU paths. It prints a PASS/FAIL summary and exits non-zero if anything failed.
+Runs up to seven checks in dependency order: environment, config resolution, unit tests, the agent stack, the HTTP server with real SSE streaming, the `llama-server` binary (when installed) and, with `-Full`, the GPU and training paths. It prints a PASS/FAIL summary and exits non-zero if anything failed.
 
 ## Why it exists
 
@@ -23,17 +23,18 @@ The ordering is the whole design. Each stage depends only on the stages before i
 | 3. unit tests | Core logic, types, policies, schemas | no | no |
 | 4. agent (echo) | Prompt assembly, memory, backend contract | no | no |
 | 5. server + SSE | HTTP routing, streaming protocol, static UI | no | no |
-| 6. GPU + training | Real weights, real CUDA, LoRA pipeline, eval | yes | ~1 GB |
+| 6. llama-server binary | The engine behind GGUF profiles such as `qwen36` starts (skipped if not installed) | no | no |
+| 7. GPU + training | `llama-server` sees the GPU, real weights, real CUDA, LoRA pipeline, eval | yes | ~1 GB |
 
-Stages 1–5 run in a few seconds with no GPU and no network. That is deliberate: it means you can run them constantly.
+Stages 1–6 need no GPU and no network. That is deliberate: it means you can run them constantly.
 
 ## Parameters
 
 | Parameter | Type | Default | Effect |
 |---|---|---|---|
-| `-Full` | switch | off | Adds stage 6: training dry run, GPU inference, and the eval harness |
+| `-Full` | switch | off | Adds stage 7: the `llama-server` GPU check (when installed), training dry run, GPU inference, and the eval harness |
 | `-Port` | int | `8099` | Port for the temporary test server |
-| `-SmallModel` | string | `Qwen/Qwen2.5-0.5B-Instruct` | Model used by stage 6 |
+| `-SmallModel` | string | `Qwen/Qwen2.5-0.5B-Instruct` | Model used by stage 7 |
 
 ## How to use it
 
@@ -82,10 +83,13 @@ That is the full request path, including the streaming protocol that a plain hea
 | `No .venv found` | Setup not run | `.\scripts\setup.ps1` |
 | Stage 1 fails | Broken install | Re-run setup; check `kumaru info` output |
 | Stage 2 fails | A YAML profile has an invalid key | The error names the file and key; configs use `extra="forbid"` |
+| Stage 3 fails with `No module named pytest` | The test tools were never installed (an install by hand with plain `pip install -e .`) | `pip install -e ".[dev]"`; `setup.ps1` installs them for you |
 | Stage 3 fails | A genuine regression in core logic | `pytest tests -q` for the full traceback |
 | Stage 5 fails, others pass | Port in use, or firewall blocking localhost | `-Port 8123`, or check the job output |
-| Stage 6 fails with CUDA OOM | Another process is holding VRAM | `nvidia-smi` to find it |
-| Stage 6 fails to download | No network, or HF rate limit | Set `HF_TOKEN`, or skip `-Full` |
+| Stage 6 fails | A damaged install (a file deleted or quarantined by antivirus), or a DLL that will not load | `.\scripts\get-llama-server.ps1 -Force` |
+| "llama-server sees the GPU" fails | The NVIDIA driver is too old for the CUDA 13 build | Update the driver, or `.\scripts\get-llama-server.ps1 -Flavor cuda-12.4` |
+| Stage 7 fails with CUDA OOM | Another process is holding VRAM | `nvidia-smi` to find it |
+| Stage 7 fails to download | No network, or HF rate limit | Set `HF_TOKEN`, or skip `-Full` |
 
 ## Extending it
 
@@ -103,6 +107,7 @@ Check "my new subsystem" {
 ## Related files
 
 - `scripts/setup.ps1` — run this first
+- `scripts/get-llama-server.ps1` — installs the binary stage 6 checks
 - `tests/` — the suite invoked by stage 3
 - `configs/test.yaml` — the echo profile used by stages 4 and 5
 - `docs/QUICKSTART.md` — the troubleshooting table for individual symptoms

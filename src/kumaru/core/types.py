@@ -19,7 +19,7 @@ import uuid
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 FinishReason = Literal["stop", "length", "error", "cancelled"]
 
@@ -44,11 +44,19 @@ class Message(BaseModel):
     role: Role
     content: str = ""
     # Populated only when role == TOOL, or when an assistant turn requests a
-    # tool call. Unused by the chat-only v0.1 feature set; present so the tool
+    # tool call. Unused while Kumaru is chat-only; present so the tool
     # layer can be switched on later without a schema migration.
     name: str | None = None
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
+    # The model's private chain of thought ("thinking"), kept apart from the
+    # answer in `content`. Reasoning models (Qwen3.x, DeepSeek-R1, ...) spend
+    # tokens here before answering; that spend is where most of their accuracy
+    # gain on hard questions comes from. Accepts the OpenAI-ecosystem name
+    # `reasoning_content` as well.
+    reasoning: str | None = Field(
+        default=None, validation_alias=AliasChoices("reasoning", "reasoning_content")
+    )
 
     @field_validator("content", mode="before")
     @classmethod
@@ -56,8 +64,14 @@ class Message(BaseModel):
         # Some clients send `"content": null` on assistant tool-call turns.
         return "" if v is None else v
 
-    def to_openai(self) -> dict[str, Any]:
-        """Render in the wire format that inference servers expect."""
+    def to_openai(self, *, include_reasoning: bool = False) -> dict[str, Any]:
+        """Render in the wire format that inference servers expect.
+
+        Reasoning is omitted by default: model authors (Qwen included) train on
+        histories that contain only final answers, and old thinking would burn
+        context for no benefit. Pass `include_reasoning=True` for the rare case
+        that wants it (agentic "interleaved thinking" across tool calls).
+        """
         out: dict[str, Any] = {"role": self.role.value, "content": self.content}
         if self.name:
             out["name"] = self.name
@@ -65,6 +79,8 @@ class Message(BaseModel):
             out["tool_call_id"] = self.tool_call_id
         if self.tool_calls:
             out["tool_calls"] = self.tool_calls
+        if include_reasoning and self.reasoning:
+            out["reasoning_content"] = self.reasoning
         return out
 
     @classmethod
@@ -76,8 +92,8 @@ class Message(BaseModel):
         return cls(role=Role.USER, content=content)
 
     @classmethod
-    def assistant(cls, content: str) -> Message:
-        return cls(role=Role.ASSISTANT, content=content)
+    def assistant(cls, content: str, reasoning: str | None = None) -> Message:
+        return cls(role=Role.ASSISTANT, content=content, reasoning=reasoning)
 
 
 class GenerationParams(BaseModel):
@@ -93,8 +109,20 @@ class GenerationParams(BaseModel):
     top_p: float = Field(default=0.95, ge=0.0, le=1.0)
     top_k: int = Field(default=50, ge=0)
     repetition_penalty: float = Field(default=1.05, ge=0.5, le=2.0)
+    # Optional knobs: None means "do not send; let the engine use its default".
+    # min_p drops tokens whose probability is below min_p * p(top token).
+    min_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Flat penalty on any token already present in the output (OpenAI semantics).
+    # Model authors recommend it for quantized reasoning models to curb loops.
+    presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
     stop: list[str] = Field(default_factory=list)
     seed: int | None = None
+    # Reasoning ("thinking") control for hybrid models such as Qwen3.x.
+    # None = the model's own default; True/False forces it on/off.
+    thinking: bool | None = None
+    # Hard cap on thinking tokens. When reached, the engine injects a short
+    # "time is up" message and forces the answer. None = unlimited.
+    thinking_budget: int | None = Field(default=None, ge=0)
 
     def merged(self, **overrides: Any) -> GenerationParams:
         """Return a copy with non-None overrides applied.
@@ -122,9 +150,12 @@ class StreamChunk(BaseModel):
 
     `delta` is the newly generated text only — never the accumulated string.
     Consumers append. This keeps bandwidth O(output) instead of O(output^2).
+    `reasoning` is the same idea for the model's thinking stream; a chunk can
+    carry either or both.
     """
 
     delta: str = ""
+    reasoning: str = ""
     finish_reason: FinishReason | None = None
     usage: Usage | None = None
 

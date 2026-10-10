@@ -10,14 +10,15 @@ transparent CPU/GPU layer splitting. Concretely:
 Situation                    Backend    Reason
 ===========================  =========  =====================================
 24 GB VRAM, 7B model         transformers  Fits in bf16; best quality
-8 GB VRAM, 7B model          llamacpp      Q4_K_M is ~4.4 GB and fits
+8 GB VRAM, 7B model          llamacpp      Q4_K_M is ~4.7 GB and fits
 No GPU at all                llamacpp      CPU inference is actually usable
 24 GB VRAM, 70B model        llamacpp      Q4 + partial offload; slow but works
 Many concurrent users        openai_compat Point at vLLM instead
 ===========================  =========  =====================================
 
-`n_gpu_layers` is the key knob: layers above the cut run on the GPU, the rest on
-the CPU. Setting it to -1 offloads as many as will fit. Because decoding is
+`n_gpu_layers` is the key knob: that many layers run on the GPU, the rest on the
+CPU. -1 offloads every layer, and loading fails with an out-of-memory error if
+they do not all fit; then lower it until the model loads. Because decoding is
 memory-bandwidth bound, every layer you move off the CPU is a direct speedup, so
 tuning this number to just below an out-of-memory error is exactly the right
 strategy.
@@ -25,11 +26,20 @@ strategy.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
+import threading
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from kumaru.backends.base import Backend, StopSequenceTracker, iterate_in_thread
+from kumaru.backends.base import (
+    Backend,
+    ReasoningSplitter,
+    StopSequenceTracker,
+    iterate_in_thread,
+)
+from kumaru.backends.openai_compat import normalize_finish_reason
 from kumaru.core.config import BackendConfig
 from kumaru.core.errors import BackendError, DependencyMissingError
 from kumaru.core.logging import get_logger
@@ -48,6 +58,10 @@ class LlamaCppBackend(Backend):
     def __init__(self, config: BackendConfig) -> None:
         super().__init__(config)
         self.llm: Any = None
+        # One Llama is one llama.cpp context, which is not thread-safe, and each
+        # request generates on its own worker thread (see iterate_in_thread).
+        # The server admits several requests at once, so they take turns here.
+        self._generate_lock = threading.Lock()
 
     async def _load(self) -> None:
         try:
@@ -56,7 +70,7 @@ class LlamaCppBackend(Backend):
             raise DependencyMissingError("llama-cpp-python", extra="gguf") from exc
 
         cfg = self.config
-        path = cfg.model_path or cfg.model
+        path = os.path.expanduser(cfg.model_path or cfg.model)
 
         kwargs: dict[str, Any] = {
             "n_ctx": cfg.max_context_length,
@@ -66,13 +80,17 @@ class LlamaCppBackend(Backend):
         if cfg.n_threads:
             kwargs["n_threads"] = cfg.n_threads
 
+        # Loading reads gigabytes from disk (or the network), so it runs on a
+        # worker thread: the server keeps answering other requests meanwhile.
         if os.path.exists(path):
-            self.llm = Llama(model_path=path, **kwargs)
+            self.llm = await asyncio.to_thread(Llama, model_path=path, **kwargs)
         elif "/" in path:
             # Treat it as a Hugging Face repo id and pull the GGUF from the hub.
             filename = cfg.extra.get("gguf_filename", "*Q4_K_M.gguf")
             logger.info("downloading GGUF %s from %s", filename, path)
-            self.llm = Llama.from_pretrained(repo_id=path, filename=filename, **kwargs)
+            self.llm = await asyncio.to_thread(
+                Llama.from_pretrained, repo_id=path, filename=filename, **kwargs
+            )
         else:
             raise BackendError(
                 f"GGUF model not found: {path}",
@@ -117,50 +135,70 @@ class LlamaCppBackend(Backend):
         payload = [m.to_openai() for m in messages]
 
         def produce():
-            tracker = StopSequenceTracker(params.stop)
-            produced = 0
-            prompt_tokens = 0
-            finish_reason = "stop"
+            # Everything that touches the model happens under the lock,
+            # including closing the stream, so the next request starts clean.
+            with self._generate_lock:
+                tracker = StopSequenceTracker(params.stop)
+                # llama-cpp-python returns thinking inline as <think>...</think>.
+                splitter = ReasoningSplitter()
+                produced = 0
+                prompt_tokens = 0
+                finish_reason = "stop"
 
-            # llama.cpp reads the chat template embedded in the GGUF, so the
-            # prompt format matches what the model was trained on.
-            stream = llm.create_chat_completion(
-                messages=payload,
-                max_tokens=params.max_tokens,
-                temperature=params.temperature,
-                top_p=params.top_p,
-                top_k=params.top_k or 0,
-                repeat_penalty=params.repetition_penalty,
-                stop=list(params.stop) or None,
-                seed=params.seed if params.seed is not None else -1,
-                stream=True,
-            )
+                # llama.cpp reads the chat template embedded in the GGUF, so the
+                # prompt format matches what the model was trained on.
+                extra: dict[str, Any] = {}
+                if params.min_p is not None:
+                    extra["min_p"] = params.min_p
+                if params.presence_penalty is not None:
+                    extra["presence_penalty"] = params.presence_penalty
+                stream = llm.create_chat_completion(
+                    messages=payload,
+                    max_tokens=params.max_tokens,
+                    temperature=params.temperature,
+                    top_p=params.top_p,
+                    top_k=params.top_k or 0,
+                    repeat_penalty=params.repetition_penalty,
+                    stop=list(params.stop) or None,
+                    seed=params.seed if params.seed is not None else -1,
+                    stream=True,
+                    **extra,
+                )
 
-            for event in stream:
-                if usage := event.get("usage"):
-                    prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
-                for choice in event.get("choices", []):
-                    delta = (choice.get("delta") or {}).get("content") or ""
-                    if delta:
-                        produced += 1
-                        safe = tracker.push(delta)
-                        if safe:
-                            yield StreamChunk(delta=safe)
-                    if choice.get("finish_reason"):
-                        finish_reason = choice["finish_reason"]
-                if tracker.stopped:
-                    break
+                try:
+                    for event in stream:
+                        if usage := event.get("usage"):
+                            prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
+                        for choice in event.get("choices", []):
+                            delta = (choice.get("delta") or {}).get("content") or ""
+                            if delta:
+                                produced += 1
+                                thought, text = splitter.push(delta)
+                                safe = tracker.push(text) if text else ""
+                                if thought or safe:
+                                    yield StreamChunk(delta=safe, reasoning=thought)
+                            if choice.get("finish_reason"):
+                                finish_reason = normalize_finish_reason(choice["finish_reason"])
+                        if tracker.stopped:
+                            break
+                finally:
+                    # llama.cpp computes a token only when asked for the next
+                    # event, so closing the stream (stop sequence hit, or the
+                    # reader went away) ends the generation.
+                    getattr(stream, "close", lambda: None)()
 
-            tail = tracker.flush()
-            if tail:
-                yield StreamChunk(delta=tail)
-            yield StreamChunk(
-                finish_reason=finish_reason,
-                usage=Usage(
-                    prompt_tokens=prompt_tokens or self.count_tokens(messages),
-                    completion_tokens=produced,
-                ),
-            )
+                thought, text = splitter.flush()
+                tail = (tracker.push(text) if text else "") + tracker.flush()
+                if thought or tail:
+                    yield StreamChunk(delta=tail, reasoning=thought)
+                yield StreamChunk(
+                    finish_reason=finish_reason,
+                    usage=Usage(
+                        prompt_tokens=prompt_tokens or self.count_tokens(messages),
+                        completion_tokens=produced,
+                    ),
+                )
 
-        async for chunk in iterate_in_thread(produce):
-            yield chunk
+        async with contextlib.aclosing(iterate_in_thread(produce)) as chunks:
+            async for chunk in chunks:
+                yield chunk

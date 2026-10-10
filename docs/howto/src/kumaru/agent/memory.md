@@ -1,65 +1,117 @@
 # `src\kumaru\agent\memory.py`
 
-> Context-window memory policies that decide which messages fit into a model prompt.
+> Context-window memory policies: given a conversation, a token budget and a token counter, decide which messages the model gets to see.
 
-**Read this when:** you are handling context length errors, changing history trimming, adding summarization/RAG memory, or tuning long-chat behavior.
+**Read this when:** you hit a context-length error, a long chat "forgets" something, you change history trimming, or you add summarising or retrieval (RAG) memory.
 
 ---
 
 ## What it does
-This file defines the `MemoryPolicy` interface and three policies: no trimming, drop oldest, and sliding window. Each policy receives a message list, a token budget, and a backend token counter, then returns the messages to send. `get_policy()` resolves the configured policy name and safely falls back to `sliding_window`.
+This file defines the `MemoryPolicy` interface and three policies:
+
+| Config name | Class | Behaviour |
+|---|---|---|
+| `none` | `NoTrimPolicy` | Sends everything. Raises `ContextLengthExceededError` if it does not fit. |
+| `drop_oldest` | `DropOldestPolicy` | Drops body messages from the front until the rest fits. |
+| `sliding_window` (default) | `SlidingWindowPolicy` | Keeps the system message plus the longest run of newest messages that fits, and never fewer than `min_recent_turns` (2) messages. |
+
+Each policy takes a message list, a token budget and the backend's token counter, and returns the messages to send. `get_policy()` maps a config name to a fresh policy instance. An unknown name falls back to `sliding_window` and logs a warning.
 
 ## Why it exists
-Every model has a finite context window and completion tokens must be reserved before generation starts. Without a memory policy, long chats would either fail unpredictably or force each backend to invent its own trimming behavior. Centralizing the policy keeps prompt budgeting consistent across local and remote backends.
+A model has a fixed context window. Room for the reply must also be reserved before generation starts. Long conversations therefore have to lose something, and *what* to lose is a policy decision.
+
+Centralising that decision gives every backend the same trimming behaviour. It also gives the standard upgrades one place to plug in, without touching `ChatAgent`: summarising the dropped middle, or retrieving relevant history from a store.
 
 ## Mental model
-- The system message is special and should survive trimming.
-- Token counting comes from the backend because tokenizer accuracy is backend-specific.
-- `sliding_window` preserves instructions plus the newest messages, accepting loss of older middle context.
+- **Who calls it.** Only `ChatAgent.prepare()` (`src\kumaru\agent\chat.py`) calls a policy. `ChatAgent.__init__` resolves the policy once, with `get_policy(config.agent.memory_policy)`.
+- **One system message.** `prepare()` first normalises the conversation to exactly one system message at index 0, built by `ensure_system_message`. Policies keep only the *first* system message (`[:1]`) and treat everything else as "body".
+- **The budget, computed in `prepare()`:**
+
+  ```
+  budget = min(agent.max_history_tokens, max(512, context_length - reserved - 128))
+  ```
+
+  - `reserved` is the request's *resolved* `max_tokens`. With thinking on, that is `thinking_mode.max_tokens`, which is often much larger than `generation.max_tokens`.
+  - `128` is a safety margin.
+  - `512` is a floor, so the budget never reaches zero. When the reply reservation eats the window, the floor lets prompt plus reply exceed the window. See `docs\howto\src\kumaru\agent\chat.md`.
+- **The counter comes from the backend**, because tokenizer accuracy is backend-specific:
+  - `transformers` renders the real chat template, so its count is exact.
+  - `llamacpp` (in-process) tokenizes a `role: content` blob, then adds 8.
+  - `echo`, `openai_compat` and `llamacpp_server` use the base heuristic `int(sum(len(content) + len(role) + 4) / 3.6) + 8`. This can be wrong in either direction, so leave headroom.
+- **Reasoning is invisible to memory.** A `Message.reasoning` field survives `apply()`, because policies return the same `Message` objects. But:
+  - No counter counts it. The base heuristic reads `content` and `role` only, and `transformers` counts `to_openai()` output, which omits reasoning by default.
+  - No backend sends it.
+
+  Old thoughts therefore cost nothing here. The design reasons for dropping them, and how chat histories avoid storing them, are in `docs\howto\src\kumaru\agent\chat.md`.
+- **`min_recent_turns` counts messages, not exchanges.** The default of 2 normally means "the last reply and the new question". The guarantee wins over the budget: `sliding_window` can return *more* tokens than `budget`.
+- **The window is contiguous from the newest message.** Once a message does not fit, everything older is dropped, even smaller messages that would have fitted.
 
 ## Public API
 
 | Name | Signature | What it's for |
 |---|---|---|
-| `TokenCounter` | `Callable[[Sequence[Message]], int]` | Function type used by policies to count prompt tokens. |
-| `MemoryPolicy` | `abstract class MemoryPolicy` | Base interface for all memory policies. |
-| `MemoryPolicy.name` | `str` | Config name for the policy. |
-| `MemoryPolicy.apply` | `apply(messages: Sequence[Message], budget: int, count_tokens: TokenCounter) -> list[Message]` | Returns a message subset that should fit in `budget`. |
-| `NoTrimPolicy` | `class NoTrimPolicy(MemoryPolicy)` | Sends everything and raises if it exceeds budget. |
-| `DropOldestPolicy` | `class DropOldestPolicy(MemoryPolicy)` | Keeps the first system message and drops oldest non-system messages until the budget fits. |
-| `SlidingWindowPolicy` | `class SlidingWindowPolicy(MemoryPolicy)` | Keeps the first system message and newest body messages, with a minimum recent-turn guarantee. |
-| `SlidingWindowPolicy.__init__` | `__init__(min_recent_turns: int = 2) -> None` | Configures how many recent body messages survive even under small budgets. |
-| `POLICIES` | `dict[str, Callable[[], MemoryPolicy]]` | Registry from config names to policy factories. |
-| `get_policy` | `get_policy(name: str) -> MemoryPolicy` | Creates a policy by name; unknown names log a warning and return `SlidingWindowPolicy`. |
+| `TokenCounter` | `TokenCounter = Callable[[Sequence[Message]], int]` | Type of the counter passed to policies. In practice it is `backend.count_tokens`. |
+| `MemoryPolicy` | `class MemoryPolicy(ABC)` | Base interface. |
+| `MemoryPolicy.name` | `name: str = "base"` | Config name. `describe()` and `/v1/info` report it as `agent.memory_policy`. |
+| `MemoryPolicy.apply` | `apply(self, messages: Sequence[Message], budget: int, count_tokens: TokenCounter) -> list[Message]` | Abstract. Returns the sub-list of `messages` to send. |
+| `NoTrimPolicy` | `class NoTrimPolicy(MemoryPolicy)`, `name = "none"` | Returns `list(messages)`, or raises `ContextLengthExceededError` (hint: `"Switch agent.memory_policy to 'sliding_window', or raise the budget."`). |
+| `DropOldestPolicy` | `class DropOldestPolicy(MemoryPolicy)`, `name = "drop_oldest"` | Keeps the first system message. Pops body messages from the front while the total exceeds `budget`. |
+| `SlidingWindowPolicy` | `class SlidingWindowPolicy(MemoryPolicy)`, `name = "sliding_window"` | Keeps the first system message and grows a window backwards from the newest message. Logs `memory: dropped N older message(s) to fit B-token budget` at INFO. |
+| `SlidingWindowPolicy.__init__` | `__init__(self, min_recent_turns: int = 2) -> None` | The number of newest body messages kept even when over budget. |
+| `POLICIES` | `POLICIES: dict[str, Callable[[], MemoryPolicy]]` | Name-to-factory map: `none`, `drop_oldest`, `sliding_window`. It is a plain dict, not a `Registry`, so it has no plugin discovery. |
+| `get_policy` | `get_policy(name: str) -> MemoryPolicy` | Builds a policy by name. Unknown names log `unknown memory_policy '<name>'; using sliding_window` at WARNING. |
+
+The config fields, in `src\kumaru\core\config.py`, `AgentConfig`:
+- `max_history_tokens: int = 6144`
+- `memory_policy: str = "sliding_window"`. This is a free string, not validated against `POLICIES`.
 
 ## How to use it
 
-### Resolve the configured policy
+### Pick a policy in config
 
-```python
-from kumaru.agent.memory import get_policy
-from kumaru.core.config import AgentConfig
-
-agent_config = AgentConfig(memory_policy="sliding_window")
-policy = get_policy(agent_config.memory_policy)
-print(policy.name)
+```yaml
+agent:
+  max_history_tokens: 6144
+  memory_policy: sliding_window     # sliding_window | drop_oldest | none
 ```
 
-### Apply a policy with a backend counter
+For a one-off run, use the environment override: `$env:KUMARU_AGENT__MEMORY_POLICY='none'`.
+
+### See what a conversation will look like (no model needed)
+
+`ChatAgent.prepare()` is pure: it runs the policy without generating anything. The echo backend needs no `load()` for this.
+
+```python
+from kumaru.agent.chat import ChatAgent
+from kumaru.core.config import load_config
+from kumaru.core.registry import BACKENDS
+from kumaru.core.types import Message
+
+cfg = load_config("test", overrides={"agent": {"memory_policy": "drop_oldest", "max_history_tokens": 600}})
+backend = BACKENDS.create(cfg.backend.name, cfg.backend)
+agent = ChatAgent(backend, cfg)
+
+history = [Message.user("x" * 400) if i % 2 == 0 else Message.assistant("y" * 400) for i in range(9)]
+prepared = agent.prepare(history)
+print(len(history), "->", len(prepared), backend.count_tokens(prepared))
+# 9 -> 4 556          (system prompt + the newest 3 messages, under the 600 budget)
+```
+
+### Apply a policy directly
 
 ```python
 from kumaru.agent.memory import SlidingWindowPolicy
 from kumaru.core.types import Message
 
 messages = [Message.system("You are Kumaru."), *[Message.user("x" * 2000) for _ in range(5)]]
-policy = SlidingWindowPolicy(min_recent_turns=2)
-trimmed = policy.apply(messages, budget=1000, count_tokens=lambda ms: sum(len(m.content) for m in ms) // 4)
+count = lambda ms: sum(len(m.content) for m in ms) // 4
+trimmed = SlidingWindowPolicy(min_recent_turns=2).apply(messages, budget=1000, count_tokens=count)
 
-assert trimmed[0].role.value == "system"
-assert len(trimmed) >= 3
+print([m.role.value for m in trimmed], count(trimmed))
+# ['system', 'user', 'user'] 1003     <- over the 1000 budget: min_recent_turns wins
 ```
 
-### Make over-budget prompts fail loudly
+### Make overflow fail loudly
 
 ```python
 from kumaru.agent.memory import NoTrimPolicy
@@ -69,21 +121,37 @@ from kumaru.core.types import Message
 try:
     NoTrimPolicy().apply([Message.user("too long")], budget=1, count_tokens=lambda ms: 99)
 except ContextLengthExceededError as exc:
-    print(exc.hint)
+    print(exc.message)  # Conversation needs 99 tokens but the budget is 1.
+    print(exc.hint)     # Switch agent.memory_policy to 'sliding_window', or raise the budget.
 ```
 
-### Use with `ChatAgent.prepare()`
+Where that error surfaces:
+- A non-streaming HTTP request gets **413**.
+- A streaming request gets a `data: {"error": ...}` frame after the 200.
+- `kumaru chat` prints `error:` / `hint:` and exits 1.
+
+### Confirm reasoning costs no budget
 
 ```python
-config = config.model_copy(update={"agent": config.agent.model_copy(update={"memory_policy": "drop_oldest"})})
-agent = ChatAgent(backend, config)
-prepared = agent.prepare(history)
+# continues the prepare() example above: `backend` is the echo backend
+from kumaru.core.types import Message
+
+plain = Message.assistant("The answer is 4.")
+thought = Message.assistant("The answer is 4.", reasoning="Let me think step by step " * 50)
+print(backend.count_tokens([plain]), backend.count_tokens([thought]))   # 16 16
+print(sorted(thought.to_openai()))                                       # ['content', 'role']
 ```
 
 ## How to extend it
-Create a `MemoryPolicy` subclass and register a factory in `POLICIES`. The policy must return `Message` objects and should preserve the system message unless you intentionally want an unguided model.
+Subclass `MemoryPolicy`, implement `apply`, and add a factory to `POLICIES`.
 
-Worked example: a summarizing policy placeholder that compresses dropped messages into one assistant note.
+`POLICIES` has no plugin discovery and `ChatAgent` resolves the name in its constructor. So the entry must exist before any agent is built. In practice that means you either:
+- add it in `memory.py` itself, or
+- register it in code that runs before `ChatAgent(...)` (your own entry point, or a test fixture).
+
+Otherwise the name silently, apart from a warning, becomes `sliding_window`.
+
+Worked example: compress the dropped middle into one note.
 
 ```python
 from collections.abc import Sequence
@@ -115,30 +183,43 @@ class SummarizingPolicy(MemoryPolicy):
 POLICIES["summarize_middle"] = SummarizingPolicy
 ```
 
-Then configure it:
-
 ```yaml
 agent:
   memory_policy: summarize_middle
 ```
 
-For production summarization, call a deterministic summarizer or retrieve from a store; do not silently discard the latest user request.
+This example is a placeholder:
+- Its "summary" is truncation.
+- The summary itself can outgrow the budget.
+- With the history used above, it returned `[system, summary, newest user]`.
+
+A production version should call a deterministic summariser or a retrieval store, cap the summary's own size, and never drop the newest user message.
+
+Rules every policy should keep:
+- Return `Message` objects in conversation order.
+- Keep the system message, which carries the guardrails.
+- Keep the newest user message.
+- Never call the model inside `apply`: `prepare()` is meant to stay pure and fast.
 
 ## Failure modes
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| HTTP 413 context error | `NoTrimPolicy` sent an over-budget conversation. | Switch to `sliding_window`, reduce history, or increase backend context length. |
-| Model forgets early requirements | `drop_oldest` or `sliding_window` removed old user messages. | Put durable instructions in the system prompt or add a summarizing policy. |
-| Prompt still exceeds real context | Backend `count_tokens()` underestimates tokens. | Override `Backend.count_tokens()` with the model tokenizer. |
-| Empty or incoherent answer | Budget is so small that only a tiny recent window survives. | Lower `generation.max_tokens` or raise `agent.max_history_tokens`/model context. |
-| Unknown policy silently not used | `get_policy()` falls back to `sliding_window` after logging a warning. | Check config spelling and add the policy to `POLICIES`. |
+| HTTP 413 `ContextLengthExceededError`, an SSE `error` frame, or `error: Conversation needs N tokens but the budget is B.` | `memory_policy: none` and the history is over budget. | Switch to `sliding_window`, start a new conversation, or raise `agent.max_history_tokens` (and the context, if the formula's middle term is the limit). |
+| The model answers as if it never saw the question | `drop_oldest` with a budget smaller than system prompt plus question pops *every* body message and returns only the system message. Verified: `[system, user(400 chars)]` at budget 10 gives `['system']`. | Use `sliding_window`, which always keeps the newest 2 messages. Raise the budget. |
+| The prompt is larger than `max_history_tokens` | `sliding_window` keeps `min_recent_turns` messages even over budget, by design. | Expected. If the backend rejects it, the budget is too small for single messages; raise the context or shorten the input. |
+| Long chats keep only 1–3 recent messages, and early context is "forgotten" | The budget collapsed. `context_length - reserved - 128` is tiny because the resolved `max_tokens` is close to the window. Thinking presets (`thinking_mode.max_tokens`) are the usual cause, e.g. qwen36 with `--context 32768`. | Raise the context, or lower the resolved `max_tokens` (`thinking_mode.max_tokens` when thinking). `kumaru config` shows both. |
+| The model forgets early requirements in a long chat | `sliding_window` and `drop_oldest` both discard old turns. | Put durable instructions in `agent.system_prompt`, or add a summarising policy. |
+| The backend still rejects the prompt as too long | The heuristic counter (`openai_compat`, `llamacpp_server`, `echo`) underestimated, e.g. for code or non-English text. Or the 512 floor pushed prompt plus reply past the window. | Lower `agent.max_history_tokens` to leave headroom, or override `count_tokens` with a real tokenizer. |
+| `TemplateError` saying roles must alternate (some templates, e.g. Gemma's) | The trimmed window can start with an assistant message, because the window is contiguous from the end, not aligned to user turns. | Write a policy that trims whole user/assistant pairs (see "How to extend it"). |
+| The configured policy is not used | A typo, or a custom policy registered after `ChatAgent` was built. `get_policy` falls back to `sliding_window` with a WARNING. | Check the log line, or `agent.memory_policy` in `/v1/info` (the policy actually in use). Register custom policies before building the agent. |
+| "Thinking" text seems to vanish from long conversations | By design: reasoning is never counted or sent back. | Nothing to fix. See `docs\howto\src\kumaru\agent\chat.md` for why. |
 
 ## Related files
-
-- `src\kumaru\agent\chat.py` — computes the budget and calls `MemoryPolicy.apply()`.
-- `src\kumaru\core\config.py` — defines `agent.memory_policy` and `agent.max_history_tokens`.
-- `src\kumaru\core\errors.py` — defines `ContextLengthExceededError`.
-- `src\kumaru\core\types.py` — defines `Message` and `Role`.
-- `src\kumaru\backends\base.py` — provides default `count_tokens()` and `context_length`.
-
+- `src\kumaru\agent\chat.py` — `ChatAgent.prepare()` computes the budget and calls `MemoryPolicy.apply()`. `describe()` reports `memory_policy`.
+- `src\kumaru\agent\prompt.py` — `ensure_system_message()` normalises the system message before the policy runs.
+- `src\kumaru\core\config.py` — `AgentConfig.max_history_tokens` and `memory_policy`.
+- `src\kumaru\core\errors.py` — `ContextLengthExceededError` (HTTP 413).
+- `src\kumaru\core\types.py` — `Message` (including `reasoning` and `to_openai()`) and `Role`.
+- `src\kumaru\backends\base.py` — the heuristic `count_tokens()` and `context_length`. `transformers_backend.py` and `llamacpp_backend.py` override the counter.
+- `docs\SCALABILITY.md` — where summarisation and RAG memory fit.

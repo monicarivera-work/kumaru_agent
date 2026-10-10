@@ -73,3 +73,23 @@ class TestConfigMerging:
         assert cfg.backend.model == "from-overrides"
         assert cfg.generation.max_tokens == 17  # env beats YAML/default
         assert cfg.generation.temperature == 0.25  # overrides beat env/default
+
+    def test_flash_attn_accepts_on_and_off_that_yaml_reads_as_booleans(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # YAML 1.1, which also parses env values, turns a bare on/off into True/False.
+        monkeypatch.setenv("KUMARU_BACKEND__LLAMA_SERVER__FLASH_ATTN", "off")
+        assert load_config("test").backend.llama_server.flash_attn == "off"
+        on = load_config(overrides={"backend": {"llama_server": {"flash_attn": True}}}, use_env=False)
+        assert on.backend.llama_server.flash_attn == "on"
+        with pytest.raises(ConfigError):
+            load_config(overrides={"backend": {"llama_server": {"flash_attn": "of"}}}, use_env=False)
+
+    def test_log_level_is_checked_when_the_config_loads(self) -> None:
+        def level(raw: str) -> str:
+            return load_config(overrides={"telemetry": {"log_level": raw}}, use_env=False).telemetry.log_level
+
+        assert (level(" debug "), level("warn"), level("Fatal")) == ("DEBUG", "WARNING", "CRITICAL")
+        # Unchecked, a typo surfaced only once `kumaru serve` started, as a KeyError in uvicorn.
+        with pytest.raises(ConfigError, match="log_level"):
+            level("verbose")

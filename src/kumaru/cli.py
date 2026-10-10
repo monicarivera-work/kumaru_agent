@@ -1,22 +1,24 @@
 """Command-line entry point: `kumaru <command>`.
 
-One binary, five verbs::
+One binary, seven commands::
 
     kumaru serve     # API + web UI
     kumaru chat      # terminal REPL, no server needed
     kumaru info      # what is installed, what hardware is visible
     kumaru config    # print the fully resolved configuration
     kumaru train     # fine-tune or pretrain
-    kumaru eval      # measure speed and quality
+    kumaru eval      # quick check: speed and a few known answers
+    kumaru bench     # public benchmarks with confidence intervals; compare runs
 
 Two rules keep the CLI fast and debuggable:
 
 * **Heavy imports happen inside command bodies**, never at module scope. `kumaru
   --help` must not import torch; if it did, every invocation would cost several
   seconds.
-* **Every command accepts `--config`** and the same override flags, so anything
-  you can express in YAML you can also express on the command line for a
-  one-off experiment.
+* **Every command that loads a model accepts `--config`** plus flags for the
+  settings you change most, for one-off experiments without editing YAML.
+  Backend flags are written into the config; `chat`'s generation flags travel
+  with each message, as the UI's settings do, so they beat the profile's presets.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from typing import Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -41,6 +44,11 @@ app = typer.Typer(
 )
 console = Console()
 
+CONTEXT_HELP = (
+    "Context window in tokens. With llama-server it sizes the KV cache, the main "
+    "VRAM cost after the weights: lower it (e.g. 65536) to free GPU memory."
+)
+
 
 def _build_overrides(**kwargs: Any) -> dict[str, Any]:
     """Turn flat CLI flags into the nested dict shape `load_config` expects."""
@@ -52,10 +60,13 @@ def _build_overrides(**kwargs: Any) -> dict[str, Any]:
         "adapter": ("backend", "adapter_path"),
         "base_url": ("backend", "base_url"),
         "load_in_4bit": ("backend", "load_in_4bit"),
+        "context": ("backend", "max_context_length"),
         "host": ("server", "host"),
         "port": ("server", "port"),
         "temperature": ("generation", "temperature"),
         "max_tokens": ("generation", "max_tokens"),
+        "thinking": ("generation", "thinking"),
+        "thinking_budget": ("generation", "thinking_budget"),
         "log_level": ("telemetry", "log_level"),
     }
     out: dict[str, Any] = {}
@@ -79,17 +90,18 @@ def _load(config: str | None, **flags: Any):
 @app.command()
 def serve(
     config: str = typer.Option(None, "--config", "-c", help="YAML file or profile name."),
-    backend: str = typer.Option(None, "--backend", "-b", help="echo | transformers | llamacpp | openai_compat"),
+    backend: str = typer.Option(None, "--backend", "-b", help="echo | llamacpp_server | transformers | llamacpp | openai_compat"),
     model: str = typer.Option(None, "--model", "-m", help="Model id or path."),
     device: str = typer.Option(None, "--device", help="auto | cuda | cpu | mps"),
     adapter: str = typer.Option(None, "--adapter", help="Path to a trained LoRA adapter."),
+    context: int = typer.Option(None, "--context", min=512, help=CONTEXT_HELP),
     host: str = typer.Option(None, "--host"),
     port: int = typer.Option(None, "--port", "-p"),
     log_level: str = typer.Option(None, "--log-level"),
 ) -> None:
     """Start the HTTP API and the web UI."""
     cfg = _load(config, backend=backend, model=model, device=device, adapter=adapter,
-                host=host, port=port, log_level=log_level)
+                context=context, host=host, port=port, log_level=log_level)
 
     console.print(
         Panel.fit(
@@ -117,19 +129,25 @@ def chat(
     model: str = typer.Option(None, "--model", "-m"),
     device: str = typer.Option(None, "--device"),
     adapter: str = typer.Option(None, "--adapter"),
-    temperature: float = typer.Option(None, "--temperature", "-t"),
-    max_tokens: int = typer.Option(None, "--max-tokens"),
+    context: int = typer.Option(None, "--context", min=512, help=CONTEXT_HELP),
+    temperature: float = typer.Option(None, "--temperature", "-t", min=0.0, max=2.0),
+    max_tokens: int = typer.Option(None, "--max-tokens", min=1, max=131072),
+    think: bool = typer.Option(None, "--think/--no-think", help="Force reasoning on or off (default: profile)."),
+    thinking_budget: int = typer.Option(None, "--thinking-budget", min=0, help="Max thinking tokens before answering."),
     prompt: str = typer.Option(None, "--prompt", "-q", help="Answer one question and exit."),
 ) -> None:
     """Chat in the terminal, with no server in between."""
     import asyncio
 
-    cfg = _load(config, backend=backend, model=model, device=device, adapter=adapter,
-                temperature=temperature, max_tokens=max_tokens)
-    asyncio.run(_chat_loop(cfg, prompt))
+    cfg = _load(config, backend=backend, model=model, device=device, adapter=adapter, context=context)
+    # Sent with every message, as the UI sends its settings, so a flag beats both
+    # of the profile's presets: `generation` and, while thinking, `thinking_mode`.
+    overrides = {"temperature": temperature, "max_tokens": max_tokens,
+                 "thinking": think, "thinking_budget": thinking_budget}
+    asyncio.run(_chat_loop(cfg, prompt, overrides))
 
 
-async def _chat_loop(cfg: Any, single_prompt: str | None) -> None:
+async def _chat_loop(cfg: Any, single_prompt: str | None, overrides: dict[str, Any]) -> None:
     from kumaru.agent.chat import ChatAgent
     from kumaru.core.registry import BACKENDS
     from kumaru.core.types import Message
@@ -150,10 +168,20 @@ async def _chat_loop(cfg: Any, single_prompt: str | None) -> None:
         console.print()
         parts: list[str] = []
         stats = None
+        thinking = False
         # Print tokens as they arrive: the point of streaming is that you start
-        # reading before generation finishes.
-        async for chunk in agent.stream(history):
+        # reading before generation finishes. Thoughts print dimmed; they are
+        # never added to the history sent back to the model.
+        async for chunk in agent.stream(history, **overrides):
+            if chunk.reasoning:
+                if not thinking:
+                    console.print("[dim italic]thinking…[/]")
+                    thinking = True
+                console.print(chunk.reasoning, end="", style="dim", markup=False, highlight=False)
             if chunk.delta:
+                if thinking:
+                    console.print("\n")
+                    thinking = False
                 parts.append(chunk.delta)
                 console.print(chunk.delta, end="", markup=False, highlight=False)
             if chunk.usage:
@@ -192,7 +220,7 @@ def info() -> None:
     """Show versions, hardware, and which optional components are installed."""
     import kumaru.agent.tools  # noqa: F401 - registers the built-in tools
     from kumaru.core.config import list_profiles
-    from kumaru.core.registry import BACKENDS, TOOLS
+    from kumaru.core.registry import BACKENDS, BENCHMARKS, TOOLS
 
     table = Table(title=f"Kumaru v{__version__}", show_header=False, border_style="dim")
     table.add_column(style="cyan", no_wrap=True)
@@ -201,6 +229,7 @@ def info() -> None:
     table.add_row("python", sys.version.split()[0])
     table.add_row("backends", ", ".join(BACKENDS.names()))
     table.add_row("tools", ", ".join(TOOLS.names()) or "(none)")
+    table.add_row("benchmarks", ", ".join(BENCHMARKS.names()))
     table.add_row("profiles", ", ".join(list_profiles()) or "(none)")
 
     def probe(module: str) -> str:
@@ -210,7 +239,8 @@ def info() -> None:
         except ImportError:
             return "[dim]not installed[/]"
 
-    for mod in ("torch", "transformers", "peft", "trl", "datasets", "bitsandbytes", "llama_cpp"):
+    for mod in ("torch", "transformers", "peft", "trl", "datasets", "bitsandbytes", "llama_cpp",
+                "langdetect", "nltk"):
         table.add_row(mod, probe(mod))
 
     try:
@@ -245,7 +275,8 @@ def show_config(
     guess.
     """
     cfg = _load(config, backend=backend, model=model)
-    console.print(Panel(cfg.dump_yaml(), title="resolved configuration", border_style="cyan"))
+    # Escaped: system prompts and stop sequences can hold brackets, such as "[/INST]".
+    console.print(Panel(escape(cfg.dump_yaml()), title="resolved configuration", border_style="cyan"))
 
 
 @app.command()
@@ -278,6 +309,109 @@ def evaluate(
     asyncio.run(run_eval(cfg, suite=suite, output=output))
 
 
+# ---------------------------------------------------------------------------
+# kumaru bench ...
+# ---------------------------------------------------------------------------
+
+bench_app = typer.Typer(
+    help="Score models on public benchmarks; compare runs with significance tests.",
+    no_args_is_help=True,
+)
+app.add_typer(bench_app, name="bench")
+
+
+@bench_app.command("list")
+def bench_list() -> None:
+    """Show the available benchmarks."""
+    from kumaru.eval.benchmarks.runner import list_benchmarks
+
+    table = Table(border_style="dim")
+    table.add_column("name", style="cyan", no_wrap=True)
+    table.add_column("what it measures")
+    table.add_column("source", style="dim")
+    table.add_column("runs code", justify="center")
+    for row in list_benchmarks():
+        table.add_row(row["name"], row["description"], row["source"],
+                      "[yellow]yes[/]" if row["code_exec"] else "")
+    console.print(table)
+    console.print("[dim]Any .jsonl file in the golden-set format also works as a benchmark "
+                  "(see data/bench/golden.jsonl).[/]")
+
+
+@bench_app.command("run")
+def bench_run(
+    benchmarks: list[str] = typer.Argument(..., help="Names from `kumaru bench list`, or golden-set .jsonl paths."),
+    config: str = typer.Option(None, "--config", "-c", help="YAML file or profile name."),
+    backend: str = typer.Option(None, "--backend", "-b"),
+    model: str = typer.Option(None, "--model", "-m"),
+    adapter: str = typer.Option(None, "--adapter"),
+    context: int = typer.Option(None, "--context", min=512, help=CONTEXT_HELP),
+    limit: int = typer.Option(100, "--limit", "-n", min=1, help="Questions per benchmark (a fixed, stratified sample)."),
+    full: bool = typer.Option(False, "--full", help="Every question; overrides --limit."),
+    seed: int = typer.Option(1234, "--seed", help="Picks the questions and each question's sampling seed."),
+    think: bool = typer.Option(None, "--think/--no-think", help="Force reasoning on or off (default: profile)."),
+    thinking_budget: int = typer.Option(None, "--thinking-budget", min=0, help="Max thinking tokens per question."),
+    max_tokens: int = typer.Option(None, "--max-tokens", min=1, max=131072, help="Output cap per question (default: 8192; thinking adds --thinking-budget, or uses the profile's max_tokens without one)."),
+    temperature: float = typer.Option(None, "--temperature", "-t", min=0.0, max=2.0, help="0 = greedy (default: the profile's preset)."),
+    concurrency: int = typer.Option(None, "--concurrency", "-j", min=1, help="Questions in flight (default: what the backend can batch)."),
+    label: str = typer.Option(None, "--label", help="Run name (default: <profile or model>-<thinking mode>, e.g. qwen36-think4096)."),
+    out: str = typer.Option(None, "--out", "-o", help="This run's own folder (default runs/bench/<timestamp>-<label>). Point at an earlier run to resume it."),
+    allow_code_exec: bool = typer.Option(False, "--allow-code-exec", help="Allow benchmarks that execute model-written code (humaneval)."),
+    use_agent_prompt: bool = typer.Option(False, "--use-agent-prompt", help="Prepend Kumaru's system prompt, as chat does."),
+) -> None:
+    """Run benchmarks; every answer is saved under runs/bench/."""
+    import asyncio
+
+    from kumaru.eval.benchmarks.runner import BenchSettings, render_summaries, run_benchmarks
+
+    cfg = _load(config, backend=backend, model=model, adapter=adapter, context=context)
+    settings = BenchSettings(
+        limit=None if full else limit,
+        seed=seed,
+        concurrency=concurrency,
+        thinking=think,
+        thinking_budget=thinking_budget,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        use_agent_prompt=use_agent_prompt,
+        allow_code_exec=allow_code_exec,
+        label=label,
+        out_dir=Path(out) if out else None,
+    )
+    out_dir, summaries = asyncio.run(
+        run_benchmarks(cfg, benchmarks, settings, profile=config, console=console)
+    )
+    console.print()
+    render_summaries(console, summaries)
+    console.print(f"\n[dim]saved to[/] {out_dir}")
+    console.print(f"[dim]details:[/] kumaru bench report {out_dir}")
+    console.print(f"[dim]compare:[/] kumaru bench compare <baseline-run> {out_dir}")
+
+
+@bench_app.command("compare")
+def bench_compare(
+    baseline: str = typer.Argument(..., help="Results directory of the baseline run (A)."),
+    candidate: str = typer.Argument(..., help="Results directory of the candidate run (B)."),
+    examples: int = typer.Option(0, "--examples", "-e", min=0, help="Also show up to N questions per benchmark that the runs answered differently."),
+) -> None:
+    """Did B really beat A? Paired differences with confidence intervals and p-values."""
+    from kumaru.eval.benchmarks.runner import compare_runs, render_comparisons, render_flips
+
+    render_comparisons(console, compare_runs(Path(baseline), Path(candidate)))
+    if examples:
+        render_flips(console, Path(baseline), Path(candidate), examples)
+
+
+@bench_app.command("report")
+def bench_report(
+    run: str = typer.Argument(..., help="Results directory from `kumaru bench run`."),
+) -> None:
+    """Show a saved run in detail: per-group accuracy, answer extraction, extra metrics."""
+    from kumaru.eval.benchmarks.runner import load_summaries, render_summaries
+
+    render_summaries(console, load_summaries(Path(run)), details=True)
+
+
 def main() -> None:
     """Console-script entry point with uniform error handling."""
     from kumaru.core.logging import ensure_utf8_streams
@@ -286,9 +420,11 @@ def main() -> None:
     try:
         app()
     except KumaruError as exc:
-        console.print(f"[red]error:[/] {exc.message}")
+        # Messages carry literal brackets, such as pip extras (".[gguf]") and
+        # pydantic details ("[type=missing]"); rich would read them as markup.
+        console.print(f"[red]error:[/] {escape(exc.message)}")
         if exc.hint:
-            console.print(f"[yellow]hint:[/] {exc.hint}")
+            console.print(f"[yellow]hint:[/] {escape(exc.hint)}")
         raise SystemExit(1) from exc
     except KeyboardInterrupt:
         console.print("\n[dim]interrupted[/]")

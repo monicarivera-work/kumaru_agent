@@ -10,8 +10,10 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+tests/.scratch/
 
 # Kumaru runtime artifacts
+/tools/llama.cpp/
 runs/
 checkpoints/
 adapters/
@@ -22,10 +24,12 @@ models/
 *.bin
 *.pt
 
-# Data (keep the tiny committed samples in data/samples/)
+# Data (keep the tiny committed samples and the golden benchmark set)
 data/*
 !data/samples/
 !data/samples/**
+!data/bench/
+!data/bench/**
 
 # Logs & local state
 logs/

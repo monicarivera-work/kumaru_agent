@@ -21,10 +21,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kumaru.core.errors import ConfigError
 from kumaru.core.types import GenerationParams
@@ -39,6 +39,58 @@ class _Base(BaseModel):
     # `extra="forbid"` converts a silent typo into a startup error. This single
     # setting removes an entire category of "why is my config being ignored" bugs.
     model_config = ConfigDict(extra="forbid")
+
+
+def default_models_dir() -> str:
+    """Where downloaded GGUF weights live unless `backend.models_dir` says otherwise."""
+    return str(Path.home() / ".cache" / "kumaru" / "models")
+
+
+class LlamaServerOptions(_Base):
+    """Knobs for the managed `llama-server` process (backend `llamacpp_server`).
+
+    Kumaru starts llama.cpp's own HTTP server as a child process and talks to it
+    over the OpenAI protocol. llama.cpp ships new model architectures and kernels
+    weeks before Python bindings do, so this is how Kumaru stays current: update
+    one binary, not your code.
+    """
+
+    # Path to llama-server(.exe). None = tools/llama.cpp/ (installed by
+    # scripts/get-llama-server.ps1), then whatever is on PATH.
+    binary: str | None = None
+    host: str = "127.0.0.1"
+    port: int | None = None  # None = pick a free port at startup
+    # Concurrent sequences ("slots"). Continuous batching interleaves them in
+    # one forward pass, so 4 parallel requests cost far less than 4x the time.
+    parallel: int = Field(default=4, ge=1, le=64)
+    # One shared KV-cache pool for all slots (instead of ctx/parallel each), so a
+    # single long conversation can still use the whole context window.
+    kv_unified: bool = True
+    flash_attn: Literal["on", "off", "auto"] = "on"
+    # KV-cache precision: f16 (default) | q8_0 | q4_0. q8_0 halves KV memory at a
+    # small quality cost; useful for very long contexts on small GPUs.
+    cache_type_k: str | None = None
+    cache_type_v: str | None = None
+    # Mixture-of-Experts offload: keep the expert weights of the first N layers
+    # in system RAM. The lever that fits a 35B MoE on a 12-16 GB GPU.
+    n_cpu_moe: int | None = Field(default=None, ge=0)
+    batch_size: int | None = Field(default=None, ge=1)  # -b, logical batch for prompts
+    ubatch_size: int | None = Field(default=None, ge=1)  # -ub, physical batch
+    # Text injected when a thinking budget runs out, nudging the model to answer.
+    reasoning_budget_message: str = (
+        "\n\nI have used my thinking budget, so I will now give my best final answer.\n"
+    )
+    startup_timeout_s: float = Field(default=900.0, gt=0)
+    log_file: str | None = None  # None = runs/logs/llama-server-<port>.log
+    extra_args: list[str] = Field(default_factory=list)  # appended verbatim
+
+    @field_validator("flash_attn", mode="before")
+    @classmethod
+    def _flash_attn_from_bool(cls, value: Any) -> Any:
+        # YAML 1.1, which also parses env overrides, reads a bare on/off as a bool.
+        if isinstance(value, bool):
+            return "on" if value else "off"
+        return value
 
 
 class BackendConfig(_Base):
@@ -67,10 +119,33 @@ class BackendConfig(_Base):
 
     # -- GGUF / llama.cpp ----------------------------------------------------
     model_path: str | None = None
-    n_gpu_layers: int = -1  # -1 = offload every layer it can fit
+    n_gpu_layers: int = -1  # -1 = all (llamacpp_server: as many as fit); see default.yaml
     n_threads: int | None = None
+    # Download/cache directory for GGUF weights resolved from "org/repo:QUANT"
+    # specs. Point it at your biggest, fastest disk (KUMARU_BACKEND__MODELS_DIR).
+    models_dir: str = Field(default_factory=default_models_dir)
+    llama_server: LlamaServerOptions = Field(default_factory=LlamaServerOptions)
 
     extra: dict[str, Any] = Field(default_factory=dict)
+
+
+class ThinkingModeConfig(_Base):
+    """Sampling preset applied *only* when thinking is on.
+
+    Reasoning models are tuned with different decoding settings for their two
+    modes (Qwen3.6: temperature 1.0 when thinking, 0.7 when not). Precedence:
+    ``generation`` < ``thinking_mode`` (if thinking) < per-request overrides.
+    Every field is optional; unset fields fall through to ``generation``.
+    """
+
+    max_tokens: int | None = Field(default=None, ge=1, le=131_072)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    top_k: int | None = Field(default=None, ge=0)
+    min_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    repetition_penalty: float | None = Field(default=None, ge=0.5, le=2.0)
+    thinking_budget: int | None = Field(default=None, ge=0)
 
 
 class AgentConfig(_Base):
@@ -86,7 +161,7 @@ class AgentConfig(_Base):
     # policy decides what to drop or compress.
     max_history_tokens: int = 6144
     memory_policy: str = "sliding_window"  # sliding_window | drop_oldest | none
-    # Reserved for the tool layer; empty means "pure chat", which is v0.1.
+    # Reserved for the tool layer; empty means "pure chat", the only mode so far.
     enabled_tools: list[str] = Field(default_factory=list)
     max_tool_iterations: int = 4
 
@@ -107,10 +182,21 @@ class ServerConfig(_Base):
 class TelemetryConfig(_Base):
     """Observability. Off-box telemetry is opt-in and off by default."""
 
-    log_level: str = "INFO"
+    # The levels that both Python logging and uvicorn understand.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_format: str = "console"  # console | json
     metrics_enabled: bool = True  # in-process counters exposed at /metrics
     trace_file: str | None = None  # JSONL of every request, for offline analysis
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _normalize_log_level(cls, value: Any) -> Any:
+        # Accept "warn", " Info " and similar; reject typos at load time rather
+        # than as a KeyError deep inside uvicorn when the server starts.
+        if isinstance(value, str):
+            level = value.strip().upper()
+            return {"WARN": "WARNING", "FATAL": "CRITICAL"}.get(level, level)
+        return value
 
 
 class KumaruConfig(_Base):
@@ -118,6 +204,7 @@ class KumaruConfig(_Base):
 
     backend: BackendConfig = Field(default_factory=BackendConfig)
     generation: GenerationParams = Field(default_factory=GenerationParams)
+    thinking_mode: ThinkingModeConfig = Field(default_factory=ThinkingModeConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)

@@ -40,15 +40,17 @@ Do not use it for 6-12 GB VRAM; use `configs/low-vram.yaml`. Do not use it for C
 | `server.host` | string | `127.0.0.1` | Server bind address. | Keep localhost unless you add `server.api_key`. |
 | `server.port` | int | `8080` | Server port. | Change if another service uses 8080. |
 | `server.max_concurrent_requests` | int | `4` | Number of admitted concurrent requests. | Keep low for one GPU; higher mostly adds queueing latency with Transformers. |
-| `telemetry.log_level` | string | `INFO` | Logging verbosity. | Use `DEBUG` only while troubleshooting. |
+| `telemetry.log_level` | level name | `INFO` | Logging verbosity of `kumaru serve`. | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in any case (`WARN` and `FATAL` are aliases); any other name fails at load. Use `DEBUG` only while troubleshooting. |
 
 ## How to use it
 
-Prerequisites:
+Prerequisites, in the Kumaru folder:
 
 ```powershell
-pip install kumaru
+.\scripts\setup.ps1 -Gpu    # a CUDA build of PyTorch, then pip install -e ".[train]"
 ```
+
+Outside Windows, `pip install -e ".[torch]"` in the Kumaru folder is enough; Linux PyTorch wheels from PyPI include CUDA.
 
 Optional long-context attention optimization, if your CUDA toolchain supports it:
 

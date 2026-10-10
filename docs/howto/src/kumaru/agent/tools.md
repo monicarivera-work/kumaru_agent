@@ -7,7 +7,7 @@
 ---
 
 ## What it does
-This file defines a `Tool` base class, a registered `current_time` reference tool, and `ToolBelt`, which resolves enabled tool names into runnable instances. `Tool.safe_run()` wraps execution with a wall-clock timeout and converts failures into strings the model can read. In v0.1, the chat path is intentionally inert unless tools are enabled, and `ChatAgent` only inserts tool descriptions into the prompt.
+This file defines a `Tool` base class, a registered `current_time` reference tool, and `ToolBelt`, which resolves enabled tool names into runnable instances. `Tool.safe_run()` wraps execution with a wall-clock timeout and converts failures into strings the model can read. Kumaru is still chat-only (v0.1 and v0.2), so the chat path is intentionally inert unless tools are enabled, and even then `ChatAgent` only inserts tool descriptions into the prompt.
 
 ## Why it exists
 Tool calling turns a chat model into an agent, but it also creates an unbounded model-driven loop. This seam lets Kumaru add tools without changing every layer at once, while preserving load-bearing safety properties: iteration caps in config and per-tool timeouts. Without the seam, adding tools later would require simultaneous changes to message schemas, streaming, backend calls, and orchestration.
@@ -132,7 +132,7 @@ If the tool lives in another package, expose it via the `kumaru.tools` entry-poi
 | Tool exception ends up in model text | `safe_run()` intentionally converts exceptions. | Raise `ToolError` for expected failures with actionable messages. |
 | Mutating tool ran without confirmation | Future loop ignored `Tool.read_only`. | Gate `read_only=False` tools before calling `invoke()`. |
 | Model loops forever asking for tools | Missing hard iteration cap in orchestration. | Enforce `config.agent.max_tool_iterations` in the tool loop. |
-| Enabled tools do not run automatically | v0.1 only describes tools; it has no model tool-call loop. | Implement the loop in `ChatAgent` and backend schema support. |
+| Enabled tools do not run automatically | Kumaru (v0.2) only describes tools; it has no model tool-call loop. | Implement the loop in `ChatAgent` and backend schema support. |
 
 ## Related files
 

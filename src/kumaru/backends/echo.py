@@ -70,6 +70,22 @@ class EchoBackend(Backend):
         )
 
         emitted = 0
+        if params.thinking:
+            # A stand-in "thought" so the reasoning channel (SSE field, UI
+            # panel, budget accounting) can be tested without a model.
+            thought = (
+                f"The user asked: {last_user.strip()[:80] or '(nothing)'}. "
+                "Echo cannot reason; this text only exercises the reasoning channel."
+            )
+            pieces = list(chunks_from_text(thought, size=8))
+            if params.thinking_budget is not None:
+                pieces = pieces[: params.thinking_budget]
+            for piece in pieces:
+                if self.delay_s:
+                    await asyncio.sleep(self.delay_s)
+                emitted += 1
+                yield StreamChunk(reasoning=piece)
+
         for piece in chunks_from_text(reply, size=6):
             if self.delay_s:
                 await asyncio.sleep(self.delay_s)

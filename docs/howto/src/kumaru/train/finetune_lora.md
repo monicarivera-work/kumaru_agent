@@ -163,9 +163,9 @@ To add another PEFT method, add a new config section in `config.py`, branch in `
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `Optional dependency 'transformers' is not installed` | Training extras are missing | Install `pip install "kumaru[train]"`. |
-| `Optional dependency 'peft' is not installed` | PEFT missing | Install `pip install "kumaru[train]"`. |
-| `load_in_4bit requires bitsandbytes` or bitsandbytes import fails | Quant extras missing | Install `pip install "kumaru[quant]"` or disable 4-bit. |
+| `Optional dependency 'transformers' is not installed` | Training extras are missing | `.\scripts\setup.ps1 -Gpu`; elsewhere `pip install -e ".[train]"` in the Kumaru folder. |
+| `Optional dependency 'peft' is not installed` | PEFT missing | `.\scripts\setup.ps1 -Gpu`; elsewhere `pip install -e ".[train]"` in the Kumaru folder. |
+| `load_in_4bit requires bitsandbytes` or bitsandbytes import fails | Quant extras missing | `.\scripts\setup.ps1 -Quant`, or `pip install -e ".[quant]"` in the Kumaru folder; or disable 4-bit. |
 | Base model has no chat template | Non-instruct tokenizer/model | Use an `-Instruct` checkpoint or set a tokenizer chat template. |
 | Adapter not changing output | Wrong adapter path, too little data, or labels supervise wrong tokens | Load `runs\...\adapter`, inspect `example_preview.txt`, use 500+ examples. |
 | Eval loss rises while train loss falls | Overfitting small data or rank too high | Reduce epochs/rank, add data, watch held-out eval loss. |

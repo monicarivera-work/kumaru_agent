@@ -21,7 +21,7 @@ Compatibility is a package-level feature: clients should see one stable way to c
 
 | Name | Signature | What it's for |
 |---|---|---|
-| `create_app` | `create_app(config: KumaruConfig | None = None) -> FastAPI` | Builds the FastAPI application; re-exported from `kumaru.server.app`. |
+| `create_app` | `create_app(config: KumaruConfig \| None = None) -> FastAPI` | Builds the FastAPI application; re-exported from `kumaru.server.app`. With no `config` it calls `load_config()`: field defaults plus `KUMARU_*` environment variables, with no YAML profile. |
 | `__all__` | `list[str] = ["create_app"]` | Defines the intentional package public surface. |
 
 ## How to use it
@@ -33,6 +33,8 @@ from kumaru.server import create_app
 
 app = create_app()
 ```
+
+With no argument the app uses field defaults plus `KUMARU_*` environment variables. The default backend is `transformers` with `Qwen/Qwen2.5-7B-Instruct`, which `from_pretrained` downloads from the Hugging Face Hub on first start if it is not cached. Pass a config, as below, unless that is what you want.
 
 ### Build an app with explicit config
 
@@ -48,12 +50,16 @@ app = create_app(config)
 
 ```python
 from fastapi.testclient import TestClient
+from kumaru.core.config import load_config
 from kumaru.server import create_app
 
-client = TestClient(create_app())
-res = client.get("/healthz")
-assert res.status_code in {200, 503}
+with TestClient(create_app(load_config("test"))) as client:  # `with` runs the lifespan, which starts loading
+    res = client.get("/healthz")
+    assert res.status_code in {200, 503}
+    print(res.json()["status"])  # "loading" or "ok"; "error" (with 503) if the load failed
 ```
+
+Without `with`, the lifespan never runs: nothing loads and `/healthz` keeps answering 200 with `"status": "loading"`.
 
 ## How to extend it
 Keep this file small. Add public server entry points here only when external callers should depend on them.

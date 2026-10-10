@@ -7,13 +7,15 @@
 ---
 
 ## What it does
-This module contains the architectural rule for the core package. `kumaru.core` defines contracts, configuration, errors, registries, logging, and data types that other layers depend on. It deliberately does not import from backends, agents, server, or training code.
+This module contains the architectural rule for the core package. `kumaru.core` defines contracts, configuration, errors, registries, logging, and data types that other layers depend on. It deliberately does not import from the backends, agent, server, train or eval packages.
 
 ## Why it exists
 Kumaru needs a stable centre that feature layers can share without forming import cycles. Without this boundary, adding a backend or tool could require editing core files or importing heavy runtime modules during simple operations such as config inspection.
 
 ## Mental model
 Dependencies point inward. Core may use standard library and low-level dependencies such as Pydantic or YAML, but product layers depend on core, not the other way round. If a core module needs knowledge of a concrete backend, the dependency has probably been inverted incorrectly.
+
+The one deliberate exception is `registry.py`. It names the built-in backends, and since v0.2 the `kumaru bench` benchmarks (`kumaru.eval.benchmarks.*`), but only as lazy `"module:Class"` strings. Nothing is imported until the first lookup by that name, so the import graph still points inward. The module docstring in `core\__init__.py` lists only backends, agent, server and train; the same rule applies to `kumaru.eval`.
 
 ## Public API
 | Name | Signature | What it's for |
@@ -35,9 +37,11 @@ message = Message.user("Hello")
 Keep feature code depending on core:
 
 ```python
+from kumaru.core.config import load_config
 from kumaru.core.registry import BACKENDS
 
-backend = BACKENDS.create("echo", config.backend)
+config = load_config("test")
+backend = BACKENDS.create(config.backend.name, config.backend)  # imports kumaru.backends.echo only now
 ```
 
 Avoid reverse imports from core into feature layers:
@@ -75,7 +79,7 @@ Consumers can then import it:
 from kumaru.core.request import RequestContext
 ```
 
-If the new code imports `kumaru.agent`, `kumaru.backends`, `kumaru.server`, or `kumaru.train`, keep it out of `kumaru.core` and place it in the owning feature package instead.
+If the new code imports `kumaru.agent`, `kumaru.backends`, `kumaru.server`, `kumaru.train` or `kumaru.eval`, keep it out of `kumaru.core` and place it in the owning feature package instead.
 
 ## Failure modes
 | Symptom | Likely cause | Fix |

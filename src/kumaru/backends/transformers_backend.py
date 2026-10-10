@@ -30,11 +30,18 @@ decision in this file:
 
 from __future__ import annotations
 
+import contextlib
+import importlib.util
 import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from kumaru.backends.base import Backend, StopSequenceTracker, iterate_in_thread
+from kumaru.backends.base import (
+    Backend,
+    ReasoningSplitter,
+    StopSequenceTracker,
+    iterate_in_thread,
+)
 from kumaru.core.config import BackendConfig
 from kumaru.core.errors import BackendError, DependencyMissingError
 from kumaru.core.logging import get_logger
@@ -49,6 +56,7 @@ class TransformersBackend(Backend):
     """Run a Hugging Face causal LM locally, with optional 4/8-bit and LoRA."""
 
     name = "transformers"
+    supports_adapters = True
 
     def __init__(self, config: BackendConfig) -> None:
         super().__init__(config)
@@ -166,10 +174,11 @@ class TransformersBackend(Backend):
             self.config.max_context_length = min(cfg.max_context_length, detected)
 
     def _quantization_config(self, dtype: Any) -> Any:
-        try:
-            from transformers import BitsAndBytesConfig
-        except ImportError as exc:  # pragma: no cover
-            raise DependencyMissingError("bitsandbytes", extra="quant") from exc
+        # transformers ships BitsAndBytesConfig even when the bitsandbytes library
+        # it drives is missing, and would then fail later with a generic pip hint.
+        if importlib.util.find_spec("bitsandbytes") is None:
+            raise DependencyMissingError("bitsandbytes", extra="quant")
+        from transformers import BitsAndBytesConfig
 
         if self.config.load_in_4bit:
             # NF4 + double quantization is the QLoRA recipe: it is
@@ -193,7 +202,7 @@ class TransformersBackend(Backend):
         if not os.path.exists(adapter_path):
             raise BackendError(
                 f"Adapter not found: {adapter_path}",
-                hint="Train one with `kumaru train --config configs/train/lora-qwen.yaml`",
+                hint="Train one with `kumaru train configs/train/lora-qwen.yaml`",
             )
         logger.info("attaching LoRA adapter: %s", adapter_path)
         self.model = PeftModel.from_pretrained(self.model, adapter_path)
@@ -261,7 +270,7 @@ class TransformersBackend(Backend):
         except Exception:  # pragma: no cover - never fail a request over accounting
             return super().count_tokens(messages)
 
-    def _render_prompt(self, messages: Sequence[Message]) -> str:
+    def _render_prompt(self, messages: Sequence[Message], thinking: bool | None = None) -> str:
         """Turn structured messages into the exact string the model expects.
 
         Chat models are trained with specific control tokens (Qwen uses
@@ -270,11 +279,15 @@ class TransformersBackend(Backend):
         subtly bad": it is being asked a question in a format it never saw
         during training. `apply_chat_template` reads the format out of the
         checkpoint, so it is always right for whatever model you loaded.
+
+        `thinking` becomes the template variable `enable_thinking` (the Qwen3 /
+        DeepSeek / GLM convention). Templates that do not use it ignore it.
         """
         payload = [m.to_openai() for m in messages]
         if getattr(self.tokenizer, "chat_template", None):
+            extra: dict[str, Any] = {} if thinking is None else {"enable_thinking": thinking}
             return self.tokenizer.apply_chat_template(
-                payload, tokenize=False, add_generation_prompt=True
+                payload, tokenize=False, add_generation_prompt=True, **extra
             )
         # Fallback for base (non-instruct) checkpoints with no template.
         lines = [f"{m['role'].upper()}: {m['content']}" for m in payload]
@@ -290,10 +303,13 @@ class TransformersBackend(Backend):
             await self.load()
 
         import torch
-        from transformers import TextIteratorStreamer
+        from transformers import StoppingCriteria, StoppingCriteriaList, TextIteratorStreamer
 
         tokenizer, model = self.tokenizer, self.model
-        prompt = self._render_prompt(messages)
+        prompt = self._render_prompt(messages, thinking=params.thinking)
+        # Some templates pre-open the thinking block in the prompt, so the
+        # output starts mid-thought and only "</think>" ever appears.
+        splitter = ReasoningSplitter(start_in_reasoning=prompt.rstrip().endswith("<think>"))
 
         def produce():
             import threading
@@ -316,15 +332,47 @@ class TransformersBackend(Backend):
             if params.seed is not None:
                 torch.manual_seed(params.seed)
 
-            streamer = TextIteratorStreamer(
-                tokenizer, skip_prompt=True, skip_special_tokens=True, timeout=600
-            )
+            class CountingStreamer(TextIteratorStreamer):
+                """Also counts tokens: the text it yields comes in whole words."""
+
+                def __init__(self) -> None:
+                    super().__init__(
+                        tokenizer, skip_prompt=True, skip_special_tokens=True, timeout=600
+                    )
+                    self.prompt_seen = False
+                    self.generated = 0
+                    self.last_token: int | None = None
+
+                def put(self, value: Any) -> None:
+                    # `generate` passes the prompt first, then each new token.
+                    if self.prompt_seen:
+                        ids = value.reshape(-1).tolist()
+                        self.generated += len(ids)
+                        self.last_token = ids[-1] if ids else self.last_token
+                    self.prompt_seen = True
+                    super().put(value)
+
+            streamer = CountingStreamer()
+            # `generate` runs to max_new_tokens unless told otherwise; this flag,
+            # checked after every token, tells it nobody wants the rest.
+            halt = threading.Event()
+
+            class HaltWhenAsked(StoppingCriteria):
+                def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> Any:
+                    return torch.full(
+                        (input_ids.shape[0],),
+                        halt.is_set(),
+                        dtype=torch.bool,
+                        device=input_ids.device,
+                    )
+
             kwargs: dict[str, Any] = {
                 **encoded,
                 "streamer": streamer,
                 "max_new_tokens": max_new,
                 "pad_token_id": tokenizer.pad_token_id,
                 "eos_token_id": tokenizer.eos_token_id,
+                "stopping_criteria": StoppingCriteriaList([HaltWhenAsked()]),
             }
             if params.temperature > 0:
                 kwargs.update(
@@ -335,6 +383,10 @@ class TransformersBackend(Backend):
                 )
                 if params.top_k > 0:
                     kwargs["top_k"] = params.top_k
+                if params.min_p:
+                    kwargs["min_p"] = params.min_p
+                # presence_penalty and thinking_budget have no transformers
+                # equivalent; they are honoured by the llama-server backend.
             else:
                 # temperature == 0 means greedy. Passing sampling knobs alongside
                 # do_sample=False makes transformers emit warnings and ignore them.
@@ -346,28 +398,38 @@ class TransformersBackend(Backend):
             worker.start()
 
             tracker = StopSequenceTracker(params.stop)
-            produced = 0
             try:
                 for piece in streamer:
                     if not piece:
                         continue
-                    produced += 1
-                    safe = tracker.push(piece)
-                    if safe:
-                        yield StreamChunk(delta=safe)
+                    thought, text = splitter.push(piece)
+                    safe = tracker.push(text) if text else ""
+                    if thought or safe:
+                        yield StreamChunk(delta=safe, reasoning=thought)
                     if tracker.stopped:
                         break
-                tail = tracker.flush()
-                if tail:
-                    yield StreamChunk(delta=tail)
             finally:
+                # Reached when generate finished, a stop sequence matched, or
+                # the reader went away (the yield above raised GeneratorExit).
+                halt.set()
                 worker.join(timeout=1.0)
 
-            reason = "stop" if (tracker.stopped or produced < max_new) else "length"
+            thought, text = splitter.flush()
+            tail = (tracker.push(text) if text else "") + tracker.flush()
+            if thought or tail:
+                yield StreamChunk(delta=tail, reasoning=thought)
+
+            # Cut off only if the budget ran out on a token other than
+            # end-of-sequence: a model can finish exactly on its last allowed one.
+            eos = tokenizer.eos_token_id
+            eos_ids = set(eos) if isinstance(eos, (list, tuple)) else {eos}
+            truncated = streamer.generated >= max_new and streamer.last_token not in eos_ids
+            reason = "length" if truncated and not tracker.stopped else "stop"
             yield StreamChunk(
                 finish_reason=reason,
-                usage=Usage(prompt_tokens=prompt_tokens, completion_tokens=produced),
+                usage=Usage(prompt_tokens=prompt_tokens, completion_tokens=streamer.generated),
             )
 
-        async for chunk in iterate_in_thread(produce):
-            yield chunk
+        async with contextlib.aclosing(iterate_in_thread(produce)) as chunks:
+            async for chunk in chunks:
+                yield chunk

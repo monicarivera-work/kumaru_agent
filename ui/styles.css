@@ -35,7 +35,9 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-#app { display: grid; grid-template-columns: 300px 1fr; height: 100vh; }
+/* minmax(0, 1fr): the row is exactly the window's height. A plain auto row
+   grows with a long conversation and pushes the composer off-screen. */
+#app { display: grid; grid-template-columns: 300px 1fr; grid-template-rows: minmax(0, 1fr); height: 100vh; }
 
 /* ───────────────────────── Sidebar ───────────────────────── */
 
@@ -82,6 +84,14 @@ body {
 .slider > span { font-size: 11.5px; color: var(--text-dim); display: flex; justify-content: space-between; }
 .slider b { font-family: var(--mono); color: var(--accent); font-weight: 500; }
 .slider small { font-size: 10px; color: var(--text-faint); line-height: 1.4; }
+/* Sliders the model profile is currently controlling: visible, but inert. */
+.slider.is-disabled { opacity: .5; }
+.slider.is-disabled b { color: var(--text-dim); }
+input[type="range"]:disabled { cursor: not-allowed; }
+
+.check { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); cursor: pointer; }
+.check input { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
+.muted b { color: var(--text-dim); font-weight: 600; }
 
 input[type="range"] { -webkit-appearance: none; appearance: none; height: 3px;
   background: var(--border); border-radius: 2px; outline: none; }
@@ -174,18 +184,51 @@ button.ghost:hover { color: var(--text); }
 @keyframes blink { 50% { opacity: 0; } }
 
 .msg-meta { font-size: 10.5px; color: var(--text-faint); font-family: var(--mono); margin-top: 7px; }
+.bubble .note { color: var(--text-faint); font-style: italic; }
+
+/* Thinking: the model's reasoning, shown above the answer. Plain text in a
+   fixed-height scroller, so a 20,000-token thought never shoves the answer
+   off-screen. Collapsed once the answer starts. */
+.thinking { margin: 0 0 12px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-panel); }
+.thinking > summary { list-style: none; cursor: pointer; user-select: none; padding: 6px 12px;
+  font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 8px; }
+.thinking > summary::-webkit-details-marker { display: none; }
+/* A drawn chevron: crisp at any zoom, unlike a tiny ▸ glyph. */
+.thinking > summary::before { content: ""; width: 5px; height: 5px; flex-shrink: 0;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform .15s ease; margin: 0 2px 0 1px; }
+.thinking[open] > summary::before { transform: rotate(45deg); }
+.thinking > summary:hover { color: var(--text); }
+/* Collapsed, it is just a label; open, it takes the full width to be readable. */
+.thinking:not([open]) { width: fit-content; }
+.thinking.live .think-label { animation: pulse 1.4s ease-in-out infinite; }
+.thinking-body { border-top: 1px solid var(--border); padding: 9px 14px 11px; max-height: 280px;
+  overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px;
+  line-height: 1.55; color: var(--text-dim); }
 
 /* ───────────────────────── Composer ───────────────────────── */
 
 #composer { padding: 12px 24px 16px; border-top: 1px solid var(--border); background: var(--bg); }
-.composer-inner { max-width: 780px; margin: 0 auto; display: flex; gap: 9px; align-items: flex-end;
-  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 12px; padding: 8px 8px 8px 14px; }
+.composer-inner { max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 6px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 12px; padding: 9px 8px 8px 14px; }
 .composer-inner:focus-within { border-color: var(--accent-dim); }
+.composer-bar { display: flex; align-items: center; gap: 8px; }
+.composer-bar .spacer { flex: 1; }
 #input { background: none; border: none; font-family: var(--sans); font-size: 14px;
-  max-height: 200px; padding: 5px 0; line-height: 1.5; }
+  max-height: 200px; padding: 2px 6px 0 0; line-height: 1.5; }
 #input:focus { outline: none; }
 #send-btn, #stop-btn { width: 33px; height: 33px; padding: 0; display: grid; place-items: center; flex-shrink: 0; }
 #stop-btn { background: var(--err); color: #fff; }
+
+/* A toggle that lives next to the message box, because it is chosen per message. */
+.pill { display: inline-flex; align-items: center; gap: 6px; background: none; color: var(--text-faint);
+  border: 1px solid var(--border); border-radius: 999px; padding: 4px 11px 4px 9px;
+  font-size: 12px; font-weight: 500; }
+.pill:hover:not(:disabled) { color: var(--text); filter: none; }
+.pill[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim);
+  background: rgba(110, 168, 254, .09); }
+.pill:focus-visible { outline: 2px solid var(--accent-dim); outline-offset: 2px; }
 .hint { max-width: 780px; margin: 8px auto 0; font-size: 10.5px; color: var(--text-faint); text-align: center; }
 .hidden { display: none !important; }
 

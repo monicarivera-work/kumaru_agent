@@ -1,5 +1,6 @@
 """Shared offline fixtures for exercising Kumaru without model downloads."""
 
+import shutil
 from collections.abc import Generator
 from pathlib import Path
 
@@ -51,15 +52,11 @@ def test_client(echo_config: KumaruConfig) -> Generator[TestClient, None, None]:
 
 @pytest.fixture
 def scratch_dir() -> Generator[Path, None, None]:
+    """An empty directory under tests/.scratch, removed (recursively) afterwards."""
     path = Path(__file__).resolve().parent / ".scratch"
-    path.mkdir(exist_ok=True)
-    for item in path.iterdir():
-        if item.is_file():
-            item.unlink()
+    shutil.rmtree(path, ignore_errors=True)
+    path.mkdir()
     try:
         yield path
     finally:
-        for item in path.iterdir():
-            if item.is_file():
-                item.unlink()
-        path.rmdir()
+        shutil.rmtree(path, ignore_errors=True)

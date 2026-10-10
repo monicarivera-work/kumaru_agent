@@ -5,9 +5,10 @@ import pytest
 from kumaru.agent.chat import ChatAgent
 from kumaru.agent.memory import DropOldestPolicy, NoTrimPolicy, SlidingWindowPolicy, get_policy
 from kumaru.agent.prompt import QUALITY_DIRECTIVES, build_system_prompt, ensure_system_message
-from kumaru.core.config import AgentConfig, BackendConfig, KumaruConfig
+from kumaru.backends.echo import EchoBackend
+from kumaru.core.config import AgentConfig, BackendConfig, KumaruConfig, ThinkingModeConfig
 from kumaru.core.errors import ContextLengthExceededError
-from kumaru.core.types import Message, Role
+from kumaru.core.types import GenerationParams, Message, Role
 
 
 def count_words(messages: list[Message]) -> int:
@@ -89,3 +90,88 @@ class TestChatAgent:
         chunks = [chunk async for chunk in chat_agent.stream([Message.user("hello")], max_tokens=8)]
         assert "You said: hello" in "".join(chunk.delta for chunk in chunks)
         assert chunks[-1].finish_reason == "stop"
+
+
+class TestThinkingParams:
+    """Precedence: `generation` < `thinking_mode` (only while thinking) < the request."""
+
+    @staticmethod
+    def make_agent(thinking: bool | None = None) -> ChatAgent:
+        cfg = KumaruConfig(
+            backend=BackendConfig(name="echo", model="echo", extra={"delay_s": 0}),
+            generation=GenerationParams(max_tokens=100, temperature=0.7, thinking=thinking),
+            thinking_mode=ThinkingModeConfig(max_tokens=4000, temperature=1.0, thinking_budget=1000),
+        )
+        return ChatAgent(EchoBackend(cfg.backend), cfg)
+
+    def test_without_thinking_the_preset_is_ignored(self) -> None:
+        params = self.make_agent().resolve_params()
+        assert (params.max_tokens, params.temperature, params.thinking_budget) == (100, 0.7, None)
+
+    def test_a_thinking_request_applies_the_preset(self) -> None:
+        params = self.make_agent().resolve_params(thinking=True)
+        assert (params.thinking, params.max_tokens, params.temperature) == (True, 4000, 1.0)
+        assert params.thinking_budget == 1000
+
+    def test_thinking_on_by_default_applies_the_preset(self) -> None:
+        params = self.make_agent(thinking=True).resolve_params()
+        assert (params.max_tokens, params.temperature) == (4000, 1.0)
+
+    def test_a_request_can_turn_default_thinking_off(self) -> None:
+        params = self.make_agent(thinking=True).resolve_params(thinking=False)
+        assert (params.thinking, params.max_tokens, params.temperature) == (False, 100, 0.7)
+
+    def test_request_values_beat_the_preset_and_none_means_unset(self) -> None:
+        params = self.make_agent().resolve_params(thinking=True, temperature=0.2, max_tokens=None)
+        assert (params.temperature, params.max_tokens) == (0.2, 4000)
+
+    @pytest.mark.asyncio
+    async def test_history_budget_reserves_the_resolved_answer_length(self, monkeypatch) -> None:
+        agent = self.make_agent()
+        reserved: list[int | None] = []
+        prepare = agent.prepare
+
+        def spy(messages, *, extra_context=None, reserve_tokens=None):
+            reserved.append(reserve_tokens)
+            return prepare(messages, extra_context=extra_context, reserve_tokens=reserve_tokens)
+
+        monkeypatch.setattr(agent, "prepare", spy)
+        await agent.backend.load()
+        try:
+            result = await agent.complete([Message.user("hi")], thinking=True)
+            _ = [chunk async for chunk in agent.stream([Message.user("hi")])]
+        finally:
+            await agent.backend.aclose()
+        # A thinking answer can be 40x longer, so history must shrink to make room.
+        assert reserved == [4000, 100]
+        assert "max_tokens=4000, temperature=1.0" in result.message.content  # echo reports params
+
+    def test_a_huge_answer_cap_still_leaves_half_the_window_for_history(self, monkeypatch) -> None:
+        # qwen36 at --context 32768: reserving its 32k cap in full would leave 512 tokens.
+        cfg = KumaruConfig(
+            backend=BackendConfig(name="echo", model="echo", max_context_length=32768, extra={"delay_s": 0}),
+            agent=AgentConfig(max_history_tokens=65536),
+        )
+        agent = ChatAgent(EchoBackend(cfg.backend), cfg)
+        budgets: list[int] = []
+        monkeypatch.setattr(
+            agent.memory, "apply", lambda messages, budget, count: budgets.append(budget) or list(messages)
+        )
+        agent.prepare([Message.user("hi")], reserve_tokens=32768)
+        agent.prepare([Message.user("hi")], reserve_tokens=1000)
+        assert budgets == [32768 // 2 - 128, 32768 - 1000 - 128]
+
+    @pytest.mark.asyncio
+    async def test_the_reply_is_capped_to_the_room_the_prompt_leaves(self) -> None:
+        cfg = KumaruConfig(
+            backend=BackendConfig(name="echo", model="echo", max_context_length=2048, extra={"delay_s": 0}),
+            generation=GenerationParams(max_tokens=2048),
+        )
+        agent = ChatAgent(EchoBackend(cfg.backend), cfg)
+        await agent.backend.load()
+        try:
+            result = await agent.complete([Message.user("word " * 60)])
+        finally:
+            await agent.backend.aclose()
+        # Strict servers reject prompt + max_tokens > window, so the cap shrinks to fit.
+        assert f"max_tokens={2048 - result.usage.prompt_tokens}," in result.message.content

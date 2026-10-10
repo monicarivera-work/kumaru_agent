@@ -135,7 +135,7 @@ To save optimizer state for exact resume, include `optimizer.state_dict()` in `_
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `Optional dependency 'torch' is not installed` | Training extras missing | Install `pip install "kumaru[train]"`. |
+| `Optional dependency 'torch' is not installed` | Training extras missing | `.\scripts\setup.ps1 -Gpu`; elsewhere `pip install -e ".[torch]"` in the Kumaru folder (`.[train]` also works). |
 | `tokens.bin` missing on non-main rank | Rank 0 did not pack or barrier failed | Ensure shared output directory and launch with `torchrun`. |
 | `too few for seq_length` | Corpus token count is less than one window | Use more text or reduce `model.max_seq_length`. |
 | NaN loss or exploding grad norm | LR too high, bad data, or unstable precision | Lower LR, keep warmup, use grad clipping, verify bf16 support. |

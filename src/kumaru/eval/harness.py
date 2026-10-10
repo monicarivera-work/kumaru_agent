@@ -156,6 +156,7 @@ def load_suite(suite: str) -> tuple[str, list[Case]]:
 async def run_eval(config: KumaruConfig, *, suite: str = "smoke", output: str | None = None) -> EvalResult:
     """Run a suite against a configured backend and report the results."""
     from rich.console import Console
+    from rich.markup import escape
     from rich.table import Table
 
     from kumaru.agent.chat import ChatAgent
@@ -174,7 +175,8 @@ async def run_eval(config: KumaruConfig, *, suite: str = "smoke", output: str | 
 
     try:
         for i, case in enumerate(cases, 1):
-            console.print(f"[dim]{i}/{len(cases)}[/] {case.prompt[:64]}…")
+            # Prompts are user data: rich would read "[/INST]" as a closing tag and raise.
+            console.print(f"[dim]{i}/{len(cases)}[/] {escape(case.prompt[:64])}…")
             # temperature=0 makes eval deterministic. Evaluating with sampling on
             # means re-running gives a different score, and you can no longer
             # attribute a change to your edit rather than to luck.
@@ -234,11 +236,11 @@ async def run_eval(config: KumaruConfig, *, suite: str = "smoke", output: str | 
         elif r.forbidden_hits:
             note = f"forbidden: {', '.join(r.forbidden_hits)}"
         table.add_row(
-            r.tag,
+            escape(r.tag),
             "[green]pass[/]" if r.passed else "[red]FAIL[/]",
             f"{r.tokens_per_second:.1f}",
             f"{r.ttft_ms:.0f}ms" if r.ttft_ms else "—",
-            note,
+            escape(note),
         )
 
     console.print(table)

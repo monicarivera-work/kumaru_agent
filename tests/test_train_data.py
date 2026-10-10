@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+# kumaru.train.data imports numpy at the top; a base install (no training extras) skips this file.
+pytest.importorskip("numpy")
+
 from kumaru.core.config import REPO_ROOT
 from kumaru.core.errors import ConfigError
 from kumaru.train.data import (
@@ -120,6 +123,7 @@ def test_encode_conversation_returns_none_for_oversized_examples(fake_tokenizer:
 
 
 def test_sft_collator_pads_shapes_labels_and_multiple() -> None:
+    pytest.importorskip("torch")
     collator = SFTCollator(pad_token_id=9, pad_to_multiple_of=4)
     batch = collator(
         [

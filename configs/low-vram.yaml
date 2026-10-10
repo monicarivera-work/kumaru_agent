@@ -10,7 +10,7 @@
 # reasoning and exact recall. NF4 with double quantization (the QLoRA recipe) is
 # the best-understood trade-off available, which is why it is the default here.
 #
-# Requires:  pip install "kumaru[quant]"
+# Requires:  .\scripts\setup.ps1 -Gpu -Quant   (elsewhere: pip install -e ".[torch,quant]")
 # Run:       kumaru serve -c low-vram
 
 backend:

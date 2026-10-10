@@ -33,10 +33,10 @@ Do not use it without the quantization extras. Do not expect identical quality t
 
 ## How to use it
 
-Prerequisites:
+Prerequisites, in the Kumaru folder. The profile runs on the `transformers` backend, so it needs `-Gpu` as well as `-Quant`:
 
 ```powershell
-pip install "kumaru[quant]"
+.\scripts\setup.ps1 -Gpu -Quant    # elsewhere: pip install -e ".[torch,quant]"
 ```
 
 Run:
@@ -69,7 +69,7 @@ kumaru config -c low-vram
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Import error for quantization libraries | `kumaru[quant]` dependencies are missing. | Install `pip install "kumaru[quant]"`. |
+| `Optional dependency 'bitsandbytes' is not installed.` when the model loads | The `quant` extra is missing; Kumaru checks for it before the weights load. | `.\scripts\setup.ps1 -Quant`, or `pip install -e ".[quant]"` in the Kumaru folder (the hint prints this). |
 | OOM despite 4-bit loading | KV cache, activations, or concurrency exceed VRAM. | Lower context and concurrency. |
 | Outputs are slightly worse than bf16 | NF4 quantization quality trade-off. | Use `local-gpu` if hardware permits. |
 | Slow first run | Hugging Face weights are downloading. | Wait for cache population; subsequent starts are faster. |

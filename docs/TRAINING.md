@@ -37,6 +37,8 @@ Fine-tuning facts into weights is expensive, slow to update, and fails silently 
 
 **Do the first one.** Read the second one's code and run it once, because reading a training loop with no framework in the way is the fastest way to understand what every framework is hiding.
 
+**Which model you fine-tune.** Training needs a model's original PyTorch weights, so the LoRA path tunes `Qwen/Qwen2.5-7B-Instruct`, and the adapter it produces loads only on the `transformers` backend. The GGUF files that the `qwen36` and `qwen25-7b-gguf` profiles serve are compressed copies made for inference, not training. Tuning `qwen36` itself needs more than a 24 GB card: at 4 bits its frozen weights alone are ~18 GB before any activations ([why](SCALABILITY.md#where-the-memory-actually-goes)).
+
 ---
 
 # Part 1 — LoRA fine-tuning
@@ -131,7 +133,7 @@ kumaru chat --model Qwen/Qwen2.5-0.5B-Instruct --adapter runs/lora-small/adapter
 ## Step 3 — The real run
 
 ```powershell
-pip install "kumaru[train,quant]"
+.\scripts\setup.ps1 -Gpu -Quant    # adds bitsandbytes; elsewhere: pip install -e ".[train,quant]" in the Kumaru folder
 
 kumaru train configs/train/lora-qwen.yaml --dry-run
 kumaru train configs/train/lora-qwen.yaml
@@ -154,6 +156,8 @@ backend:
   adapter_path: runs/lora-qwen/adapter
 ```
 
+These commands pass no `-c`, so they run on the built-in defaults, whose backend is `transformers`: the only backend that attaches an adapter. The other backends refuse one with `error: The <name> backend cannot attach a LoRA adapter`, rather than quietly answering with the untuned model. To serve a tuned model from `llama-server` instead, llama.cpp can convert a PEFT adapter to GGUF (`convert_lora_to_gguf.py` in the llama.cpp repository), and `llama-server` loads one with `--lora`. Kumaru does not automate that yet.
+
 ---
 
 ## Step 4 — Did it work?
@@ -166,6 +170,20 @@ kumaru eval --suite smoke --model Qwen/Qwen2.5-7B-Instruct --output before.json
 Compare per-tag pass rates. A tag that regressed tells you exactly what you damaged.
 
 **The most common fine-tuning outcome is a model that is better at your task and worse at everything else.** That is catastrophic forgetting, and you only detect it by measuring capabilities your dataset never covered.
+
+For a verdict you can trust, run the same benchmark questions on both models and let `compare` judge the difference question by question ([how to read it](BENCHMARKS.md#4-reading-the-numbers)):
+
+```powershell
+pip install -e ".[bench]"
+kumaru bench run golden gsm8k ifeval mmlu_pro -m Qwen/Qwen2.5-7B-Instruct -o runs/bench/base
+kumaru bench run golden gsm8k ifeval mmlu_pro -m Qwen/Qwen2.5-7B-Instruct --adapter runs/lora-qwen/adapter -o runs/bench/tuned
+kumaru bench compare runs/bench/base runs/bench/tuned --examples 3
+```
+
+- **Your task should improve.** Add questions about it to `golden` first ([how](BENCHMARKS.md#8-your-own-golden-questions)), or the comparison cannot see what you trained for.
+- **The public benchmarks should not get worse.** A significant drop on one of them is forgetting.
+- **100 questions resolve only large differences**, about 10 points. To catch smaller regressions, add `-n 500` or `--full`.
+- **Expect it to be slow.** The `transformers` backend answers one question at a time, unlike the batched `llama-server` runs in BENCHMARKS.md. An interrupted run resumes when you repeat its command.
 
 ---
 
@@ -325,8 +343,9 @@ model:
 | CUDA OOM | Too much memory requested | Follow the OOM list above, in order |
 | "Every example was dropped" | `max_seq_length` too small | Raise it, or shorten examples |
 | Adapter has no visible effect | Not loaded, or LR too low | Confirm `adapter_path` in `kumaru config`; check train loss actually fell |
+| `error: The llamacpp_server backend cannot attach a LoRA adapter` | The profile serves a GGUF file (e.g. `-c qwen36`); only `transformers` loads PEFT adapters | Drop `-c` and pass the adapter's base model, as in Step 3; for GGUF, convert the adapter first (Step 3) |
 | Model got worse at everything | Catastrophic forgetting | Lower LR, fewer epochs, mix in 10–20% general data |
-| `bitsandbytes` import error | Optional dep missing | `pip install "kumaru[quant]"`, or set `load_in_4bit: false` |
+| `bitsandbytes` import error | Optional dep missing | `.\scripts\setup.ps1 -Quant` (or `pip install -e ".[quant]"` in the Kumaru folder), or set `load_in_4bit: false` |
 
 ---
 

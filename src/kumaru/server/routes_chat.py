@@ -30,7 +30,7 @@ from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from kumaru import __version__
-from kumaru.core.errors import KumaruError
+from kumaru.core.errors import AuthError, KumaruError, RequestError
 from kumaru.core.logging import get_logger
 from kumaru.core.registry import BACKENDS, TOOLS
 from kumaru.server.app import AppState
@@ -66,7 +66,7 @@ async def require_auth(
         return
     supplied = (authorization or "").removeprefix("Bearer ").strip()
     if supplied != expected:
-        raise KumaruError("Invalid or missing API key.", hint="Send 'Authorization: Bearer <key>'.")
+        raise AuthError("Invalid or missing API key.", hint="Send 'Authorization: Bearer <key>'.")
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +80,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request):
     agent = await state.ensure_ready()
 
     if not body.messages:
-        raise KumaruError("`messages` must contain at least one message.")
+        raise RequestError("`messages` must contain at least one message.")
 
     overrides = body.generation_overrides()
     messages = body.to_domain()
@@ -122,6 +122,10 @@ async def _stream_sse(
     model = state.config.backend.model
     started = time.perf_counter()
     ttft_ms: float | None = None
+    # When thinking is on, the first token is a thought; "time to answer" and
+    # "time spent thinking" are reported separately so the UI can show both.
+    reasoning_started: float | None = None
+    answer_started: float | None = None
     usage = None
 
     def frame(payload: dict) -> str:
@@ -140,17 +144,33 @@ async def _stream_sse(
                     logger.info("client disconnected; aborting generation")
                     break
 
-                if chunk.delta:
+                if chunk.delta or chunk.reasoning:
+                    now = time.perf_counter()
                     if ttft_ms is None:
-                        ttft_ms = (time.perf_counter() - started) * 1000
+                        ttft_ms = (now - started) * 1000
+                    if chunk.reasoning and reasoning_started is None:
+                        reasoning_started = now
+                    if chunk.delta and answer_started is None:
+                        answer_started = now
                     yield frame(
-                        sse_chunk(completion_id=completion_id, model=model, delta=chunk.delta)
+                        sse_chunk(
+                            completion_id=completion_id,
+                            model=model,
+                            delta=chunk.delta or None,
+                            reasoning=chunk.reasoning or None,
+                        )
                     )
                 if chunk.usage:
                     usage = chunk.usage
                 if chunk.finish_reason:
-                    elapsed_ms = (time.perf_counter() - started) * 1000
+                    finished = time.perf_counter()
+                    elapsed_ms = (finished - started) * 1000
                     completion_tokens = usage.completion_tokens if usage else 0
+                    thinking_ms = (
+                        ((answer_started or finished) - reasoning_started) * 1000
+                        if reasoning_started is not None
+                        else None
+                    )
                     yield frame(
                         sse_chunk(
                             completion_id=completion_id,
@@ -160,6 +180,9 @@ async def _stream_sse(
                                 "latency_ms": round(elapsed_ms, 1),
                                 "time_to_first_token_ms": (
                                     round(ttft_ms, 1) if ttft_ms else None
+                                ),
+                                "thinking_ms": (
+                                    round(thinking_ms, 1) if thinking_ms is not None else None
                                 ),
                                 "prompt_tokens": usage.prompt_tokens if usage else 0,
                                 "completion_tokens": completion_tokens,
@@ -212,6 +235,7 @@ async def info(request: Request) -> dict:
         "config": {
             "backend": state.config.backend.model_dump(exclude={"api_key"}),
             "generation": state.config.generation.model_dump(),
+            "thinking_mode": state.config.thinking_mode.model_dump(),
             "agent": state.config.agent.model_dump(),
         },
         "metrics": state.metrics.snapshot(),
@@ -228,7 +252,7 @@ async def swap_backend(payload: dict, request: Request) -> dict:
     allowed = {"name", "model", "device", "dtype", "load_in_4bit", "adapter_path", "base_url", "model_path"}
     overrides = {k: v for k, v in payload.items() if k in allowed and v is not None}
     if not overrides:
-        raise KumaruError("No valid fields supplied.", hint=f"Allowed: {sorted(allowed)}")
+        raise RequestError("No valid fields supplied.", hint=f"Allowed: {sorted(allowed)}")
 
     logger.info("swapping backend: %s", overrides)
     await state.swap_backend(**overrides)

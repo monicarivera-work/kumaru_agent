@@ -14,15 +14,32 @@
  * 3. MARKDOWN IS RENDERED ESCAPE-FIRST. All HTML is escaped before any markup
  *    is generated, so model output can never inject script tags. A model is an
  *    untrusted input source; treat its output exactly like user input.
+ *
+ * 4. THOUGHTS ARE SHOWN, NEVER SENT BACK. Reasoning models stream their
+ *    thinking in `delta.reasoning_content` and the answer in `delta.content`.
+ *    Thoughts are displayed and saved locally, but the history sent to the
+ *    server carries answers only: models are trained on conversations whose
+ *    earlier turns contain answers, not thoughts (Qwen3-style chat templates
+ *    discard old thoughts anyway), and resending them would burn context.
  */
 
 const $ = (id) => document.getElementById(id);
+
+// Slider stops. Token counts span 2 orders of magnitude, so the sliders move
+// through hand-picked, roughly logarithmic stops instead of a linear range.
+const MAX_TOKEN_STEPS = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
+// null = unlimited. Kept below the 32k reply cap so an answer still fits after
+// the thinking budget is spent.
+const BUDGET_STEPS = [256, 512, 1024, 2048, 4096, 8192, 16384, 24576, null];
 
 const state = {
   messages: JSON.parse(localStorage.getItem("kumaru.messages") || "[]"),
   streaming: false,
   controller: null,
   info: null,
+  think: false,          // the Think toggle; starts at the server profile's default
+  thinkTouched: false,   // once the user clicks it, the server default stops applying
+  controlsReady: false,
 };
 
 /* ─────────────────────────── markdown ─────────────────────────── */
@@ -82,6 +99,29 @@ function renderMarkdown(src) {
 
 /* ─────────────────────────── rendering ─────────────────────────── */
 
+function formatSeconds(ms) {
+  const s = ms / 1000;
+  if (s < 10) return `${s.toFixed(1)}s`;
+  if (s < 60) return `${Math.round(s)}s`;
+  return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+}
+
+// Escaped, never parsed: thoughts are plain text shown with `white-space: pre-wrap`.
+function thinkingHtml(text, label) {
+  return `<details class="thinking"><summary><span class="think-label">${escapeHtml(label)}</span></summary>` +
+    `<div class="thinking-body">${escapeHtml(text)}</div></details>`;
+}
+
+function assistantHtml(m) {
+  let html = "";
+  if (m.reasoning) {
+    html += thinkingHtml(m.reasoning, m.thinkingMs != null ? `Thought for ${formatSeconds(m.thinkingMs)}` : "Thoughts");
+  }
+  // An answer can be empty: stopped mid-thought, or cut off by max tokens.
+  html += m.content ? renderMarkdown(m.content) : `<p class="note">${escapeHtml(m.note || "(empty response)")}</p>`;
+  return html;
+}
+
 function messageEl(role, html, meta) {
   const wrap = document.createElement("div");
   wrap.className = `msg ${role}`;
@@ -108,7 +148,9 @@ function renderAll() {
     return;
   }
   for (const m of state.messages) {
-    const html = m.role === "user" ? `<p>${escapeHtml(m.content).replace(/\n/g, "<br>")}</p>` : renderMarkdown(m.content);
+    const html = m.role === "user"
+      ? `<p>${escapeHtml(m.content).replace(/\n/g, "<br>")}</p>`
+      : m.role === "assistant" ? assistantHtml(m) : renderMarkdown(m.content);
     box.appendChild(messageEl(m.role, html, m.meta));
   }
   wireCopy();
@@ -117,11 +159,30 @@ function renderAll() {
 
 function scrollToBottom() {
   const box = $("messages");
-  box.scrollTop = box.scrollHeight;
+  // "instant": a smooth scroll restarted 60 times a second never catches up,
+  // and it would make isNearBottom() lie mid-animation.
+  box.scrollTo({ top: box.scrollHeight, behavior: "instant" });
+}
+
+// Follow the stream only if the reader is already at the bottom; someone who
+// scrolled up to reread something should not be yanked back down.
+function isNearBottom(el = $("messages"), slack = 120) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < slack;
 }
 
 function persist() {
-  localStorage.setItem("kumaru.messages", JSON.stringify(state.messages.slice(-100)));
+  const recent = state.messages.slice(-100);
+  try {
+    localStorage.setItem("kumaru.messages", JSON.stringify(recent));
+  } catch {
+    // Long thoughts can exceed the ~5 MB localStorage quota. Answers matter
+    // more than thoughts, so drop the thoughts and try once more.
+    try {
+      localStorage.setItem("kumaru.messages", JSON.stringify(recent.map(({ reasoning, ...m }) => m)));
+    } catch {
+      // Storage full or disabled: chat still works, it just won't survive a reload.
+    }
+  }
 }
 
 function wireChips() {
@@ -156,23 +217,44 @@ async function send() {
   renderAll();
   persist();
 
-  // Outbound payload: the server is stateless, so send everything.
+  // Outbound payload: the server is stateless, so send everything — answers
+  // only. Thoughts, notes, and empty (stopped) replies never go back.
   const payload = [];
   const sys = $("system-prompt").value.trim();
   if (sys) payload.push({ role: "system", content: sys });
   for (const m of state.messages) {
-    if (m.role === "user" || m.role === "assistant") payload.push({ role: m.role, content: m.content });
+    if ((m.role === "user" || m.role === "assistant") && m.content) {
+      payload.push({ role: m.role, content: m.content });
+    }
   }
 
   setStreaming(true);
   state.controller = new AbortController();
 
-  const node = messageEl("assistant", '<span class="cursor"></span>');
-  $("messages").appendChild(node);
+  // Built once and then updated in place: rebuilding it every frame would
+  // reset the thinking block whenever the user opens or closes it.
+  const node = messageEl("assistant", "");
   const bubble = node.querySelector(".bubble");
+  bubble.innerHTML =
+    '<details class="thinking live hidden" open>' +
+    '<summary><span class="think-label">Thinking…</span></summary>' +
+    '<div class="thinking-body"></div></details>' +
+    '<div class="answer"><span class="cursor"></span></div>';
+  const details = bubble.querySelector(".thinking");
+  const thinkLabel = bubble.querySelector(".think-label");
+  const thinkBody = bubble.querySelector(".thinking-body");
+  const thinkText = thinkBody.appendChild(document.createTextNode(""));
+  const answer = bubble.querySelector(".answer");
+  $("messages").appendChild(node);
   scrollToBottom();
 
-  let acc = "";
+  let acc = "";            // the answer
+  let reasoning = "";      // the thoughts
+  let painted = 0;         // how much of `reasoning` is already on screen
+  let thinkStart = null;   // client-side clock; the server's figure replaces it at the end
+  let thinkEnd = null;
+  let thinkingMs = null;
+  let finish = null;
   let meta = "";
   let pending = false;
 
@@ -184,8 +266,25 @@ async function send() {
     pending = true;
     requestAnimationFrame(() => {
       pending = false;
-      bubble.innerHTML = renderMarkdown(acc) + '<span class="cursor"></span>';
-      scrollToBottom();
+      const follow = isNearBottom();
+      if (reasoning.length > painted) {
+        // Append only the new text: constant work per frame however long the
+        // thought grows, and a text node never parses HTML.
+        const followThought = isNearBottom(thinkBody, 40);
+        thinkText.appendData(reasoning.slice(painted));
+        painted = reasoning.length;
+        details.classList.remove("hidden");
+        if (followThought) thinkBody.scrollTop = thinkBody.scrollHeight;
+      }
+      if (thinkStart !== null) {
+        thinkLabel.textContent = thinkEnd === null
+          ? `Thinking… ${Math.floor((performance.now() - thinkStart) / 1000)}s`
+          : `Thought for ${formatSeconds(thinkEnd - thinkStart)}`;
+      }
+      answer.innerHTML = acc
+        ? renderMarkdown(acc) + '<span class="cursor"></span>'
+        : reasoning ? "" : '<span class="cursor"></span>';
+      if (follow) scrollToBottom();
     });
   };
 
@@ -193,13 +292,7 @@ async function send() {
     const res = await fetch("/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messages: payload,
-        stream: true,
-        temperature: parseFloat($("temperature").value),
-        max_tokens: parseInt($("max-tokens").value, 10),
-        top_p: parseFloat($("top-p").value),
-      }),
+      body: JSON.stringify({ messages: payload, stream: true, ...requestSettings() }),
       signal: state.controller.signal,
     });
 
@@ -232,21 +325,53 @@ async function send() {
         try { evt = JSON.parse(data); } catch { continue; }
         if (evt.error) throw new Error(evt.error.message);
 
-        const delta = evt.choices?.[0]?.delta?.content;
-        if (delta) { acc += delta; paint(); }
+        const choice = evt.choices?.[0];
+        const thought = choice?.delta?.reasoning_content;
+        if (thought) {
+          if (thinkStart === null) thinkStart = performance.now();
+          reasoning += thought;
+          paint();
+        }
+        const text = choice?.delta?.content;
+        if (text) {
+          if (thinkStart !== null && thinkEnd === null) {
+            // The answer has started: fold the thoughts away.
+            thinkEnd = performance.now();
+            details.open = false;
+            details.classList.remove("live");
+          }
+          acc += text;
+          paint();
+        }
+        if (choice?.finish_reason) finish = choice.finish_reason;
 
         if (evt.kumaru) {
           const k = evt.kumaru;
           updateStats(k);
+          if (k.thinking_ms != null) thinkingMs = k.thinking_ms;
           meta = `${k.tokens_per_second ?? "?"} tok/s · first token ${Math.round(k.time_to_first_token_ms ?? 0)}ms · ${k.completion_tokens ?? 0} tokens`;
+          if (k.thinking_ms != null) meta += ` · thought ${formatSeconds(k.thinking_ms)}`;
         }
       }
     }
 
-    state.messages.push({ role: "assistant", content: acc || "(empty response)", meta });
+    let note;
+    if (finish === "length") {
+      meta += " · cut off at max tokens";
+      if (!acc) {
+        note = reasoning
+          ? "No answer: the max-tokens cap ran out while the model was still thinking. Raise max tokens or set a thinking budget."
+          : "No answer: the max-tokens cap ran out.";
+      }
+    }
+    state.messages.push(finished(acc, reasoning, thinkingMs, thinkStart, thinkEnd, meta, note));
   } catch (e) {
     if (e.name === "AbortError") {
-      if (acc) state.messages.push({ role: "assistant", content: acc, meta: "stopped" });
+      if (acc || reasoning) {
+        state.messages.push(
+          finished(acc, reasoning, thinkingMs, thinkStart, thinkEnd, "stopped", "Stopped before answering.")
+        );
+      }
     } else {
       state.messages.push({ role: "error", content: `**Request failed:** ${e.message}` });
     }
@@ -258,6 +383,35 @@ async function send() {
   }
 }
 
+// The stored form of a finished reply. Thinking time prefers the server's
+// measurement (no network jitter) and falls back to the client's clock.
+function finished(content, reasoning, serverMs, start, end, meta, note) {
+  const m = { role: "assistant", content, meta };
+  if (reasoning) {
+    m.reasoning = reasoning;
+    m.thinkingMs = serverMs ?? ((end ?? performance.now()) - start);
+  }
+  if (note && !content) m.note = note;
+  return m;
+}
+
+// What this request asks for beyond the messages. With "tuned settings" on,
+// sampling fields are omitted so the server's profile decides; that profile
+// has separate presets for thinking and non-thinking replies.
+function requestSettings() {
+  const s = { thinking: state.think };
+  if (state.think) {
+    const budget = BUDGET_STEPS[+$("thinking-budget").value];
+    if (budget != null) s.thinking_budget = budget;
+  }
+  if (!$("auto-sampling").checked) {
+    s.temperature = parseFloat($("temperature").value);
+    s.top_p = parseFloat($("top-p").value);
+    s.max_tokens = MAX_TOKEN_STEPS[+$("max-tokens").value];
+  }
+  return s;
+}
+
 function setStreaming(on) {
   state.streaming = on;
   $("send-btn").classList.toggle("hidden", on);
@@ -267,8 +421,64 @@ function setStreaming(on) {
 
 function updateStats(k) {
   if (k.time_to_first_token_ms != null) $("stat-ttft").textContent = `${Math.round(k.time_to_first_token_ms)} ms`;
+  $("stat-think").textContent = k.thinking_ms != null ? formatSeconds(k.thinking_ms) : "off";
   if (k.tokens_per_second != null) $("stat-tps").textContent = `${k.tokens_per_second} tok/s`;
   if (k.completion_tokens != null) $("stat-tokens").textContent = `${k.prompt_tokens ?? 0} → ${k.completion_tokens}`;
+}
+
+/* ─────────────────────────── controls ─────────────────────────── */
+
+function nearestIndex(steps, value) {
+  let best = 0;
+  steps.forEach((s, i) => {
+    if (s != null && Math.abs(Math.log(s / value)) < Math.abs(Math.log(steps[best] / value))) best = i;
+  });
+  return best;
+}
+
+// The values the server will use when the request leaves sampling unset:
+// `generation`, overlaid with `thinking_mode` when thinking is on (the same
+// precedence the server applies in ChatAgent.resolve_params).
+function profileDefaults() {
+  const cfg = state.info?.config;
+  if (!cfg) return null;
+  const eff = { ...cfg.generation };
+  if (state.think) {
+    for (const [k, v] of Object.entries(cfg.thinking_mode || {})) if (v != null) eff[k] = v;
+  }
+  return eff;
+}
+
+// One function brings every control and label in line with the current state;
+// every event handler just calls it.
+function syncControls() {
+  const auto = $("auto-sampling").checked;
+  for (const id of ["temperature", "top-p", "max-tokens"]) {
+    $(id).disabled = auto;
+    $(id).closest(".slider").classList.toggle("is-disabled", auto);
+  }
+
+  const eff = auto ? profileDefaults() : null;
+  if (eff) {
+    // Park the inert sliders on the profile's values, so unchecking "tuned
+    // settings" starts from them rather than jumping somewhere else.
+    $("temperature").value = eff.temperature;
+    $("top-p").value = eff.top_p;
+    $("max-tokens").value = nearestIndex(MAX_TOKEN_STEPS, eff.max_tokens);
+  }
+  const temp = eff ? eff.temperature : parseFloat($("temperature").value);
+  const topP = eff ? eff.top_p : parseFloat($("top-p").value);
+  const maxTok = eff ? eff.max_tokens : MAX_TOKEN_STEPS[+$("max-tokens").value];
+  $("val-temp").textContent = temp.toFixed(2);
+  $("val-topp").textContent = topP.toFixed(2);
+  $("val-max").textContent = maxTok.toLocaleString();
+
+  const budget = BUDGET_STEPS[+$("thinking-budget").value];
+  $("val-budget").textContent = budget == null ? "unlimited" : budget.toLocaleString();
+  $("thinking-budget").disabled = !state.think;
+  $("budget-row").classList.toggle("is-disabled", !state.think);
+
+  $("think-btn").setAttribute("aria-pressed", String(state.think));
 }
 
 /* ─────────────────────────── status ─────────────────────────── */
@@ -315,6 +525,14 @@ async function refreshInfo() {
       }
       $("swap-model").value = c.model || "";
     }
+
+    // The Think toggle starts where the profile says (`generation.thinking`),
+    // unless the user has already chosen.
+    if (!state.controlsReady && info.config) {
+      state.controlsReady = true;
+      if (!state.thinkTouched) state.think = info.config.generation?.thinking === true;
+    }
+    syncControls();
   } catch {
     $("status-dot").className = "dot err";
     $("status-text").textContent = "server unreachable";
@@ -344,15 +562,15 @@ function init() {
     renderAll();
   });
 
-  const bind = (id, out, fmt) => {
-    const el = $(id);
-    const sync = () => ($(out).textContent = fmt(el.value));
-    el.addEventListener("input", sync);
-    sync();
-  };
-  bind("temperature", "val-temp", (v) => parseFloat(v).toFixed(2));
-  bind("max-tokens", "val-max", (v) => v);
-  bind("top-p", "val-topp", (v) => parseFloat(v).toFixed(2));
+  for (const id of ["temperature", "max-tokens", "top-p", "thinking-budget", "auto-sampling"]) {
+    $(id).addEventListener("input", syncControls);
+  }
+  $("think-btn").addEventListener("click", () => {
+    state.think = !state.think;
+    state.thinkTouched = true;
+    syncControls();
+  });
+  syncControls();
 
   $("swap-btn").addEventListener("click", async () => {
     const btn = $("swap-btn");

@@ -1,6 +1,6 @@
 # One-shot setup for Kumaru on Windows.
 #
-#   .\scripts\setup.ps1              # base install, no GPU deps
+#   .\scripts\setup.ps1              # base install + test tools, no GPU deps
 #   .\scripts\setup.ps1 -Gpu         # + PyTorch CUDA + training stack
 #   .\scripts\setup.ps1 -Gpu -Quant  # + bitsandbytes for 4-bit / QLoRA
 #
@@ -33,8 +33,9 @@ $py = Join-Path $repo ".venv\Scripts\python.exe"
 & $py -m pip install --upgrade pip --quiet
 
 # --- base ------------------------------------------------------------------
-Step "Installing Kumaru (base: server, UI, CLI)"
-& $py -m pip install -e . --quiet
+# The dev extra (pytest, ruff, mypy) is small, and verify.ps1 runs the tests.
+Step "Installing Kumaru (base: server, UI, CLI, plus the test tools)"
+& $py -m pip install -e ".[dev]" --quiet
 
 # --- torch -----------------------------------------------------------------
 # PyTorch is installed separately because the correct wheel depends on your

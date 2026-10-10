@@ -59,10 +59,10 @@ Use it on a single 24 GB CUDA GPU after:
 
 ## How to use it
 
-Prerequisites:
+Prerequisites, in the Kumaru folder:
 
 ```powershell
-pip install "kumaru[train,quant]"
+.\scripts\setup.ps1 -Gpu -Quant    # elsewhere: pip install -e ".[train,quant]"
 ```
 
 Validate config and data first:

@@ -48,10 +48,10 @@ Use it first, every time, before `lora-qwen`. It targets a GPU with roughly 2 GB
 
 ## How to use it
 
-Prerequisites:
+Prerequisites, in the Kumaru folder:
 
 ```powershell
-pip install "kumaru[train]"
+.\scripts\setup.ps1 -Gpu    # elsewhere: pip install -e ".[train]"
 ```
 
 Validate:
@@ -88,7 +88,7 @@ kumaru chat --model Qwen/Qwen2.5-0.5B-Instruct --adapter runs/lora-small/adapter
 | Loss does not move | Data is too tiny, labels are wrong, or all examples are near-identical. | Inspect encoded supervised token count and sample rows. |
 | Adapter cannot be loaded | Wrong base model at inference. | Use `Qwen/Qwen2.5-0.5B-Instruct` with this adapter. |
 | OOM on a small GPU | Batch/sequence too high for available VRAM. | Lower batch or sequence length. |
-| Smoke run succeeds but 7B fails | Larger profile adds quantization, bitsandbytes, and more memory pressure. | Install `kumaru[train,quant]` and tune `lora-qwen`. |
+| Smoke run succeeds but 7B fails | Larger profile adds quantization, bitsandbytes, and more memory pressure. | Add the `quant` extra (`.\scripts\setup.ps1 -Quant`, or `pip install -e ".[quant]"` in the Kumaru folder) and tune `lora-qwen`. |
 
 ## Related files
 

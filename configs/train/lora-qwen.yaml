@@ -7,7 +7,7 @@
 #   kumaru train configs/train/lora-qwen.yaml
 #   kumaru chat --model Qwen/Qwen2.5-7B-Instruct --adapter runs/lora-qwen/adapter
 #
-# Requires: pip install "kumaru[train,quant]"
+# Requires: .\scripts\setup.ps1 -Gpu -Quant   (elsewhere: pip install -e ".[train,quant]")
 
 task: lora
 base_model: Qwen/Qwen2.5-7B-Instruct

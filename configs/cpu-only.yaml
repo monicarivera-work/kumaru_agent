@@ -8,7 +8,7 @@
 # For CPU, llamacpp is the better engine: its GGUF kernels are hand-optimized
 # for AVX2/AVX-512 and are several times faster than PyTorch on CPU.
 #
-# Requires:  pip install "kumaru[gguf]"
+# Requires:  .\scripts\setup.ps1 -Gguf   (installs llama-cpp-python)
 # Run:       kumaru serve -c cpu-only
 
 backend:

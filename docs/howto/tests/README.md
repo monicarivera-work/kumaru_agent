@@ -1,6 +1,6 @@
 # `tests/`
 
-> The offline regression suite. 51 tests, no GPU, no downloads, ~3 seconds.
+> The offline regression suite. 373 tests, no GPU, no downloads, under a minute.
 
 **Read this when:** you have changed something and want to know whether you broke it, or you are adding a feature and need to know where its test belongs.
 
@@ -78,7 +78,7 @@ For anything touching a model, use the echo backend or a stub. If you find yours
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `ModuleNotFoundError: kumaru` | Package not installed, or wrong interpreter | `pip install -e ".[dev]"`; use `.\.venv\Scripts\python.exe` |
-| Async tests skipped | pytest-asyncio missing | `pip install -e ".[dev]"` |
+| Async tests fail with `async def functions are not natively supported` | pytest-asyncio missing (pytest 8.4+ fails such tests instead of skipping them) | `pip install -e ".[dev]"` |
 | Config tests fail only on your machine | A `KUMARU_*` env var is set and leaking in | Unset it, or pass `use_env=False` |
 | Server tests hang | Lifespan not run | Use `TestClient` as a context manager |
 | `test_train_data` fails after a transformers upgrade | `apply_chat_template` return type changed again | Check `_template_ids()` in `train/data.py` |

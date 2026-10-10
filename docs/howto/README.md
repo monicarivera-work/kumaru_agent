@@ -1,6 +1,6 @@
 # How-to index
 
-One page per file. Each page answers the same six questions: what it does, why it exists, the mental model, the public API, how to use it, how to extend it, and how it fails.
+One page per file. Each page answers the same seven questions: what it does, why it exists, the mental model, the public API, how to use it, how to extend it, and how it fails.
 
 **Not sure where to start?** Read the source in [the order suggested in ARCHITECTURE.md](../ARCHITECTURE.md#reading-order-for-the-source), with each file's page open beside it.
 
@@ -28,6 +28,7 @@ One page per file. Each page answers the same six questions: what it does, why i
 | `backends/echo.py` | [page](src/kumaru/backends/echo.md) | You want the smallest complete example |
 | `backends/transformers_backend.py` | [page](src/kumaru/backends/transformers_backend.md) | Running locally on a GPU; tuning VRAM or speed |
 | `backends/llamacpp_backend.py` | [page](src/kumaru/backends/llamacpp_backend.md) | Low VRAM, CPU-only, or GGUF models |
+| `backends/llamacpp_server.py` | [page](src/kumaru/backends/llamacpp_server.md) | **The engine behind `qwen36`**: thinking, batching, sharing the GPU |
 | `backends/openai_compat.py` | [page](src/kumaru/backends/openai_compat.md) | Moving to vLLM, Ollama, or a remote endpoint |
 
 ## Agent — prompt, memory, tools
@@ -68,6 +69,26 @@ One page per file. Each page answers the same six questions: what it does, why i
 | `eval/__init__.py` | [page](src/kumaru/eval/__init__.md) | Orienting yourself |
 | `eval/harness.py` | [page](src/kumaru/eval/harness.md) | Writing your own eval suite; adding an LLM judge |
 
+## Benchmarks: how good is the model, and did a change help?
+
+Results and method: [docs/BENCHMARKS.md](../BENCHMARKS.md).
+
+| File | Page | Read it when |
+|---|---|---|
+| `eval/benchmarks/__init__.py` | [page](src/kumaru/eval/benchmarks/__init__.md) | Orienting yourself |
+| `eval/benchmarks/base.py` | [page](src/kumaru/eval/benchmarks/base.md) | **Adding a benchmark** — start here |
+| `eval/benchmarks/runner.py` | [page](src/kumaru/eval/benchmarks/runner.md) | Running, resuming and comparing; what a run folder holds |
+| `eval/benchmarks/stats.py` | [page](src/kumaru/eval/benchmarks/stats.md) | Confidence intervals and significance tests, in plain terms |
+| `eval/benchmarks/extract.py` | [page](src/kumaru/eval/benchmarks/extract.md) | A right answer was graded wrong |
+| `eval/benchmarks/gsm8k.py` | [page](src/kumaru/eval/benchmarks/gsm8k.md) | Math word problems |
+| `eval/benchmarks/mmlu_pro.py` | [page](src/kumaru/eval/benchmarks/mmlu_pro.md) | Knowledge and reasoning, 14 subjects |
+| `eval/benchmarks/ifeval.py` | [page](src/kumaru/eval/benchmarks/ifeval.md) | Instruction following and its four scores |
+| `eval/benchmarks/ifeval_checks.py` | [page](src/kumaru/eval/benchmarks/ifeval_checks.md) | One IFEval instruction type behaves oddly |
+| `eval/benchmarks/humaneval.py` | [page](src/kumaru/eval/benchmarks/humaneval.md) | Code generation; what the code-execution guard does and does not stop |
+| `eval/benchmarks/golden.py` | [page](src/kumaru/eval/benchmarks/golden.md) | **Writing your own questions**: the format and the graders |
+| `data/bench/golden.jsonl` | [page](data/bench/golden.jsonl.md) | Your golden set: what each question tests |
+| `scripts/check_graders.py` | [page](scripts/check_graders.py.md) | Proving the graders right against the datasets' answer keys |
+
 ## UI
 
 | File | Page | Read it when |
@@ -81,6 +102,8 @@ One page per file. Each page answers the same six questions: what it does, why i
 | File | Page | Targets |
 |---|---|---|
 | `configs/default.yaml` | [page](configs/default.yaml.md) | **Every setting, documented** |
+| `configs/qwen36.yaml` | [page](configs/qwen36.yaml.md) | **Recommended**: Qwen3.6-35B-A3B on a 24 GB GPU, with thinking |
+| `configs/qwen25-7b-gguf.yaml` | [page](configs/qwen25-7b-gguf.yaml.md) | The previous default, on the same engine: the benchmark baseline |
 | `configs/local-gpu.yaml` | [page](configs/local-gpu.yaml.md) | 24 GB GPU |
 | `configs/low-vram.yaml` | [page](configs/low-vram.yaml.md) | 8–12 GB GPU |
 | `configs/cpu-only.yaml` | [page](configs/cpu-only.yaml.md) | No GPU |
@@ -97,10 +120,18 @@ One page per file. Each page answers the same six questions: what it does, why i
 | `data/samples/chat_train.jsonl` | [page](configs/chat_train.jsonl.md) | **The SFT data format**, and how to build your own |
 | `data/samples/corpus.txt` | [page](configs/corpus.txt.md) | Pretraining corpus format |
 
+## Project root
+
+| File | Page | Read it when |
+|---|---|---|
+| `pyproject.toml` | [page](pyproject.toml.md) | **Which extra to install**, adding a dependency, releasing a version, pytest/ruff/mypy settings |
+| `.gitignore` | [page](.gitignore.md) | A file is unexpectedly ignored or not; sharing a benchmark run |
+
 ## Scripts and tests
 
 | File | Page | Purpose |
 |---|---|---|
 | `scripts/setup.ps1` | [page](scripts/setup.ps1.md) | One-shot install |
+| `scripts/get-llama-server.ps1` | [page](scripts/get-llama-server.ps1.md) | Installing or upgrading the llama.cpp server |
 | `scripts/verify.ps1` | [page](scripts/verify.ps1.md) | Full self-check, layer by layer |
 | `tests/` | [page](tests/README.md) | What the suite protects, and how to add to it |
