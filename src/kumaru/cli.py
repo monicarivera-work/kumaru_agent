@@ -1,6 +1,6 @@
 """Command-line entry point: `kumaru <command>`.
 
-One binary, seven commands::
+One binary, eight commands::
 
     kumaru serve     # API + web UI
     kumaru chat      # terminal REPL, no server needed
@@ -9,6 +9,7 @@ One binary, seven commands::
     kumaru train     # fine-tune or pretrain
     kumaru eval      # quick check: speed and a few known answers
     kumaru bench     # public benchmarks with confidence intervals; compare runs
+    kumaru learn     # build a reviewed local reference pack
 
 Two rules keep the CLI fast and debuggable:
 
@@ -277,6 +278,30 @@ def show_config(
     cfg = _load(config, backend=backend, model=model)
     # Escaped: system prompts and stop sequences can hold brackets, such as "[/INST]".
     console.print(Panel(escape(cfg.dump_yaml()), title="resolved configuration", border_style="cyan"))
+
+
+@app.command()
+def learn(
+    topic: str = typer.Argument(..., help="Language or platform to learn."),
+    source: Path = typer.Option(..., "--source", help="Reviewed UTF-8 reference file."),
+    version: str = typer.Option(..., "--version", help="Language/platform version."),
+    output: Path = typer.Option(..., "--output", "-o", help="New knowledge pack JSON file."),
+) -> None:
+    """Learn from local references without downloads, execution, or fine-tuning."""
+    from pydantic import ValidationError
+
+    from kumaru.agent.knowledge import KnowledgePack, read_local_text, save_pack
+    from kumaru.core.errors import ConfigError
+
+    try:
+        pack = KnowledgePack(
+            topic=topic, version=version, source=source.name, content=read_local_text(source)
+        )
+    except ValidationError as exc:
+        raise ConfigError("Topic, version and reference content must be nonempty and bounded") from exc
+    save_pack(pack, output)
+    console.print(f"Saved reference pack: {output}", markup=False)
+    console.print("Add its absolute path to agent.knowledge_files and restart chat/server.")
 
 
 @app.command()
