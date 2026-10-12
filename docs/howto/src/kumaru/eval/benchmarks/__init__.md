@@ -75,7 +75,7 @@ A single accuracy on 100 questions moves by several points by chance. A model sw
 pip install -e ".[bench]"
 ```
 
-The `bench` extra installs `datasets>=2.20`, `langdetect>=1.0.9`, `nltk>=3.9.1` and `regex>=2023.0`. `datasets` downloads the public sets. `langdetect`, `nltk` and `regex` are for IFEval's checkers. The `all` extra includes `bench`. numpy is optional; the bootstrap uses it when it is importable, and it comes with `datasets`.
+The `bench` extra installs `datasets>=2.20`, `langdetect>=1.0.9`, `nltk>=3.9.1`, `numpy>=1.26` and `regex>=2023.0`. `datasets` downloads the public sets. `langdetect`, `nltk` and `regex` are for IFEval's checkers. numpy makes the bootstrap in `bench compare` about 1000× faster; without it the bootstrap still runs, in pure Python ([`stats.md`](stats.md)). The `all` extra includes `bench`.
 
 The golden set needs none of these packages. A missing one surfaces as `Optional dependency '<pkg>' is not installed.` with the hint `Install it with: pip install -e ".[bench]" in the Kumaru folder` (the same on Windows: `setup.ps1` has no switch for this extra).
 

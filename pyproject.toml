@@ -53,20 +53,24 @@ train = [
 quant = ["bitsandbytes>=0.43"]
 # GGUF / llama.cpp backend for low-VRAM and CPU-only machines.
 gguf = ["llama-cpp-python>=0.2.90"]
-# `kumaru bench`: public benchmark datasets, and IFEval's language detection and
-# NLTK counting (the same tokenizers as the reference implementation).
-# (numpy, from the torch extra, makes the bootstrap ~1000x faster; optional.)
+# `kumaru bench`: public benchmark datasets, IFEval's language detection and
+# NLTK counting (the same tokenizers as the reference implementation), and numpy
+# for the ~1000x faster bootstrap in `kumaru bench compare`.
 bench = [
     "datasets>=2.20",
     "langdetect>=1.0.9",
     "nltk>=3.9.1",
+    "numpy>=1.26",
     "regex>=2023.0",
 ]
+# Tests and linters. numpy lets the tests that need it (training-data prep, the
+# bootstrap's fast path) run instead of being skipped.
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
     "mypy>=1.11",
+    "numpy>=1.26",
 ]
 all = ["kumaru[train,quant,gguf,bench,dev]"]
 

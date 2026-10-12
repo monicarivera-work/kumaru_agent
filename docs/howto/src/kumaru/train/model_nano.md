@@ -91,7 +91,7 @@ model:
   n_kv_heads: 4
   d_model: 512
   d_ff: 1408
-  max_seq_length: 512
+  max_seq_length: 256
   dropout: 0.0
   rope_theta: 10000.0
   tie_embeddings: true

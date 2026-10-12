@@ -263,14 +263,16 @@ Before any long run, train on 10 examples for 50 steps. Loss should approach zer
 
 ## Read this before running it
 
-This will **not** produce a useful assistant. The shipped corpus is ~1,650 tokens — the model memorizes it in three steps and emits noise. That is deliberate: it makes every mechanism concrete and observable in seconds, and it lets you *watch* overfitting happen on a corpus small enough to read in full.
+This will **not** produce a useful assistant. The shipped corpus is ~1,700 tokens — the model memorizes it in three steps and emits noise. That is deliberate: it makes every mechanism concrete and observable in seconds, and it lets you *watch* overfitting happen on a corpus small enough to read in full. The profile logs every `logging_steps: 5` steps, so a three-step run prints no loss lines; set `logging_steps: 1` and raise `optim.epochs` to see the loss collapse step by step.
 
 ```powershell
 kumaru train configs/train/pretrain-nano.yaml --dry-run
 kumaru train configs/train/pretrain-nano.yaml
 ```
 
-Point `data.text_file` at a real corpus (any UTF-8 text file, any size) to train something meaningful.
+Point `data.text_file` at a real corpus (any UTF-8 text file, any size) to train something meaningful, and give that run a new `output_dir`. The first run packs the corpus into `<output_dir>/tokens.bin`, streaming the token ids to disk one chunk at a time: RAM stays at about 0.2 GB whatever the corpus size, and the file takes 4 bytes per token (about 8 GB for the 2B tokens this model wants). Later runs with the same `output_dir` reuse that file without reading the text again, so a changed `text_file` or `tokenizer` in an old `output_dir` would still train on the old tokens. Packing ran at about 1.4 MB of text per second in local testing, roughly 1.5 hours for 8 GB; `--dry-run` packs and stops, so you can do it up front.
+
+The sequence length is `model.max_seq_length` (256 in the profile). Pretraining ignores `data.max_seq_length`, which only limits LoRA examples.
 
 ### Where the parameters go
 
@@ -305,6 +307,8 @@ torchrun --nnodes=4 --nproc_per_node=8 --rdzv_endpoint=$MASTER:29500 -m kumaru.t
 ```
 
 Data-parallel training works because gradients are linear: each rank computes gradients on its shard, an all-reduce averages them, every rank applies an identical update. Mathematically equivalent to one giant batch.
+
+Before the first `torchrun` launch on a large corpus, pack it with `kumaru train <config> --dry-run` (same `output_dir`). Under `torchrun`, rank 0 packs while the other ranks wait at a barrier, and PyTorch abandons that wait after its default process-group timeout: 10 minutes with NCCL, 30 with gloo. The `torchrun` entry point also skips the `kumaru train` preflight checks.
 
 ## Sizing a real run
 

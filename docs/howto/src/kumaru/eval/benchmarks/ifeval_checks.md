@@ -178,5 +178,5 @@ Run only that file:
 
 - `src\kumaru\eval\benchmarks\ifeval.py` — loads the dataset, calls `check_instructions`, aggregates the metrics ([`ifeval.md`](ifeval.md)).
 - `tests\test_bench_ifeval.py` — pins the 25 registrations, the checkers, strict/loose, and NLTK-based counting.
-- `pyproject.toml` — the `bench` extra (`langdetect`, `nltk`, `regex`, `datasets`).
+- `pyproject.toml` — the `bench` extra (`langdetect`, `nltk`, `regex`, `datasets`, and `numpy` for the bootstrap).
 - [`docs\BENCHMARKS.md`](../../../../../BENCHMARKS.md) — results and grader validation.

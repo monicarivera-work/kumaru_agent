@@ -8,7 +8,7 @@
 
 ## What it does
 
-This file trains `NanoLM` from random initialization on a packed token corpus. It sets up single-process or `torchrun` distributed execution, packs text to `tokens.bin`, builds the model, runs AdamW with linear warmup plus cosine decay, accumulates gradients, clips global norm, writes checkpoints, records metrics, and prints a generated sample.
+This file trains `NanoLM` from random initialization on a packed token corpus. It sets up single-process or `torchrun` distributed execution, packs text to `<output_dir>/tokens.bin` (once; an existing file is reused), builds the model, runs AdamW with linear warmup plus cosine decay, accumulates gradients, clips global norm, writes checkpoints, records metrics, and prints a generated sample.
 
 Unlike the LoRA path, it does not use Hugging Face `Trainer`. The point is to make each training mechanism explicit.
 
@@ -39,7 +39,7 @@ This loop also demonstrates why data parallelism works: each rank computes gradi
 | `_format_eta` | `_format_eta(seconds: float) -> str` | Formats ETA for logs. |
 | `_save_checkpoint` | `_save_checkpoint(path: Path, model: Any, cfg: Any, step: int, history: list) -> None` | Saves `model.pt` and recent `history.json`. |
 | `_sample` | `_sample(model: Any, tokenizer: Any, device: Any, prompt: str = "The") -> None` | Logs a short generated sample at the end. |
-| `main` | `main() -> None` | CLI entry point for `python -m`/`torchrun -m`. |
+| `main` | `main() -> None` | CLI entry point for `python -m`/`torchrun -m`. Calls `run_pretrain()` directly, so it skips the `kumaru train` preflight. |
 
 ## How to use it
 
@@ -85,23 +85,30 @@ model:
   n_kv_heads: 4
   d_model: 512
   d_ff: 1408
-  max_seq_length: 512
+  max_seq_length: 256
 optim:
   epochs: 3
-  per_device_batch_size: 16
+  per_device_batch_size: 4
   gradient_accumulation_steps: 4
   learning_rate: 3.0e-4
   warmup_ratio: 0.02
   weight_decay: 0.1
   max_grad_norm: 1.0
   bf16: true
+logging_steps: 5
 ```
 
 ## Tuning / operational notes
 
 Warmup exists because Adam's second-moment estimate is unreliable at the beginning. The code linearly ramps to the base LR, then uses cosine decay. By default `lr_at_step` decays to 10% of base LR, not zero.
 
-The loop computes `tokens_per_step = per_device_batch_size * gradient_accumulation_steps * seq_len * world_size`. With `pretrain-nano.yaml`, that is `16 * 4 * 512 * 1 = 32,768` tokens per optimizer step on one GPU. Four GPUs make it 131,072 tokens per optimizer step with the same per-device settings.
+The loop computes `tokens_per_step = per_device_batch_size * gradient_accumulation_steps * seq_len * world_size`, where `seq_len` is `model.max_seq_length` (pretraining never reads `data.max_seq_length`). With `pretrain-nano.yaml`, that is `4 * 4 * 256 * 1 = 4,096` tokens per optimizer step on one GPU. Four GPUs make it 16,384 tokens per optimizer step with the same per-device settings.
+
+On the sample corpus (about 1,700 tokens) that schedule is six windows, one optimizer step per epoch, and three steps in total. A loss line is logged only when the step number is a multiple of `logging_steps`, so at `logging_steps: 5` the demo prints no loss lines and `metrics.json` has an empty history; set `logging_steps: 1` and raise `optim.epochs` to watch the loss fall.
+
+Packing happens on rank 0 only, and only when `<output_dir>/tokens.bin` does not exist. The source is `data.text_file`, or `data.train_file` when `text_file` is unset. An existing `tokens.bin` is reused as-is, even if `data.text_file` or `data.tokenizer` has changed since it was written, so use a new `output_dir` for a new corpus or tokenizer. Packing streams to disk with about 0.2 GB of RAM at any corpus size (see `data.md`), but it is sequential: about 1.4 MB of text per second in local testing, so about 1.5 hours for 8 GB. A `--dry-run` packs and then stops, so it is the way to pack up front.
+
+Under `torchrun`, the other ranks wait for rank 0's packing at `dist.barrier()`, and PyTorch aborts that wait after its default process-group timeout: 10 minutes with NCCL (Linux), 30 with gloo (Windows). For any corpus that takes longer to pack, about 800 MB or 2.5 GB of text respectively, run `kumaru train <config> --dry-run` first with the same `output_dir`, then launch `torchrun`. The dry run also gives you the preflight checks that `main()` skips.
 
 The starter model is around 101M parameters. The config comments note that Chinchilla-optimal training wants about 20 tokens per parameter, so a serious 101M run wants about 2B tokens, roughly 8 GB of text. The sample file is intentionally tiny and will overfit.
 
@@ -137,6 +144,9 @@ To save optimizer state for exact resume, include `optimizer.state_dict()` in `_
 |---|---|---|
 | `Optional dependency 'torch' is not installed` | Training extras missing | `.\scripts\setup.ps1 -Gpu`; elsewhere `pip install -e ".[torch]"` in the Kumaru folder (`.[train]` also works). |
 | `tokens.bin` missing on non-main rank | Rank 0 did not pack or barrier failed | Ensure shared output directory and launch with `torchrun`. |
+| Barrier or collective timeout on the first multi-GPU run | Rank 0 was still packing a large corpus | Pack first with `kumaru train <config> --dry-run` (same `output_dir`), then launch `torchrun`. |
+| Trains on old text after changing `data.text_file` or `data.tokenizer` | `<output_dir>/tokens.bin` already existed and was reused | Use a new `output_dir`, or delete `tokens.bin` to repack. |
+| `Corpus not found` | The corpus path is wrong and the run came through `main()`, which skips preflight | Fix the path; `kumaru train` reports the same problem as `Training data not found` before loading anything. |
 | `too few for seq_length` | Corpus token count is less than one window | Use more text or reduce `model.max_seq_length`. |
 | NaN loss or exploding grad norm | LR too high, bad data, or unstable precision | Lower LR, keep warmup, use grad clipping, verify bf16 support. |
 | Loss drops but sample is incoherent | Data bug or corpus too small | Inspect corpus, use larger text, confirm tokenizer. |

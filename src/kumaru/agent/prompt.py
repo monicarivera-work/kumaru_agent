@@ -71,13 +71,10 @@ def ensure_system_message(
     behaviour instead of a bare, unguided model.
     """
     body = [m for m in messages if m.role != Role.SYSTEM]
-    client_system = next((m for m in messages if m.role == Role.SYSTEM), None)
-
-    if client_system and client_system.content.strip():
-        # A client-supplied system message augments the configured one rather
-        # than silently replacing it, so server-side guardrails always apply.
-        merged = f"{system_prompt}\n\n{client_system.content.strip()}"
-    else:
-        merged = system_prompt
+    # Client system messages augment the configured prompt rather than replacing
+    # it, so server-side guardrails always apply. Every nonblank one is kept, in
+    # order: clients often send several, and dropping any loses instructions.
+    client = [m.content.strip() for m in messages if m.role == Role.SYSTEM and m.content.strip()]
+    merged = "\n\n".join([system_prompt, *client])
 
     return [Message.system(merged), *body]

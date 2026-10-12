@@ -29,6 +29,7 @@ over padding variable-length documents.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -322,6 +323,13 @@ def pack_corpus_to_memmap(
     same code trains on a 10 MB toy file or a 200 GB corpus with no change and
     no loading delay at startup.
 
+    Packing streams for the same reason. Each `chunk_chars` slice of text is
+    tokenized and appended to disk before the next is read, so peak memory is
+    set by one chunk (about 0.2 GB at the default with a Qwen tokenizer), not by
+    the size of the corpus. The tokens go to `<out_path>.tmp`, which is renamed
+    over `out_path` only once it is complete: an interrupted or failed pack never
+    leaves a truncated file that a later run would mistake for a finished one.
+
     `uint32` rather than `uint16` because modern vocabularies exceed 65,536
     tokens (Qwen2.5 is ~152k). Using uint16 would silently corrupt token ids —
     a bug that shows up only as mysteriously bad model quality.
@@ -330,25 +338,25 @@ def pack_corpus_to_memmap(
     if not src.exists():
         raise ConfigError(f"Corpus not found: {src}")
     dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(dst.name + ".tmp")
 
-    all_ids: list[np.ndarray] = []
     total = 0
+    try:
+        with src.open("r", encoding="utf-8", errors="replace") as fh, tmp.open("wb") as out:
+            while chunk := fh.read(chunk_chars):
+                ids = tokenizer(chunk, add_special_tokens=False)["input_ids"]
+                arr = np.asarray(ids, dtype=np.uint32)
+                arr.tofile(out)
+                total += arr.size
+                logger.info("tokenized %s tokens…", f"{total:,}")
+            out.flush()
+            os.fsync(out.fileno())
 
-    with src.open("r", encoding="utf-8", errors="replace") as fh:
-        while chunk := fh.read(chunk_chars):
-            ids = tokenizer(chunk, add_special_tokens=False)["input_ids"]
-            arr = np.asarray(ids, dtype=np.uint32)
-            all_ids.append(arr)
-            total += arr.size
-            logger.info("tokenized %s tokens…", f"{total:,}")
-
-    if total == 0:
-        raise ConfigError(f"{src} produced zero tokens")
-
-    flat = np.concatenate(all_ids)
-    memmap = np.memmap(dst, dtype=np.uint32, mode="w+", shape=(flat.size,))
-    memmap[:] = flat
-    memmap.flush()
+        if total == 0:
+            raise ConfigError(f"{src} produced zero tokens")
+        os.replace(tmp, dst)
+    finally:
+        tmp.unlink(missing_ok=True)
 
     logger.info("wrote %s tokens to %s (%.1f MB)", f"{total:,}", dst, dst.stat().st_size / 1e6)
     return dst

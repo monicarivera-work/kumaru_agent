@@ -1,6 +1,6 @@
 # `tests/`
 
-> The offline regression suite. 373 tests, no GPU, no downloads, under a minute.
+> The offline regression suite. 429 tests, no GPU, no downloads, under a minute.
 
 **Read this when:** you have changed something and want to know whether you broke it, or you are adding a feature and need to know where its test belongs.
 
@@ -38,10 +38,19 @@ The parts that genuinely need a GPU are covered by `scripts\verify.ps1 -Full`, w
 | `test_config.py` | Config precedence silently changing; profiles failing to parse; typos being ignored; env var coercion breaking |
 | `test_registry.py` | Plugin resolution breaking; aliases leaking into user-facing lists; duplicate registration passing silently |
 | `test_types.py` | The wire vocabulary changing shape; `merged()` mutating shared state; division-by-zero in throughput maths |
-| `test_backends.py` | `generate()` drifting from `stream()`; **stop sequences split across chunk boundaries being missed** |
-| `test_agent.py` | Prompt assembly losing the system message; memory policies overflowing the budget or dropping the system prompt |
+| `test_backends.py` | `generate()` drifting from `stream()`; **stop sequences split across chunk boundaries being missed**; echo ignoring `max_tokens` or misreporting `length` |
+| `test_agent.py` | Prompt assembly losing the system message or dropping client system messages; memory policies overflowing the budget or dropping the system prompt |
+| `test_tools.py` | A hung tool stalling the agent; a failing or unknown tool raising instead of returning `ERROR: ...` text |
 | `test_server.py` | API shape changing; SSE framing breaking; auth being bypassable; error responses losing their shape |
-| `test_train_data.py` | **Loss masking regressing** — the highest-consequence silent bug in the project; collator padding labels with a real token id |
+| `test_cli.py` | Flag handling, one-shot chat, `config` and the `bench` commands breaking; every command runs in-process on the echo backend |
+| `test_llamacpp_server.py` | llama-server model resolution, command line, request payload and failure handling regressing; no process is started and nothing is downloaded |
+| `test_bench_extract.py` | Answer extraction misreading a reply, which silently corrupts every benchmark score |
+| `test_bench_graders.py` | Question sampling or a grader deciding right vs wrong incorrectly, including a shipped golden format row accepting a reply its prompt rules out |
+| `test_bench_ifeval.py` | IFEval's instruction checks, strict/loose readings or its four metrics drifting |
+| `test_bench_runner.py` | The files a run leaves behind, exact resume, refusing to mix settings, surviving bad requests and graders, and the paired comparison of two runs |
+| `test_bench_stats.py` | Wilson intervals, McNemar's test, the paired bootstrap or Holm's correction drifting from hand-checked values |
+| `test_train_data.py` | **Loss masking regressing** — the highest-consequence silent bug in the project; collator padding labels with a real token id; corpus packing changing the `tokens.bin` format, holding the whole corpus in RAM, or leaving a partial file behind |
+| `test_train_runner.py` | Training preflight missing a data file the task will read (LoRA `train_file` and `eval_file`; pretraining `text_file` or its `train_file` fallback), so a bad path fails at minute 0 instead of after the tokenizer and model load |
 
 ## Fixtures
 

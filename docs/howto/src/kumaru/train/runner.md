@@ -8,7 +8,7 @@
 
 ## What it does
 
-`runner.py` loads a YAML file into `TrainConfig`, logs the planned task, model, output directory, epochs, effective batch, learning rate, LoRA settings, and GPU info, then checks common early failures. It verifies the training data path, imports PyTorch, warns if CUDA is unavailable, checks bf16 support, and validates bitsandbytes when 4-bit loading is requested.
+`runner.py` loads a YAML file into `TrainConfig`, logs the planned task, model, output directory, epochs, effective batch, learning rate, LoRA settings, and GPU info, then checks common early failures. It verifies that every data file the task will read exists: for LoRA, `data.train_file` plus `data.eval_file` when it is set; for pretraining, `data.text_file`, or `data.train_file` when `text_file` is unset (the same fallback `run_pretrain()` uses). All missing files are reported in one error, before PyTorch is imported. It then imports PyTorch, warns if CUDA is unavailable, checks bf16 support, and validates bitsandbytes when 4-bit loading is requested.
 
 After preflight, it dispatches `task: lora` to `run_lora_finetune()` or `task: pretrain` to `run_pretrain()`.
 
@@ -28,6 +28,7 @@ It also keeps the CLI command simple. `src\kumaru\cli.py` only parses arguments;
 
 | Name | Signature | What it's for |
 |---|---|---|
+| `_data_files` | `_data_files(config: TrainConfig) -> list[tuple[str, str]]` | Internal. The `(config field, path)` pairs the selected task will open, mirroring the reads in `run_lora_finetune()` and `run_pretrain()`. |
 | `preflight` | `preflight(config: TrainConfig) -> None` | Logs the run plan and raises/warns for foreseeable failures. |
 | `run_training` | `run_training(config_path: Path, *, resume: str | None = None, dry_run: bool = False) -> Path` | Loads a config, runs preflight, dispatches to LoRA or pretraining, and returns the output path. |
 
@@ -79,7 +80,7 @@ If preflight finds risk, change these in order:
 1. For LoRA, enable `load_in_4bit`.
 2. Reduce `optim.per_device_batch_size` to 1.
 3. Enable `optim.gradient_checkpointing`.
-4. Reduce `data.max_seq_length` or `model.max_seq_length`.
+4. Reduce `data.max_seq_length` (LoRA) or `model.max_seq_length` (pretraining, which ignores `data.max_seq_length`).
 5. Use the small config to isolate data/config problems.
 
 ## How to extend it
@@ -94,13 +95,13 @@ if config.task == "dpo":
 
 Also update `preflight()` to print task-specific settings. Keep imports inside branches so unrelated tasks do not pay import costs for optional packages.
 
-If the new task needs a different data file, update the `data_file` selection so missing-file checks still catch errors before training.
+If the new task reads data files, add a branch for it to `_data_files()` so preflight still catches every missing file before training.
 
 ## Failure modes
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `Training data not found` | `data.train_file`/`data.text_file` path is wrong relative to current directory | Run from repo root or update the YAML path. |
+| `Training data not found: <path> (<field>); ...` | A file the task reads is missing: LoRA `data.train_file` or `data.eval_file`; pretraining `data.text_file`, or `data.train_file` when `text_file` is unset. Paths resolve from the current directory. | Run from the repo root or fix the YAML paths. The message lists every missing file with the field it came from. |
 | `PyTorch is not installed` | Training extra missing | `.\scripts\setup.ps1 -Gpu`; elsewhere `pip install -e ".[train]"` in the Kumaru folder. The hint (`install_command('train')`) says the same. |
 | Warning: no CUDA device visible | CPU-only PyTorch or driver/CUDA issue | Run `kumaru info`; install CUDA-enabled PyTorch. |
 | Warning: bf16 requested but unsupported | GPU or PyTorch build lacks bf16 | Set `optim.bf16: false`; for LoRA consider `optim.fp16: true`. |

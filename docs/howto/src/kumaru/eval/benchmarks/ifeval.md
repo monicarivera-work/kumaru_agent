@@ -76,7 +76,7 @@ This forgives "Sure, here it is:" preambles, sign-offs, and markdown bold around
 ### Run it
 
 ```powershell
-pip install -e ".[bench]"                  # datasets, langdetect, nltk, regex
+pip install -e ".[bench]"                  # datasets, langdetect, nltk, numpy, regex
 kumaru bench run ifeval -c qwen36           # 100 seeded prompts
 kumaru bench run ifeval -c qwen36 --full    # all 541
 kumaru bench report runs\bench\<run>        # a run, or one benchmark's dir such as runs\bench\<run>\ifeval

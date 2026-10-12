@@ -31,6 +31,37 @@ def test_ensure_system_message_merges_client_system_instead_of_replacing() -> No
     assert [m.role for m in out[1:]] == [Role.USER, Role.ASSISTANT]
 
 
+@pytest.mark.parametrize(
+    ("client_system", "expected"),
+    [
+        ([], "cfg"),
+        (["  persona  ", "rules"], "cfg\n\npersona\n\nrules"),
+        (["", " \n ", "rules"], "cfg\n\nrules"),  # a blank one adds nothing
+        (["", "   "], "cfg"),
+    ],
+)
+def test_ensure_system_message_keeps_every_nonblank_client_system_message(
+    client_system: list[str], expected: str
+) -> None:
+    out = ensure_system_message([*map(Message.system, client_system), Message.user("u")], "cfg")
+    assert [m.role for m in out] == [Role.SYSTEM, Role.USER]
+    assert out[0].content == expected
+
+
+def test_ensure_system_message_merges_scattered_system_messages_in_order() -> None:
+    messages = [
+        Message.system("first"),
+        Message.user("u1"),
+        Message.assistant("a1"),
+        Message.system("second"),
+        Message.user("u2"),
+        Message.system("third"),
+    ]
+    out = ensure_system_message(messages, "configured")
+    assert out[0].content == "configured\n\nfirst\n\nsecond\n\nthird"
+    assert [m.content for m in out[1:]] == ["u1", "a1", "u2"]
+
+
 def test_build_system_prompt_includes_quality_directives_and_tools() -> None:
     prompt = build_system_prompt(
         AgentConfig(system_prompt="Base"),
@@ -89,7 +120,9 @@ class TestChatAgent:
     async def test_stream_works_against_echo(self, chat_agent: ChatAgent) -> None:
         chunks = [chunk async for chunk in chat_agent.stream([Message.user("hello")], max_tokens=8)]
         assert "You said: hello" in "".join(chunk.delta for chunk in chunks)
-        assert chunks[-1].finish_reason == "stop"
+        assert chunks[-1].finish_reason == "length"  # 8 tokens are too few for the whole reply
+        roomy = [chunk async for chunk in chat_agent.stream([Message.user("hello")], max_tokens=64)]
+        assert roomy[-1].finish_reason == "stop"
 
 
 class TestThinkingParams:

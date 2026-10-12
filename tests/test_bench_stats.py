@@ -1,7 +1,9 @@
 """Protect the statistics behind every "B beat A" claim, against hand-checked values."""
 
+import random
 import sys
 from statistics import NormalDist
+from typing import Any
 
 import pytest
 
@@ -99,6 +101,26 @@ class TestPairedBootstrap:
         assert slow[0] == fast[0]
         assert slow[1] == pytest.approx(fast[1], abs=0.04)
         assert slow[2] == pytest.approx(fast[2], abs=0.04)
+
+    def test_pure_python_fallback_draws_every_requested_resample(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The fallback used to cap any request at 2,000 resamples, silently.
+        draws = 0
+        choices = random.Random.choices
+
+        def counting_choices(rng: random.Random, *args: Any, **kwargs: Any) -> list[Any]:
+            nonlocal draws
+            draws += 1
+            return choices(rng, *args, **kwargs)
+
+        monkeypatch.setitem(sys.modules, "numpy", None)  # makes `import numpy` fail
+        monkeypatch.setattr(random.Random, "choices", counting_choices)
+        a = [0.0, 1.0] * 10
+        b = [1.0, 1.0, 0.0, 1.0] * 5
+        first = paired_bootstrap_ci(a, b, resamples=5_000, seed=3)
+        assert draws == 5_000
+        assert paired_bootstrap_ci(a, b, resamples=5_000, seed=3) == first
 
 
 class TestHolmAdjust:
