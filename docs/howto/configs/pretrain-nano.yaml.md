@@ -8,13 +8,13 @@
 
 ## What it does
 
-This config trains a small transformer from random initialization using raw text from `data/samples/corpus.txt`. It uses the Qwen2.5 0.5B tokenizer, builds a packed token stream, and trains a roughly 35M-parameter model under `runs/nano`.
+This config trains a small transformer from random initialization using raw text from `data/samples/corpus.txt`. It uses the Qwen2.5 0.5B tokenizer, builds a packed token stream, and trains a roughly 101M-parameter model under `runs/nano`: about 78M in the tied embedding table and about 24M in the eight transformer blocks.
 
 It will not produce a useful assistant. The sample corpus is intentionally tiny, so loss will fall because the model memorizes.
 
 ## When to use this profile
 
-Use it for mechanism tests and education on one GPU. The comments note that proper Chinchilla-style training for 35M parameters wants about 700M tokens, far beyond the sample file. Point `data.text_file` at a real UTF-8 corpus for serious experiments.
+Use it for mechanism tests and education on one GPU. The comments note that proper Chinchilla-style training for 101M parameters wants about 2B tokens (~8 GB of text), far beyond the sample file. Point `data.text_file` at a real UTF-8 corpus for serious experiments.
 
 ## Every field explained
 
@@ -22,7 +22,7 @@ Use it for mechanism tests and education on one GPU. The comments note that prop
 |---|---|---|---|---|
 | `task` | string | `pretrain` | Selects from-scratch pretraining. | Keep `pretrain`; use `lora` configs for adapters. |
 | `output_dir` | string | `runs/nano` | Output directory. | Use a unique directory per run. |
-| `run_name` | string | `nano-35m` | Run label. | Include model scale/version. |
+| `run_name` | string | `nano-101m` | Run label. | Include model scale/version. |
 | `data.train_file` | string | `data/samples/corpus.txt` | Required schema field but ignored for pretrain per source comment. | Leave or mirror `text_file`. |
 | `data.text_file` | string | `data/samples/corpus.txt` | Raw UTF-8 corpus for pretraining. | Replace with your real corpus path. |
 | `data.tokenizer` | string | `Qwen/Qwen2.5-0.5B-Instruct` | Tokenizer used to convert text to ids. | Reuse a strong BPE tokenizer unless training your own. |

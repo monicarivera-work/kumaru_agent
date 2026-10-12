@@ -99,7 +99,7 @@ model:
 
 ## Tuning / operational notes
 
-The default config describes a roughly 35M-parameter model with a large Qwen tokenizer vocabulary. It can train to coherent local text in under an hour on one RTX 3090 when paired with the sample-scale pretraining loop, but it will not become a useful assistant.
+The default config describes a roughly 101M-parameter model; with the large Qwen tokenizer vocabulary, about 78M of that is the tied embedding table. It can train to coherent local text in under an hour on one RTX 3090 when paired with the sample-scale pretraining loop, but it will not become a useful assistant.
 
 Architecture tradeoffs:
 

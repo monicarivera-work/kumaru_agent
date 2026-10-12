@@ -174,7 +174,7 @@ On a 24 GB RTX 3090, `lora-qwen.yaml` is the realistic full run: 4-bit Qwen2.5-7
 
 `lora-small.yaml` is the safety check: Qwen2.5-0.5B-Instruct, batch 2, accumulation 4, no quantization, no gradient checkpointing, about 2 GB VRAM, and a few minutes.
 
-`pretrain-nano.yaml` defines a roughly 35M-parameter model. Chinchilla-style sizing wants about 20 tokens per parameter, so a properly sized 35M run wants about 700M tokens, roughly 3 GB of text.
+`pretrain-nano.yaml` defines a roughly 101M-parameter model. Chinchilla-style sizing wants about 20 tokens per parameter, so a properly sized 101M run wants about 2B tokens, roughly 8 GB of text.
 
 If you hit OOM, change these in order:
 

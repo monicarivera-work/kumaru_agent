@@ -14,7 +14,7 @@ The file is deliberately too small to produce a useful model. It exists so `kuma
 
 ## When to use this profile
 
-Use this file for smoke tests and to observe overfitting. Replace it for any real pretraining experiment. The config comments estimate that a 35M-parameter model wants roughly 700M tokens for serious Chinchilla-style training; this sample is only a few kilobytes.
+Use this file for smoke tests and to observe overfitting. Replace it for any real pretraining experiment. The config comments estimate that its ~101M-parameter model wants roughly 2B tokens (~8 GB of text) for serious Chinchilla-style training; this sample is only a few kilobytes.
 
 ## Expected data format
 

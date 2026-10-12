@@ -69,7 +69,7 @@ torchrun --nproc_per_node=4 -m kumaru.train.pretrain_nano configs\train\pretrain
 |---|---|---|
 | `lora-small.yaml` | Pipeline smoke test on Qwen2.5-0.5B | A few minutes, about 2 GB VRAM. |
 | `lora-qwen.yaml` | Practical QLoRA on Qwen2.5-7B-Instruct | About 9-11 GB VRAM; about 20-40 minutes per epoch on 1,000 examples of about 1k tokens. |
-| `pretrain-nano.yaml` | Understanding and debugging from-scratch training | Under an hour for the sample-sized 35M-ish model; quality is not assistant-grade. |
+| `pretrain-nano.yaml` | Understanding and debugging from-scratch training | Under an hour for the ~101M-parameter model on sample-sized data; quality is not assistant-grade. |
 
 The most important knobs live below this package:
 

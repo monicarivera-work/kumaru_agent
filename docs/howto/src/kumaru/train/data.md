@@ -112,7 +112,7 @@ On a 24 GB RTX 3090:
 
 - `lora-qwen.yaml`: about 9-11 GB VRAM with 4-bit base, batch 1, accumulation 16, checkpointing; about 20-40 minutes per epoch for about 1,000 examples of about 1k tokens.
 - `lora-small.yaml`: about 2 GB VRAM, a few minutes, good for catching data and masking problems.
-- `pretrain-nano.yaml`: sample corpus overfits quickly; a properly sized 35M model wants about 700M tokens.
+- `pretrain-nano.yaml`: sample corpus overfits quickly; a properly sized run of its ~101M-parameter model wants about 2B tokens.
 
 If you hit OOM or data collapse, change these in order:
 

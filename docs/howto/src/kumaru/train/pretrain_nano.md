@@ -103,7 +103,7 @@ Warmup exists because Adam's second-moment estimate is unreliable at the beginni
 
 The loop computes `tokens_per_step = per_device_batch_size * gradient_accumulation_steps * seq_len * world_size`. With `pretrain-nano.yaml`, that is `16 * 4 * 512 * 1 = 32,768` tokens per optimizer step on one GPU. Four GPUs make it 131,072 tokens per optimizer step with the same per-device settings.
 
-The starter model is around 35M parameters. The config comments note that Chinchilla-optimal training wants about 20 tokens per parameter, so a serious 35M run wants about 700M tokens, roughly 3 GB of text. The sample file is intentionally tiny and will overfit.
+The starter model is around 101M parameters. The config comments note that Chinchilla-optimal training wants about 20 tokens per parameter, so a serious 101M run wants about 2B tokens, roughly 8 GB of text. The sample file is intentionally tiny and will overfit.
 
 On a 24 GB RTX 3090, the starter should run in under an hour on sample-scale data. This loop does not shard optimizer state or parameters; when the model no longer fits, move to FSDP/ZeRO or tensor parallelism.
 

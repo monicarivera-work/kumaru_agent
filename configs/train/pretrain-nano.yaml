@@ -29,7 +29,7 @@
 
 task: pretrain
 output_dir: runs/nano
-run_name: nano-35m
+run_name: nano-101m
 
 data:
   train_file: data/samples/corpus.txt   # ignored for pretrain; text_file is used
