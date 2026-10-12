@@ -1,78 +1,100 @@
-"""A dependency-free backend that answers without any model.
+"""A dependency-free backend used for tests, CI, and install verification.
 
-It exists for three concrete reasons:
+Why ship a fake model
+---------------------
+It gives you a *fast, deterministic, offline* way to exercise every layer above
+inference: HTTP routing, SSE framing, memory trimming, UI rendering, error
+paths. Those layers contain most of the bugs, and none of them need a GPU to
+test. Without this, the test suite would need 15 GB of weights and a CUDA device
+to answer "did I break the streaming protocol?" — so in practice nobody would
+run it.
 
-1. ``git clone && pip install -e . && kumaru chat`` must work in under a
-   minute, before any weights are downloaded.
-2. Tests for the agent, server and UI need a deterministic generator.
-3. When a real backend misbehaves, switching to ``echo`` instantly tells you
-   whether the problem is the model or everything else.
-
-It streams character-by-character with a small delay so the UI's streaming
-path is genuinely exercised.
+It is also the first thing to try when something breaks:
+``kumaru chat --backend echo``. If that works, your problem is in the model
+layer; if it does not, your problem is in the application layer. That single
+bisection saves hours.
 """
 
 from __future__ import annotations
 
-import time
-from collections.abc import Iterator
+import asyncio
+import hashlib
+from collections.abc import AsyncIterator, Sequence
 
-from kumaru.backends.base import Backend, GenerationResult, estimate_tokens
+from kumaru.backends.base import Backend, chunks_from_text
 from kumaru.core.config import BackendConfig
-from kumaru.core.types import ChatRequest, Role, StreamChunk, Usage
-
-_BANNER = (
-    "Kumaru is running on the 'echo' backend, which has no language model "
-    "behind it, so it cannot actually answer questions yet. Point "
-    "backend.name at 'openai_compat', 'transformers' or 'llamacpp' in your "
-    "config to get real answers."
-)
+from kumaru.core.registry import BACKENDS
+from kumaru.core.types import BackendInfo, GenerationParams, Message, StreamChunk, Usage
 
 
+@BACKENDS.register("echo")
 class EchoBackend(Backend):
-    """Reflects the last user message back, with a short explanation."""
+    """Returns a deterministic, structured reply without loading any model."""
 
     name = "echo"
 
-    def __init__(self, config: BackendConfig, *, delay_s: float = 0.01) -> None:
+    def __init__(self, config: BackendConfig) -> None:
         super().__init__(config)
-        self.delay_s = delay_s
+        # Simulated inter-token delay. Non-zero by default so the UI's streaming
+        # path is exercised realistically rather than completing instantly.
+        self.delay_s: float = float(config.extra.get("delay_s", 0.01))
 
-    def _reply(self, request: ChatRequest) -> str:
+    async def _load(self) -> None:
+        return None
+
+    def info(self) -> BackendInfo:
+        return BackendInfo(
+            name=self.name,
+            model_id="echo",
+            device="cpu",
+            dtype="none",
+            context_length=self.config.max_context_length,
+            supports_streaming=True,
+            extra={"purpose": "testing and install verification"},
+        )
+
+    async def stream(
+        self, messages: Sequence[Message], params: GenerationParams
+    ) -> AsyncIterator[StreamChunk]:
         last_user = next(
-            (m.content for m in reversed(request.messages) if m.role is Role.USER),
-            "",
+            (m.content for m in reversed(messages) if m.role.value == "user"), ""
         )
-        if not last_user.strip():
-            return _BANNER
-        text = f'You said: "{last_user.strip()}"\n\n{_BANNER}'
-        # Respect max_tokens so callers can test truncation behaviour.
-        limit = request.max_tokens * 4
-        return text[:limit]
-
-    def generate(self, request: ChatRequest) -> GenerationResult:
-        text = self._reply(request)
-        return GenerationResult(
-            text=text,
-            usage=Usage(
-                prompt_tokens=sum(estimate_tokens(m.content) for m in request.messages),
-                completion_tokens=estimate_tokens(text),
-            ),
+        # A stable hash makes replies deterministic across runs, which is what
+        # lets tests assert on them.
+        digest = hashlib.sha256(last_user.encode("utf-8")).hexdigest()[:8]
+        reply = (
+            f"[echo:{digest}] You said: {last_user.strip() or '(nothing)'}\n"
+            f"Context: {len(messages)} message(s), "
+            f"~{self.count_tokens(messages)} prompt tokens, "
+            f"max_tokens={params.max_tokens}, temperature={params.temperature}."
         )
 
-    def stream(self, request: ChatRequest) -> Iterator[StreamChunk]:
-        text = self._reply(request)
-        for index in range(0, len(text), 8):
+        emitted = 0
+        if params.thinking:
+            # A stand-in "thought" so the reasoning channel (SSE field, UI
+            # panel, budget accounting) can be tested without a model.
+            thought = (
+                f"The user asked: {last_user.strip()[:80] or '(nothing)'}. "
+                "Echo cannot reason; this text only exercises the reasoning channel."
+            )
+            pieces = list(chunks_from_text(thought, size=8))
+            if params.thinking_budget is not None:
+                pieces = pieces[: params.thinking_budget]
+            for piece in pieces:
+                if self.delay_s:
+                    await asyncio.sleep(self.delay_s)
+                emitted += 1
+                yield StreamChunk(reasoning=piece)
+
+        for piece in chunks_from_text(reply, size=6):
             if self.delay_s:
-                time.sleep(self.delay_s)
-            yield StreamChunk(delta=text[index : index + 8])
+                await asyncio.sleep(self.delay_s)
+            emitted += 1
+            yield StreamChunk(delta=piece)
+
         yield StreamChunk(
-            done=True,
+            finish_reason="stop",
             usage=Usage(
-                prompt_tokens=sum(estimate_tokens(m.content) for m in request.messages),
-                completion_tokens=estimate_tokens(text),
+                prompt_tokens=self.count_tokens(messages), completion_tokens=emitted
             ),
         )
-
-    def health(self) -> dict[str, object]:
-        return {"backend": self.name, "model": "echo", "ready": True}

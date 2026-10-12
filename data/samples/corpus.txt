@@ -1,0 +1,149 @@
+DEMONSTRATION CORPUS
+
+This file exists so that `kumaru train configs/train/pretrain-nano.yaml` runs end
+to end immediately, on any machine, with no download. It is far too small to
+produce a useful model — a few kilobytes against the hundreds of gigabytes real
+pretraining requires. Point `data.text_file` at your own corpus when you want to
+train something real. Any UTF-8 text file works, at any size, because the packing
+step writes a memory-mapped token array rather than loading everything into RAM.
+
+Watch what happens when you train on this file. The loss will fall quickly and
+then keep falling, far below what the data supports. That is memorization, and
+seeing it happen on a corpus small enough to read is the most direct way to
+understand why held-out evaluation is not optional.
+
+
+ON THE SHAPE OF COMPUTATION
+
+A processor spends most of its life waiting. The arithmetic units at the center
+of a modern chip can complete an operation in less than a nanosecond, but the
+memory holding the operands may take hundreds of nanoseconds to answer. Every
+layer of the machine — registers, caches, prefetchers, out-of-order execution —
+exists to hide that gap. The history of computer architecture is largely the
+history of increasingly elaborate strategies for not waiting.
+
+This is why the memory hierarchy has the shape it does. A small amount of very
+fast storage sits close to the arithmetic units. Behind it sits a larger, slower
+tier, and behind that, larger and slower still. The arrangement works because
+programs exhibit locality: a program that touches one address is likely to touch
+nearby addresses soon, and likely to touch the same address again. Neither
+property is guaranteed. Both are true often enough that the entire industry is
+built on them.
+
+When a program runs slowly despite doing little arithmetic, the cause is usually
+that it has violated locality. It walks memory in a pattern the prefetcher cannot
+predict, or its working set exceeds the cache, and every access pays the full
+cost of a trip to main memory. The fix is rarely to do less work. It is to do the
+same work in a different order.
+
+
+ON MATRICES AND WHY HARDWARE LOVES THEM
+
+Matrix multiplication has an unusual property: it performs many more arithmetic
+operations than memory accesses. Multiplying two n-by-n matrices requires on the
+order of n-cubed multiply-accumulate operations while touching only n-squared
+elements. As n grows, the ratio of computation to memory traffic grows with it.
+
+This is the reason specialized hardware for matrix multiplication is worth
+building. An operation with a high arithmetic intensity can keep thousands of
+multiply-accumulate units busy from a single load of data. An operation with low
+arithmetic intensity cannot, no matter how many units you provide.
+
+It also explains why so much of machine learning is expressed as matrix
+multiplication even when other formulations would be more natural. The hardware
+rewards it. A model architecture that maps cleanly onto large dense matrix
+products will train faster than an equally expressive architecture that does not,
+and in practice the faster architecture wins, because researchers can run more
+experiments with it.
+
+
+ON GRADIENTS
+
+Training a model means adjusting its parameters to reduce a measure of error. The
+gradient tells you, for each parameter, how the error would change if that
+parameter changed slightly. Moving every parameter a small distance against its
+gradient reduces the error. Repeating this many times is, in essence, the whole
+of modern machine learning.
+
+The remarkable fact is that the gradient of a composed function can be computed
+in roughly the same time as the function itself. Backpropagation is an
+application of the chain rule arranged so that intermediate results are shared
+rather than recomputed. Without this property, training networks with billions of
+parameters would be impossible; with it, the cost of the backward pass is about
+twice the forward pass, regardless of depth.
+
+The cost that does grow is memory. The backward pass needs the intermediate
+values computed during the forward pass, so they must be kept. For a deep network
+processing long sequences, these stored activations can dominate memory usage
+entirely. Gradient checkpointing trades this away: store only a few intermediate
+values and recompute the rest during the backward pass. The result is roughly
+thirty percent more time for roughly forty percent less memory, which is an
+excellent trade when the alternative is not being able to train at all.
+
+
+ON SCALE
+
+Increasing the size of a model, the amount of data it sees, and the compute spent
+training it improves performance in a way that is strikingly regular. Plot the
+error against any of these quantities on logarithmic axes and the result is close
+to a straight line, across many orders of magnitude. This regularity is the
+practical foundation of modern model development: it means the outcome of a large
+expensive run can be predicted from several small cheap ones.
+
+The regularity also constrains what is worth doing. If error falls as a power law
+in compute, then each additional increment of capability costs exponentially more
+than the last. Progress does not stop, but it becomes steadily more expensive,
+and the returns to efficiency improvements grow correspondingly.
+
+There is a further subtlety. For a fixed compute budget, there is an optimal
+balance between model size and training data. Early large models were trained on
+far too little data for their size, and were substantially undertrained as a
+result. Correcting this balance produced models that were smaller, cheaper to
+run, and better — an unusual case where the more efficient choice was also the
+more capable one.
+
+
+ON PARALLELISM
+
+A single processor has a speed limit. Beyond it, the only way forward is to use
+more processors, which requires dividing the work. How the work is divided
+determines how well the arrangement scales.
+
+The easiest division is by data. Give each processor a different portion of the
+input, let each compute its own result, then combine. This works well when the
+processors need to communicate rarely, and gradient-based training is well suited
+to it: gradients are additive, so each processor can compute a gradient on its
+own data and the results can simply be averaged.
+
+Harder divisions become necessary when the work itself does not fit on one
+processor. Then the computation must be split — different processors holding
+different parts of the model, passing intermediate results between them. This
+introduces communication into the inner loop, and communication is slow relative
+to arithmetic. The art lies in arranging the split so that processors communicate
+as little as possible, and so that when they do, the transfer overlaps with
+computation that would have happened anyway.
+
+Every parallel system eventually encounters the same wall. Some fraction of the
+work is inherently sequential, and that fraction bounds the achievable speedup no
+matter how many processors are added. Doubling the processor count is easy;
+halving the sequential fraction is the hard part, and it is where the real
+engineering lives.
+
+
+ON MEASUREMENT
+
+A system that is not measured cannot be improved, only changed. This sounds
+obvious and is routinely ignored, because measurement is tedious and intuition is
+free.
+
+Intuition about performance is unusually unreliable. Modern systems have deep
+pipelines, speculative execution, multiple cache levels, and dynamic frequency
+scaling. The relationship between the code as written and the work as performed
+is not direct. Experienced engineers regularly predict the wrong bottleneck,
+optimize it successfully, and observe no improvement at all.
+
+The discipline, then, is to measure first, change one thing, and measure again.
+It is slower than guessing and it is the only approach that reliably converges.
+The corollary matters just as much: a measurement you cannot reproduce is not a
+measurement. Fix the seed, fix the inputs, fix the environment, and record what
+you did, or you will spend an afternoon chasing a difference that was noise.

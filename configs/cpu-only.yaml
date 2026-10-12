@@ -1,22 +1,32 @@
-# A real model on a laptop with no GPU, via a quantised GGUF file.
+# Profile: no GPU.
 #
-# 1. pip install -e '.[llamacpp]'
-# 2. download a 4-bit GGUF (roughly 5 GB for a 7-8B model) into ./models/
-# 3. kumaru serve -c configs/cpu-only.yaml
+# Honest expectations: a 7B model on a modern 8-core CPU produces roughly
+# 3-7 tokens/second. That is readable but not comfortable. A 1.5B model gives
+# 15-30 tok/s and is genuinely usable for short questions, which is why it is
+# the default here — a working small model beats a stalling large one.
 #
-# Expect ~5-15 tokens/second on a modern 8-core CPU.
+# For CPU, llamacpp is the better engine: its GGUF kernels are hand-optimized
+# for AVX2/AVX-512 and are several times faster than PyTorch on CPU.
+#
+# Requires:  .\scripts\setup.ps1 -Gguf   (installs llama-cpp-python)
+# Run:       kumaru serve -c cpu-only
 
 backend:
   name: llamacpp
-  model: models/qwen2.5-7b-instruct-q4_k_m.gguf
-  context_length: 4096
-  n_threads: 0      # 0 = use every core
-  gpu_layers: 0     # pure CPU
+  model: Qwen/Qwen2.5-1.5B-Instruct-GGUF
+  n_gpu_layers: 0          # 0 = pure CPU
+  n_threads: null          # null = one thread per physical core
+  max_context_length: 4096
+  extra:
+    gguf_filename: "*q4_k_m.gguf"   # ~1 GB; the quality/size sweet spot
 
-agent:
-  max_tokens: 512
+generation:
+  max_tokens: 512          # shorter replies keep CPU latency tolerable
   temperature: 0.7
 
+agent:
+  max_history_tokens: 2560
+
 server:
-  host: 127.0.0.1
-  port: 8000
+  port: 8080
+  max_concurrent_requests: 1   # CPU inference saturates all cores already

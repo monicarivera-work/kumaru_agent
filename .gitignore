@@ -1,25 +1,43 @@
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
+.eggs/
 build/
 dist/
 .venv/
 venv/
-env/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.coverage
-htmlcov/
+tests/.scratch/
 
-# Local model weights and runtime artefacts - never commit these.
-models/
-checkpoints/
+# Kumaru runtime artifacts
+/tools/llama.cpp/
 runs/
+checkpoints/
+adapters/
+.cache/
+models/
 *.gguf
 *.safetensors
 *.bin
+*.pt
 
-# Local secrets / overrides.
-.env
-configs/local.yaml
+# Data (keep the tiny committed samples and the golden benchmark set)
+data/*
+!data/samples/
+!data/samples/**
+!data/bench/
+!data/bench/**
+
+# Logs & local state
+logs/
+*.log
+.kumaru/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

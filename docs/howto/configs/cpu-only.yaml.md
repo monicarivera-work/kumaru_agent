@@ -1,73 +1,82 @@
 # `configs/cpu-only.yaml`
 
-> llama.cpp GGUF configuration for CPU-only local inference.
+> llama.cpp/GGUF serving profile for machines with no usable GPU.
 
-**Read this when:** running a real local model on a laptop without GPU acceleration.
+**Read this when:** you need Kumaru to run on CPU, verify behavior without CUDA, or operate on a host where GPU inference is unavailable.
 
 ---
 
 ## What it does
-It selects `llamacpp`, points at a quantized GGUF file under `models/`, uses a 4096-token context, lets llama.cpp pick CPU threads, and disables GPU layer offload.
 
-## Why it exists
-CPU-only GGUF is the most reliable real-model path on machines without CUDA. It trades speed for simple local operation.
+This profile uses the `llamacpp` backend with a small Qwen2.5 1.5B GGUF model. It sets `n_gpu_layers: 0` for pure CPU execution, uses a 4096-token context, limits replies to 512 tokens, and admits one request at a time.
 
-## Mental model
-Download the referenced model path yourself or change `backend.model`. `n_threads: 0` means use every core according to runtime defaults.
+## When to use this profile
 
-## Public API
-| Setting | Signature | What it's for |
-|---|---|---|
-| `backend.name` | `echo | openai_compat | transformers | llamacpp` | Select generation backend. |
-| `backend.model` | `str` | Model id or GGUF/local path, depending on backend. |
-| `backend.base_url` | `str` | OpenAI-compatible server base URL. |
-| `backend.api_key_env` | `str` | Environment variable containing bearer token. |
-| `backend.timeout_s` | `float` | HTTP timeout seconds. |
-| `backend.device` | `str` | Transformers device, commonly `auto`, `cuda`, or `cpu`. |
-| `backend.dtype` | `str` | Transformers dtype, commonly `auto`. |
-| `backend.context_length` | `int` | llama.cpp context window. |
-| `backend.n_threads` | `int` | llama.cpp CPU threads; `0` lets runtime decide. |
-| `backend.gpu_layers` | `int` | llama.cpp layers offloaded to GPU. |
-| `agent.system_prompt` | `str` | Prompt template; supports `{date}` and `{time}`. |
-| `agent.max_tokens` | `int > 0` | Maximum generated tokens. |
-| `agent.temperature` | `0.0..2.0` | Sampling randomness. |
-| `agent.top_p` | `(0.0, 1.0]` | Nucleus sampling. |
-| `agent.max_history_turns` | `int >= 1` | Max stored messages per session. |
-| `agent.max_history_chars` | `int >= 1` | Max stored history characters. |
-| `server.host` | `str` | Bind host. |
-| `server.port` | `1..65535` | Bind port. |
-| `server.serve_ui` | `bool` | Serve static UI when true. |
-| `log_level` | `str` | Root logging level. |
-| `log_json` | `bool` | Emit JSON logs when true. |
+Use it on CPU-only desktops, laptops, CI-like smoke environments where `echo` is too shallow, or shared machines where GPU use is not allowed. Expect about 3-7 tok/s for 7B on a modern 8-core CPU, and better usability from 1.5B as this profile chooses.
+
+## Every field explained
+
+| Field | Type | Default | What it controls | How to choose |
+|---|---|---|---|---|
+| `backend.name` | string | `llamacpp` | Uses llama.cpp bindings and GGUF kernels. | Best local CPU choice. |
+| `backend.model` | string | `Qwen/Qwen2.5-1.5B-Instruct-GGUF` | GGUF model repo/id. | Keep for usable CPU speed; larger models are much slower. |
+| `backend.n_gpu_layers` | int | `0` | Number of layers offloaded to GPU. | `0` means pure CPU; use `-1` only if a GPU is available. |
+| `backend.n_threads` | int/null | `null` | llama.cpp CPU thread count. | Leave null for physical-core default; reduce when sharing the CPU. |
+| `backend.max_context_length` | int | `4096` | Context cap. | Lower for memory; raise only after measuring latency. |
+| `backend.extra.gguf_filename` | string | `*q4_k_m.gguf` | Pattern used to pick a GGUF file from the repo. | Keep `q4_k_m` for size/quality balance; choose another quant if you know why. |
+| `generation.max_tokens` | int | `512` | Reply length cap. | Shorter replies keep CPU latency tolerable. |
+| `generation.temperature` | float | `0.7` | Sampling randomness. | General chat default. |
+| `agent.max_history_tokens` | int | `2560` | Retained conversation budget. | Keeps prompts small enough for CPU latency. |
+| `server.port` | int | `8080` | HTTP port. | Change if occupied. |
+| `server.max_concurrent_requests` | int | `1` | Admission limit. | CPU inference already saturates cores; keep one. |
 
 ## How to use it
-```bash
-pip install -e '.[llamacpp]'
-kumaru serve -c configs/cpu-only.yaml
+
+Prerequisites, in the Kumaru folder (the `Requires:` line of `configs\cpu-only.yaml`):
+
+```powershell
+.\scripts\setup.ps1 -Gguf    # llama-cpp-python; or: pip install -e ".[gguf]"
 ```
 
-```yaml
-backend:
-  name: llamacpp
-  model: models/qwen2.5-7b-instruct-q4_k_m.gguf
-  gpu_layers: 0
+Run:
+
+```powershell
+kumaru serve -c cpu-only
 ```
 
-```bash
-KUMARU_MODEL=models/your-model.gguf kumaru serve -c configs/cpu-only.yaml
+Terminal prompt:
+
+```powershell
+kumaru chat -c cpu-only -q "Explain gradient accumulation briefly."
 ```
 
-## How to extend it
-Create variants for different GGUFs by changing `backend.model`, `context_length`, and optionally `n_threads`. Keep `gpu_layers: 0` for pure CPU.
+Inspect resolved config:
 
-## Gotchas
+```powershell
+kumaru config -c cpu-only
+```
+
+## Tuning it
+
+1. If latency is too high, switch to an even smaller GGUF model.
+2. If the CPU is shared, set `backend.n_threads` below the physical core count.
+3. If memory pressure is high, reduce `backend.max_context_length`.
+4. If replies take too long, reduce `generation.max_tokens`.
+5. If you later add a GPU, change `n_gpu_layers` or move to `low-vram`/`local-gpu`.
+
+## Failure modes
+
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| GGUF file not found | Model file has not been downloaded or path differs. | Put the file at `backend.model` or override `KUMARU_MODEL`. |
-| Very slow output | CPU inference speed is hardware-bound. | Use smaller quantization/model or an OpenAI-compatible server on stronger hardware. |
-| Out of memory | Model or context too large. | Use a smaller GGUF or lower `context_length`. |
+| `Optional dependency 'llama-cpp-python' is not installed.` | The `gguf` extra is missing. | `.\scripts\setup.ps1 -Gguf`, or `pip install -e ".[gguf]"` in the Kumaru folder. |
+| Model download cannot find a file | `gguf_filename` pattern does not match repo files. | Choose a model repo with matching GGUF files or change the pattern. |
+| Host becomes unresponsive | llama.cpp uses all cores. | Set `backend.n_threads` lower. |
+| Very slow replies | CPU inference is inherently slow or model is too large. | Use a smaller model or GPU/remote backend. |
+| Concurrent requests time out | `max_concurrent_requests` is one and CPU is busy. | Keep concurrency one; scale by adding hosts or using vLLM. |
 
 ## Related files
-- [llama.cpp backend](../src/kumaru/backends/llamacpp_backend.md)
-- [Low VRAM config](./low-vram.yaml.md)
-- [Config loader](../src/kumaru/core/config.md)
+
+- `configs/test.yaml` — faster no-model smoke profile.
+- `configs/low-vram.yaml` — quantized CUDA profile.
+- `src/kumaru/core/config.py` — backend schema, including `extra`.
+

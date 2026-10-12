@@ -1,74 +1,110 @@
 # `configs/local-gpu.yaml`
 
-> Transformers configuration for in-process GPU inference with unquantized weights.
+> Transformers serving profile for a single 24 GB CUDA GPU running Qwen2.5 7B in bfloat16 with a 16k context window.
 
-**Read this when:** using CUDA-class hardware or local fine-tuned Hugging Face weights.
+**Read this when:** you are operating Kumaru on an RTX 3090, RTX 4090, A5000, or similar 24 GB Ampere-or-newer GPU.
 
 ---
 
 ## What it does
-It selects `transformers`, uses `Qwen/Qwen2.5-7B-Instruct`, and lets device/dtype auto-detection choose CUDA and bf16/fp16 when available.
 
-## Why it exists
-This profile supports direct Hugging Face model loading without a separate server. It is appropriate when VRAM is sufficient and local model customization matters.
+This profile runs `Qwen/Qwen2.5-7B-Instruct` locally with the `transformers` backend on CUDA, using `bfloat16`, a 16,384-token context, 2,048-token response cap, and moderate request concurrency.
 
-## Mental model
-First run may download weights to the Hugging Face cache. Swap `backend.model` for a local directory to use a fine-tune.
+The comments document the VRAM budget: about 15.2 GB for bf16 weights, about 0.9 GB for a 16k grouped-query KV cache on Qwen2.5, plus activations and fragmentation.
 
-## Public API
-| Setting | Signature | What it's for |
-|---|---|---|
-| `backend.name` | `echo | openai_compat | transformers | llamacpp` | Select generation backend. |
-| `backend.model` | `str` | Model id or GGUF/local path, depending on backend. |
-| `backend.base_url` | `str` | OpenAI-compatible server base URL. |
-| `backend.api_key_env` | `str` | Environment variable containing bearer token. |
-| `backend.timeout_s` | `float` | HTTP timeout seconds. |
-| `backend.device` | `str` | Transformers device, commonly `auto`, `cuda`, or `cpu`. |
-| `backend.dtype` | `str` | Transformers dtype, commonly `auto`. |
-| `backend.context_length` | `int` | llama.cpp context window. |
-| `backend.n_threads` | `int` | llama.cpp CPU threads; `0` lets runtime decide. |
-| `backend.gpu_layers` | `int` | llama.cpp layers offloaded to GPU. |
-| `agent.system_prompt` | `str` | Prompt template; supports `{date}` and `{time}`. |
-| `agent.max_tokens` | `int > 0` | Maximum generated tokens. |
-| `agent.temperature` | `0.0..2.0` | Sampling randomness. |
-| `agent.top_p` | `(0.0, 1.0]` | Nucleus sampling. |
-| `agent.max_history_turns` | `int >= 1` | Max stored messages per session. |
-| `agent.max_history_chars` | `int >= 1` | Max stored history characters. |
-| `server.host` | `str` | Bind host. |
-| `server.port` | `1..65535` | Bind port. |
-| `server.serve_ui` | `bool` | Serve static UI when true. |
-| `log_level` | `str` | Root logging level. |
-| `log_json` | `bool` | Emit JSON logs when true. |
+## When to use this profile
+
+Use it when:
+
+- one local CUDA GPU has about 24 GB VRAM;
+- the GPU supports bf16 well, such as RTX 30-series, RTX 40-series, A5000, or A100;
+- you want simpler local development rather than vLLM throughput;
+- 16k context is useful and fits your workload.
+
+Do not use it for 6-12 GB VRAM; use `configs/low-vram.yaml`. Do not use it for CPU-only machines; use `configs/cpu-only.yaml`.
+
+## Every field explained
+
+| Field | Type | Default | What it controls | How to choose |
+|---|---|---|---|---|
+| `backend.name` | string | `transformers` | Loads the model through Hugging Face Transformers. | Correct for local GPU development. |
+| `backend.model` | string | `Qwen/Qwen2.5-7B-Instruct` | Model checkpoint. | Keep for this profile, or choose another 7B-class instruct model that fits. |
+| `backend.device` | string | `cuda` | Forces CUDA instead of auto placement. | Use `cuda:0` if you need a specific GPU. |
+| `backend.dtype` | string | `bfloat16` | Weight/compute dtype. | Use bf16 on Ampere+; use `float16` only on older GPUs without bf16. |
+| `backend.max_context_length` | int | `16384` | Prompt plus generation context cap. | Lower if KV cache or long prompts cause OOM. |
+| `generation.max_tokens` | int | `2048` | Maximum reply length. | Lower for latency; keep if long responses are expected. |
+| `generation.temperature` | float | `0.7` | Sampling randomness. | `0.7` is general chat; `0` for deterministic runs. |
+| `generation.top_p` | float | `0.95` | Nucleus sampling cutoff. | Keep default unless output is too loose or too narrow. |
+| `agent.max_history_tokens` | int | `12288` | Conversation history budget. | Leaves room for `generation.max_tokens` under 16k context. |
+| `agent.memory_policy` | string | `sliding_window` | How history is trimmed. | Keeps system prompt and recent turns; safest default. |
+| `server.host` | string | `127.0.0.1` | Server bind address. | Keep localhost unless you add `server.api_key`. |
+| `server.port` | int | `8080` | Server port. | Change if another service uses 8080. |
+| `server.max_concurrent_requests` | int | `4` | Number of admitted concurrent requests. | Keep low for one GPU; higher mostly adds queueing latency with Transformers. |
+| `telemetry.log_level` | level name | `INFO` | Logging verbosity of `kumaru serve`. | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in any case (`WARN` and `FATAL` are aliases); any other name fails at load. Use `DEBUG` only while troubleshooting. |
 
 ## How to use it
-```bash
-pip install -e '.[transformers]'
-kumaru serve -c configs/local-gpu.yaml
+
+Prerequisites, in the Kumaru folder:
+
+```powershell
+.\scripts\setup.ps1 -Gpu    # a CUDA build of PyTorch, then pip install -e ".[train]"
 ```
+
+Outside Windows, `pip install -e ".[torch]"` in the Kumaru folder is enough; Linux PyTorch wheels from PyPI include CUDA.
+
+Optional long-context attention optimization, if your CUDA toolchain supports it:
+
+```powershell
+pip install flash-attn --no-build-isolation
+```
+
+Then uncomment:
 
 ```yaml
 backend:
-  name: transformers
-  model: Qwen/Qwen2.5-7B-Instruct
-  device: auto
-  dtype: auto
+  attn_implementation: flash_attention_2
 ```
 
-```bash
-KUMARU_MODEL=/models/my-finetune kumaru serve -c configs/local-gpu.yaml
+Run:
+
+```powershell
+kumaru serve -c local-gpu
 ```
 
-## How to extend it
-Add `backend.extra` for trusted Hugging Face loader options. Example: `extra: {trust_remote_code: true}` for a model that requires custom code and has been reviewed.
+Terminal prompt:
 
-## Gotchas
+```powershell
+kumaru chat -c local-gpu -q "Summarize grouped-query attention."
+```
+
+Inspect resolved settings:
+
+```powershell
+kumaru config -c local-gpu
+```
+
+## Tuning it
+
+1. If first request OOMs, reduce `backend.max_context_length` from `16384` to `8192`.
+2. If long outputs are too slow, lower `generation.max_tokens` to `1024`.
+3. If the GPU is shared, reduce `server.max_concurrent_requests` to `1` or `2`.
+4. If attention memory dominates and you can install it, enable `flash_attention_2`.
+5. If the model still does not fit, switch to `configs/low-vram.yaml`.
+
+## Failure modes
+
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| CUDA OOM | Model is too large for VRAM. | Use a smaller model, quantization, or llama.cpp profile. |
-| Runs on CPU unexpectedly | CUDA is unavailable or torch build lacks CUDA. | Install correct torch build and check drivers. |
-| Slow first startup | Weights are downloading. | Wait for cache population or pre-download model files. |
+| `torch.cuda.is_available()` is false | CUDA/PyTorch install mismatch. | Install a CUDA-enabled PyTorch build before running Kumaru. |
+| OOM with long prompts | 16k KV cache plus output budget exceeds free VRAM. | Lower `max_context_length`, `max_history_tokens`, or `max_tokens`. |
+| NaN/inf output on older GPU | GPU does not handle bf16 well. | Change `backend.dtype` to `float16` or use supported hardware. |
+| Multiple users see high latency | Transformers backend does not continuously batch. | Keep concurrency low or switch to `configs/vllm.yaml`. |
+| FlashAttention import/build failure | `flash-attn` or CUDA build toolchain is missing/incompatible. | Leave `attn_implementation` commented out. |
 
 ## Related files
-- [Transformers backend](../src/kumaru/backends/transformers_backend.md)
-- [Low VRAM config](./low-vram.yaml.md)
-- [Config loader](../src/kumaru/core/config.md)
+
+- `configs/default.yaml` — full reference for omitted defaults.
+- `configs/low-vram.yaml` — 4-bit profile for smaller GPUs.
+- `configs/vllm.yaml` — throughput profile using an external vLLM server.
+- `src/kumaru/core/config.py` — schema for all fields.
+

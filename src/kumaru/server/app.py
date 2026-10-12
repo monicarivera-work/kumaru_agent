@@ -1,116 +1,247 @@
-"""FastAPI application factory.
+"""FastAPI application factory and shared runtime state.
 
-Two decisions worth knowing about:
+Two decisions here shape how the server *feels* and how it scales.
 
-**One agent per process.** The model is loaded once during startup and shared
-by every request. Loading per request would re-read gigabytes of weights and
-exhaust memory immediately. Backends serialise themselves internally where the
-underlying runtime is not thread-safe.
+**Non-blocking startup.** Loading a 7B model takes 30-60 seconds. If that
+happened inside a synchronous startup hook, the port would not open until it
+finished and every client would see connection-refused. Instead the model loads
+in a background task, `/healthz` reports `loading`, and the UI shows a progress
+state. Requests arriving early simply await readiness.
 
-**The UI is served by this app.** ``ui/`` is mounted at ``/`` so the browser
-and the API share an origin: no CORS, no second dev server, no build step. Open
-http://127.0.0.1:8000 and it just works.
+**Explicit concurrency limiting.** A semaphore caps in-flight generations. This
+is not a nicety: on a single GPU, admitting unlimited concurrent requests makes
+every one of them slower and eventually triggers a CUDA OOM that kills the
+process. Bounded admission converts a hard crash into graceful queueing — the
+difference between a service that degrades and one that dies.
 """
 
 from __future__ import annotations
 
-import os
-from contextlib import asynccontextmanager
+import asyncio
+import contextlib
+import mimetypes
+import time
 from collections.abc import AsyncIterator
-from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from kumaru import __version__
 from kumaru.agent.chat import ChatAgent
-from kumaru.core.config import KumaruConfig, load_config
-from kumaru.core.errors import KumaruError
-from kumaru.core.logging import get_logger
-from kumaru.server.routes_chat import router as chat_router
-from kumaru.server.schemas import ErrorModel, HealthModel
+from kumaru.backends.base import Backend
+from kumaru.core.config import REPO_ROOT, KumaruConfig, load_config
+from kumaru.core.errors import BackendError, KumaruError
+from kumaru.core.logging import get_logger, setup_logging
+from kumaru.core.registry import BACKENDS
 
-log = get_logger("server.app")
+logger = get_logger(__name__)
+UI_DIR = REPO_ROOT / "ui"
 
-#: repository-root/ui - resolved relative to this file so it works from any cwd.
-#: Override with KUMARU_UI_DIR when running from an installed wheel.
-UI_DIR = Path(os.environ.get("KUMARU_UI_DIR") or Path(__file__).resolve().parents[3] / "ui")
+# Python takes MIME types from the Windows registry, where some installers map
+# .js or .css to text/plain, and browsers refuse a stylesheet served that way.
+# Pin the types the UI depends on so it loads the same on every machine.
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
 
 
-def create_app(
-    config: KumaruConfig | None = None, *, agent: ChatAgent | None = None
-) -> FastAPI:
-    """Build the application.
+class Metrics:
+    """In-process counters. Deliberately trivial.
 
-    ``agent`` can be injected by tests to avoid loading a real model.
+    Enough to answer "is it working, and how fast?" with zero dependencies.
+    When you outgrow it, swap in `prometheus_client` — the call sites do not
+    change.
+    """
+
+    def __init__(self) -> None:
+        self.requests = 0
+        self.errors = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_latency_ms = 0.0
+        self.started_at = time.time()
+
+    def record(self, *, prompt: int, completion: int, latency_ms: float) -> None:
+        self.requests += 1
+        self.prompt_tokens += prompt
+        self.completion_tokens += completion
+        self.total_latency_ms += latency_ms
+
+    def snapshot(self) -> dict[str, Any]:
+        uptime = time.time() - self.started_at
+        return {
+            "uptime_s": round(uptime, 1),
+            "requests": self.requests,
+            "errors": self.errors,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "avg_latency_ms": round(self.total_latency_ms / max(1, self.requests), 1),
+            "avg_tokens_per_second": round(
+                self.completion_tokens / max(0.001, self.total_latency_ms / 1000), 2
+            ),
+        }
+
+
+class AppState:
+    """Everything the request handlers need, created once per process."""
+
+    def __init__(self, config: KumaruConfig) -> None:
+        self.config = config
+        self.backend: Backend | None = None
+        self.agent: ChatAgent | None = None
+        self.metrics = Metrics()
+        self.semaphore = asyncio.Semaphore(config.server.max_concurrent_requests)
+        self.load_error: str | None = None
+        self._load_task: asyncio.Task | None = None
+        self._lock = asyncio.Lock()
+
+    @property
+    def ready(self) -> bool:
+        return self.agent is not None and self.load_error is None
+
+    def start_loading(self) -> None:
+        """Kick off model loading without blocking the event loop."""
+        if self._load_task is None:
+            self._load_task = asyncio.create_task(self._load())
+
+    async def _load(self) -> None:
+        async with self._lock:
+            if self.ready:
+                return
+            try:
+                cfg = self.config.backend
+                logger.info("initializing backend '%s' -> %s", cfg.name, cfg.model)
+                backend = BACKENDS.create(cfg.name, cfg)
+                await backend.load()
+                self.backend = backend
+                self.agent = ChatAgent(backend, self.config)
+                self.load_error = None
+                logger.info("server ready at http://%s:%d", self.config.server.host, self.config.server.port)
+            except Exception as exc:  # noqa: BLE001 - reported via /healthz
+                self.load_error = str(exc)
+                logger.error("backend failed to load: %s", exc)
+
+    async def ensure_ready(self, timeout_s: float = 600.0) -> ChatAgent:
+        """Await model readiness, raising a useful error if it failed."""
+        self.start_loading()
+        if self._load_task is not None:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(self._load_task), timeout=timeout_s)
+
+        if self.load_error:
+            raise BackendError(
+                f"Backend failed to load: {self.load_error}",
+                hint="Check the server logs, or try `--backend echo` to verify the rest of the stack.",
+            )
+        if self.agent is None:
+            raise BackendError("Backend is still loading.", hint="Retry in a few seconds.")
+        return self.agent
+
+    async def swap_backend(self, **overrides: Any) -> None:
+        """Hot-swap the model without restarting the process.
+
+        Powers the UI's model switcher. The old backend is closed first so its
+        VRAM is released before the new one allocates — doing it the other way
+        round reliably OOMs on a single GPU.
+        """
+        async with self._lock:
+            if self.backend is not None:
+                await self.backend.aclose()
+            self.backend = None
+            self.agent = None
+            self.load_error = None
+            self._load_task = None
+
+            updated = self.config.backend.model_copy(update=overrides)
+            self.config = self.config.model_copy(update={"backend": updated})
+
+        await self._load()
+        if self.load_error:
+            raise BackendError(f"Failed to load new backend: {self.load_error}")
+
+    async def shutdown(self) -> None:
+        if self._load_task is not None:
+            self._load_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._load_task
+        if self.backend is not None:
+            await self.backend.aclose()
+
+
+def create_app(config: KumaruConfig | None = None) -> FastAPI:
+    """Build the ASGI application.
+
+    A factory (not a module-level `app`) so tests can construct isolated
+    instances with different configs in the same process.
     """
     config = config or load_config()
+    setup_logging(config.telemetry.log_level, fmt=config.telemetry.log_format)
 
-    @asynccontextmanager
+    @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        app.state.agent = agent or ChatAgent(config)
-        app.state.config = config
-        log.info(
-            "kumaru ready",
-            extra={"backend": config.backend.name, "model": config.backend.model},
-        )
+        state: AppState = app.state.kumaru
+        state.start_loading()  # background: does not delay the port opening
         try:
             yield
         finally:
-            app.state.agent.close()
+            await state.shutdown()
 
     app = FastAPI(
         title="Kumaru",
         version=__version__,
-        description="A local-first, scalable LLM chat agent.",
+        description="Local-first, scalable LLM agent with an OpenAI-compatible API.",
         lifespan=lifespan,
     )
+    app.state.kumaru = AppState(config)
 
-    if config.server.cors_origins:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=config.server.cors_origins,
-            allow_methods=["GET", "POST", "DELETE"],
-            allow_headers=["*"],
-        )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=config.server.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.exception_handler(KumaruError)
-    async def _kumaru_error(_: Request, exc: KumaruError) -> JSONResponse:
-        """Turn deliberate failures into clean JSON the UI can display."""
-        log.warning("%s: %s", type(exc).__name__, exc.message)
+    async def kumaru_error_handler(request: Request, exc: KumaruError) -> JSONResponse:
+        """Map domain errors onto HTTP without leaking stack traces."""
+        request.app.state.kumaru.metrics.errors += 1
         return JSONResponse(
             status_code=exc.http_status,
-            content=ErrorModel(**exc.to_dict()).model_dump(),
+            content={
+                "error": {
+                    "message": exc.message,
+                    "type": type(exc).__name__,
+                    "hint": exc.hint,
+                }
+            },
         )
 
-    @app.get("/api/health", response_model=HealthModel, tags=["meta"])
-    def health(request: Request) -> HealthModel:
-        detail = dict(request.app.state.agent.health())
-        ready = bool(detail.pop("ready", True))
-        return HealthModel(
-            status="ok" if ready else "degraded",
-            version=__version__,
-            backend=str(detail.pop("backend", config.backend.name)),
-            model=detail.pop("model", None) or config.backend.model or None,
-            ready=ready,
-            detail=detail,
-        )
-
-    @app.get("/api/config", tags=["meta"])
-    def get_config() -> dict[str, object]:
-        """Non-secret runtime settings, used by the UI's settings panel."""
-        data = config.to_dict()
-        data["backend"].pop("extra", None)
-        return data
+    from kumaru.server.routes_chat import router as chat_router
 
     app.include_router(chat_router)
 
-    if config.server.serve_ui and UI_DIR.is_dir():
-        # Mounted last so /api/* always wins.
-        app.mount("/", StaticFiles(directory=UI_DIR, html=True), name="ui")
-    elif config.server.serve_ui:  # pragma: no cover - packaging edge case
-        log.warning("UI directory not found at %s; serving API only", UI_DIR)
+    if config.server.serve_ui and UI_DIR.exists():
+        app.mount("/static", StaticFiles(directory=str(UI_DIR)), name="static")
+
+        @app.get("/", include_in_schema=False)
+        async def index() -> FileResponse:
+            return FileResponse(str(UI_DIR / "index.html"))
 
     return app
+
+
+def run(config: KumaruConfig | None = None) -> None:
+    """Start uvicorn. Used by `kumaru serve`."""
+    import uvicorn
+
+    config = config or load_config()
+    uvicorn.run(
+        create_app(config),
+        host=config.server.host,
+        port=config.server.port,
+        log_level=config.telemetry.log_level.lower(),
+        access_log=False,  # Kumaru logs its own, more useful, request lines
+    )

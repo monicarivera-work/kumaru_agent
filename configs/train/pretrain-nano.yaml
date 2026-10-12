@@ -1,0 +1,68 @@
+# Train a language model from random initialization.
+#
+# Read this before running it
+# ---------------------------
+# This will NOT produce a useful assistant. A ~101M-parameter model trained on a
+# few kilobytes of text learns nothing but noise. That is the point: it makes
+# every mechanism in transformer training concrete and observable in under a
+# minute on one GPU, and it lets you *watch* overfitting happen on a corpus
+# small enough to read.
+#
+# Where those 101M parameters go is itself instructive:
+#   embedding table   152k vocab x 512 d_model  = ~78M   (77%)
+#   8 transformer blocks                        = ~24M   (23%)
+# At small scale the vocabulary dominates. This is why `tie_embeddings: true`
+# matters here and barely matters at 7B.
+#
+# Chinchilla-optimal training wants roughly 20 tokens per parameter — about 2B
+# tokens (~8 GB of text) for this model. The sample corpus is ~1,650 tokens, so
+# the model memorizes it instantly. Point `text_file` at a real corpus to train
+# properly.
+#
+#   kumaru train configs/train/pretrain-nano.yaml --dry-run
+#   kumaru train configs/train/pretrain-nano.yaml
+#
+# Multi-GPU (same loop, no code change):
+#   torchrun --nproc_per_node=4 -m kumaru.train.pretrain_nano configs/train/pretrain-nano.yaml
+#
+# Requires: .\scripts\setup.ps1 -Gpu   (elsewhere: pip install -e ".[train]")
+
+task: pretrain
+output_dir: runs/nano
+run_name: nano-101m
+
+data:
+  train_file: data/samples/corpus.txt   # ignored for pretrain; text_file is used
+  text_file: data/samples/corpus.txt    # any UTF-8 text file, any size
+  tokenizer: Qwen/Qwen2.5-0.5B-Instruct # reuse a good BPE tokenizer (~152k vocab)
+  max_seq_length: 512
+
+model:
+  vocab_size: 0            # 0 = take it from the tokenizer
+  n_layers: 8
+  n_heads: 8
+  n_kv_heads: 4            # grouped-query attention: 2x smaller KV cache
+  d_model: 512
+  d_ff: 1408               # ~2.75 x d_model, the standard SwiGLU ratio
+  max_seq_length: 256      # small so the tiny demo corpus yields several windows
+  dropout: 0.0             # pretraining on a large corpus does not need dropout
+  rope_theta: 10000.0
+  tie_embeddings: true     # vocab is 152k; untied embeddings would dominate the model
+
+optim:
+  epochs: 3
+  per_device_batch_size: 4
+  gradient_accumulation_steps: 4      # effective batch = 16 sequences = 4,096 tokens
+  learning_rate: 3.0e-4               # from-scratch training wants a higher LR than fine-tuning
+  lr_scheduler: cosine
+  warmup_ratio: 0.02
+  weight_decay: 0.1                   # applied to matrices only, never to norms or biases
+  max_grad_norm: 1.0
+  gradient_checkpointing: false
+  optimizer: adamw_torch
+  bf16: true
+  seed: 42
+
+logging_steps: 5
+save_steps: 500
+save_total_limit: 2

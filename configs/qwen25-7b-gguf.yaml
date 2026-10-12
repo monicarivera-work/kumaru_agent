@@ -1,0 +1,42 @@
+# Profile: Qwen2.5-7B-Instruct (Q4_K_M GGUF) served by llama.cpp.
+#
+# The v0.1 default model, on the v0.2 engine. It exists mainly as the
+# *baseline* for benchmarks: same engine, same harness, older and smaller
+# model — so a score difference against `qwen36` is attributable to the model.
+# It is also the right choice for GPUs with ~8 GB of VRAM.
+#
+#   kumaru serve -c qwen25-7b-gguf
+#   kumaru bench run gsm8k -c qwen25-7b-gguf --limit 100
+#
+# VRAM: weights 4.4 GiB (a 4.7 GB file) + KV 56 KiB/token x 32k = 1.75 GiB,
+# plus compute buffers -> ~7 GiB total (estimate). Lower --context to fit 8 GB.
+
+backend:
+  name: llamacpp_server
+  model: Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M
+  max_context_length: 32768    # the model's native window
+  llama_server:
+    parallel: 4
+    kv_unified: true
+    flash_attn: "on"
+
+# Qwen2.5's own generation_config.json. Qwen2.5 has no thinking mode.
+generation:
+  max_tokens: 4096
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  min_p: 0.0
+  repetition_penalty: 1.05
+
+agent:
+  max_history_tokens: 24576
+  memory_policy: sliding_window
+
+server:
+  host: 127.0.0.1
+  port: 8080
+  max_concurrent_requests: 8
+
+telemetry:
+  log_level: INFO

@@ -1,126 +1,168 @@
-# Kumaru
+<div align="center">
 
-A local-first LLM chat agent with a browser UI. It runs on your own machine,
-answers questions in a chat window, and is built so the model behind it can be
-swapped — from "no model at all" to a quantised 7B on your CPU to a GPU cluster
-— without changing a line of the UI or the agent.
+# ◈ Kumaru
 
-```
-git clone <this repo> && cd kumaru_agent
-python -m venv .venv && .venv/bin/pip install -e .
-.venv/bin/kumaru serve
-```
+**A local-first LLM agent that scales with your hardware.**
 
-Then open **http://127.0.0.1:8000**. That works immediately, with no model
-download, because the default backend is `echo` (it reflects your message back
-so you can verify the whole pipeline). To get real answers, pick a backend —
-see [Getting a real model](#3-get-real-answers) below.
+Chat today on one GPU. Fine-tune tonight. Serve a cluster later — without rewriting anything.
 
-Windows PowerShell:
+</div>
+
+---
+
+## What this is
+
+Kumaru is a complete, running LLM system you own end to end:
+
+- **Chat** — a web UI and an OpenAI-compatible API, streaming, running entirely on your machine. On a 24 GB GPU the default model is Qwen3.6-35B-A3B, with an optional **Think** mode for hard problems.
+- **Train** — LoRA/QLoRA fine-tuning on a single consumer GPU, plus a from-scratch transformer trainer that scales to multi-GPU.
+- **Measure** — public benchmarks (`kumaru bench`) with confidence intervals and significance tests, plus a fast eval harness, so "is it better?" has a number attached.
+- **Extend** — a plugin registry for backends, tools and benchmarks; new capabilities are additive, never surgical.
+
+Every source file has a companion how-to in [`docs/howto/`](docs/howto/) explaining what it does, why it exists, how to operate it, how to extend it, and how it fails.
+
+## What it is not
+
+It does not train a frontier model from scratch. That costs millions of GPU-hours and no desktop will do it. What it *does* give you is the same architecture, the same training mechanics, and the same serving patterns the frontier labs use — sized to the hardware you have, and built so every layer can be swapped for a bigger one as your compute grows. [`docs/SCALABILITY.md`](docs/SCALABILITY.md) is honest about exactly where each ceiling sits.
+
+---
+
+## Sixty-second start
 
 ```powershell
-py -m venv .venv
-.venv\Scripts\pip install -e .
-.venv\Scripts\kumaru serve
+.\scripts\setup.ps1           # creates .venv, installs the package and its test tools
+.\.venv\Scripts\Activate.ps1
+
+kumaru serve -c test          # no model, no download — proves the install works
 ```
+
+Open **http://127.0.0.1:8080**. You should get a streaming reply immediately.
+
+Now the real thing, on an NVIDIA GPU with 24 GB:
+
+```powershell
+.\scripts\get-llama-server.ps1    # llama.cpp's inference server, once; no PyTorch needed
+kumaru serve -c qwen36            # Qwen3.6-35B-A3B; downloads 17.7 GB on first run
+```
+
+For fine-tuning, or a smaller GPU, add PyTorch:
+
+```powershell
+.\scripts\setup.ps1 -Gpu -Quant   # PyTorch CUDA + training stack
+kumaru serve -c local-gpu         # downloads Qwen2.5-7B on first run (~15 GB)
+```
+
+Check everything works, layer by layer:
+
+```powershell
+.\scripts\verify.ps1          # fast: no GPU, no downloads
+.\scripts\verify.ps1 -Full    # also exercises CUDA, LoRA, and eval
+```
+
+Full walkthrough with troubleshooting: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 
 ---
 
-## What you get
+## The seven commands
 
-| | |
+| Command | What it does |
 |---|---|
-| **Chat UI** | Streaming answers, markdown rendering, stop button, light/dark, history that survives a reload. No build step, no npm. |
-| **HTTP API** | `POST /api/chat`, `POST /api/chat/stream` (SSE), `GET /api/history/{id}`, `GET /api/health`. |
-| **CLI** | `kumaru serve`, `kumaru chat`, `kumaru ask "..."`, `kumaru config`, `kumaru backends`. |
-| **Four backends** | `echo` (no deps), `openai_compat` (Ollama / llama.cpp server / vLLM / LM Studio / OpenAI), `transformers` (in-process GPU), `llamacpp` (in-process quantised CPU). |
-| **Docs per file** | Every source file has a how-to under [`docs/howto/`](docs/howto/README.md). |
-
-## Project layout
-
-```
-src/kumaru/
-  core/       types, config, errors, logging, registry   (depends on nothing)
-  backends/   anything that turns a prompt into tokens   (depends on core)
-  agent/      prompt + memory + the chat loop            (depends on core, backends)
-  server/     FastAPI app, schemas, routes               (depends on all of the above)
-  cli.py      the only place that configures logging or exits
-ui/           index.html, styles.css, app.js  - served at /
-configs/      ready-made YAML configs for common hardware
-docs/         GUIDE.md, SCALABILITY.md, TRAINING.md, howto/
-tests/        fast tests; no model, no GPU, no network
-```
-
-Dependencies point one way only: `core <- backends <- agent <- server`. That is
-what lets you replace any layer without touching the others.
+| `kumaru serve` | Web UI + OpenAI-compatible API |
+| `kumaru chat` | Terminal REPL, no server in between |
+| `kumaru info` | Versions, GPU, which optional components are installed |
+| `kumaru config` | Print the fully merged configuration — run this when something ignores your settings |
+| `kumaru train` | LoRA fine-tune or from-scratch pretrain |
+| `kumaru eval` | Latency, throughput, and quality regression checks |
+| `kumaru bench` | Public benchmarks with error bars; compares two runs with significance tests |
 
 ---
 
-## 3. Get real answers
+## Pick a profile for your hardware
 
-Pick whichever matches your machine. Full walkthroughs are in
-[`docs/GUIDE.md`](docs/GUIDE.md).
+| Your machine | Profile | Command |
+|---|---|---|
+| 24 GB GPU (3090/4090) | `qwen36` (**recommended**) | `kumaru serve -c qwen36` |
+| 24 GB GPU, fine-tuning | `local-gpu` | `kumaru serve -c local-gpu` |
+| 8–12 GB GPU | `low-vram` | `kumaru serve -c low-vram` |
+| No GPU | `cpu-only` | `kumaru serve -c cpu-only` |
+| Many users / a real server | `vllm` | `kumaru serve -c vllm` |
+| Just testing the code | `test` | `kumaru serve -c test` |
 
-### Easiest: an existing local server (Ollama, LM Studio, llama.cpp)
+Every profile is a commented YAML file in [`configs/`](configs/). They are meant to be read.
 
-```bash
-ollama serve            # in another terminal
-ollama pull llama3.1:8b
-kumaru serve -c configs/openai-compat.yaml
+---
+
+## The architecture in one picture
+
+```mermaid
+flowchart TD
+    UI["Web UI<br/><i>ui/</i>"] -->|HTTP + SSE| SRV
+    SDK["openai SDK · LangChain<br/>curl · anything"] -->|/v1/chat/completions| SRV
+    CLI["kumaru chat"] --> AG
+
+    SRV["<b>Server</b><br/><i>server/</i><br/>routing · streaming · admission control"] --> AG
+    AG["<b>Agent</b><br/><i>agent/</i><br/>prompt · memory budget · tools"] --> BE
+
+    BE{"<b>Backend</b><br/><i>backends/</i><br/>one interface"}
+    BE --> S["llama-server<br/><i>Qwen3.6, thinking, batching</i>"]
+    BE --> T["transformers<br/><i>local GPU</i>"]
+    BE --> L["llama.cpp<br/><i>GGUF, low VRAM</i>"]
+    BE --> V["openai_compat<br/><i>vLLM, Ollama, remote</i>"]
+    BE --> E["echo<br/><i>no model, for tests</i>"]
+
+    TR["<b>Training</b><br/><i>train/</i><br/>LoRA · pretrain"] -.->|adapter| T
+
+    style BE fill:#2d4a7c,stroke:#6ea8fe,color:#fff
+    style SRV fill:#171b21,stroke:#262c35,color:#e6e9ee
+    style AG fill:#171b21,stroke:#262c35,color:#e6e9ee
+    style TR fill:#1a2e1f,stroke:#46d17f,color:#e6e9ee
 ```
 
-### No GPU: a quantised model in-process
+The blue box is the load-bearing idea. Everything above it is written once; everything below it is interchangeable. Upgrading from a 7B on your desktop to a 70B on a cluster is a change to a YAML file.
 
-```bash
-pip install -e '.[llamacpp]'
-# download a *.gguf into ./models/, then:
-kumaru serve -c configs/cpu-only.yaml
-```
-
-### With a GPU: Hugging Face weights in-process
-
-```bash
-pip install -e '.[transformers]'     # install a CUDA build of torch first
-kumaru serve -c configs/local-gpu.yaml
-```
-
-## Configuration
-
-Precedence, lowest to highest: **built-in defaults → YAML file → `KUMARU_*`
-environment variables → CLI flags**. Print what is actually in effect:
-
-```bash
-kumaru config -c configs/cpu-only.yaml
-```
-
-Common environment variables: `KUMARU_BACKEND`, `KUMARU_MODEL`,
-`KUMARU_BASE_URL`, `KUMARU_PORT`, `KUMARU_SYSTEM_PROMPT`, `KUMARU_LOG_LEVEL`.
-API keys are read from the environment only (`KUMARU_API_KEY` by default) and
-are never written to a config file or returned by `/api/config`.
-
-## Tests
-
-```bash
-pip install -e '.[dev]'
-pytest
-```
-
-The suite runs against the `echo` backend, so it needs no weights, no GPU and
-no network.
-
-## Security note
-
-`server.host` defaults to `127.0.0.1` on purpose: the API has no
-authentication, so binding it to `0.0.0.0` puts an open text generator on your
-network. Put it behind an authenticating reverse proxy before exposing it.
+---
 
 ## Documentation
 
-* [`docs/GUIDE.md`](docs/GUIDE.md) — install, run, operate, troubleshoot.
-* [`docs/SCALABILITY.md`](docs/SCALABILITY.md) — what "scalable" means here, concretely.
-* [`docs/TRAINING.md`](docs/TRAINING.md) — how to fine-tune a model and plug it in.
-* [`docs/howto/`](docs/howto/README.md) — one how-to per source file.
+Start here, in this order:
 
-## Licence
+| Document | What it answers |
+|---|---|
+| [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Get it running on my machine, right now |
+| [`GUIDE.md`](GUIDE.md) | How do I actually *use* this as a tool, day to day |
+| [`docs/TRAINING.md`](docs/TRAINING.md) | How do I train it, what does it cost, what should I expect |
+| [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) | How good is it really, and did my change help? Measured results and method |
+| [`docs/SCALABILITY.md`](docs/SCALABILITY.md) | Where are the ceilings, and what do I do at each one |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Why is it built this way |
+| [`docs/howto/`](docs/howto/) | One page per source file — API, usage, extension points, failure modes |
+
+---
+
+## Layout
+
+```
+src/kumaru/
+  core/        config, types, errors, logging, plugin registry
+  backends/    inference engines behind one interface
+  agent/       prompt assembly, memory budgeting, tool seam
+  server/      FastAPI, OpenAI-compatible, SSE streaming
+  train/       LoRA fine-tuning + from-scratch transformer
+  eval/        speed and quality measurement; public benchmarks (eval/benchmarks/)
+ui/            zero-build web client (3 files, no npm)
+configs/       hardware profiles and training recipes, heavily commented
+data/          sample training data and the golden benchmark questions
+scripts/       setup.ps1 (install), verify.ps1 (layered self-check),
+               get-llama-server.ps1 (inference engine), check_graders.py (grader proof)
+docs/howto/    a page for every source file
+tests/         pytest suite (373 tests), runs with no GPU in under a minute
+```
+
+## Requirements
+
+- Python 3.10+
+- Optional: an NVIDIA GPU. 8 GB gets you a quantized 7B; 24 GB gets you Qwen3.6-35B-A3B, or a comfortable 7B *and* QLoRA fine-tuning.
+- No GPU is fine — use `-c cpu-only`.
+
+## License
 
 MIT.

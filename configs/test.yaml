@@ -1,17 +1,30 @@
-# Deterministic settings for tests and CI: no weights, no network, no sleep.
+# Profile: no model, no GPU, no downloads.
+#
+# The `echo` backend returns a deterministic canned reply. Use it to:
+#   * verify an install end to end in under a second
+#   * develop and test the UI, routing, and streaming without a GPU
+#   * bisect a failure — if echo works, the bug is in the model layer
+#
+#   kumaru serve -c test
+#   kumaru chat  -c test -q "hello"
 
 backend:
   name: echo
+  model: echo
+  max_context_length: 8192
+  extra:
+    delay_s: 0.01          # simulated inter-token delay; 0 for instant
+
+generation:
+  max_tokens: 256
+  temperature: 0.0
 
 agent:
-  system_prompt: "You are Kumaru (test mode)."
-  max_tokens: 64
-  temperature: 0.0
-  max_history_turns: 4
-  max_history_chars: 2000
+  max_history_tokens: 2048
 
 server:
-  host: 127.0.0.1
-  port: 8765
+  port: 8080
+  max_concurrent_requests: 16
 
-log_level: WARNING
+telemetry:
+  log_level: DEBUG

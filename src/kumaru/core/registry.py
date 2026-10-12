@@ -1,82 +1,195 @@
-"""A tiny name -> factory registry, used to make backends pluggable.
+"""A typed component registry — Kumaru's extensibility mechanism.
 
-Why this exists
----------------
-Without it, ``build_backend()`` would be a growing ``if/elif`` chain that
-imports every backend eagerly - which would force torch to be installed even
-for someone who only wants the HTTP backend. With a registry, each backend
-module registers itself under a string name and is only imported when that
-name is actually selected (see ``kumaru.backends.load_backend``).
+The problem it solves
+---------------------
+A system that must "absorb new techniques" cannot hard-code its parts. If
+`server.py` does `if backend == "transformers": ... elif backend == "vllm": ...`
+then every new idea requires editing core files, and every edit risks breaking
+what already works.
 
-The registry is generic (``Registry[T]``) so the same mechanism can later hold
-tools, retrievers, or evaluators without duplication.
+The registry inverts that. Components *announce themselves*::
+
+    @BACKENDS.register("my_new_backend")
+    class MyNewBackend(Backend): ...
+
+and the rest of the system only ever asks for them *by name*, resolved from
+config at runtime. Adding a capability becomes an additive change — a new file
+plus one decorator — which is the property that lets a codebase absorb research
+for years without rotting.
+
+Third-party extension
+---------------------
+`load_entry_points()` discovers components installed by *other* pip packages
+that declare the `kumaru.backends` / `kumaru.tools` / `kumaru.benchmarks`
+entry-point group. That means
+someone can `pip install kumaru-mamba` and the backend shows up in your UI's
+dropdown with no change to this repository.
 """
 
 from __future__ import annotations
 
+import importlib
+import importlib.metadata as importlib_metadata
 from collections.abc import Callable, Iterator
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 from kumaru.core.errors import RegistryError
+from kumaru.core.logging import get_logger
 
 T = TypeVar("T")
+logger = get_logger(__name__)
 
 
 class Registry(Generic[T]):
-    """Maps a lowercase string name to a factory for ``T``."""
+    """A name -> class mapping with decorator registration and lazy imports.
 
-    def __init__(self, kind: str) -> None:
+    Parameters
+    ----------
+    kind:
+        Human-readable noun used in error messages ("backend", "tool", ...).
+    entry_point_group:
+        Optional setuptools entry-point group scanned by `load_entry_points()`
+        to discover third-party plugins.
+    """
+
+    def __init__(self, kind: str, *, entry_point_group: str | None = None) -> None:
         self._kind = kind
-        self._items: dict[str, Callable[..., T]] = {}
+        self._entry_point_group = entry_point_group
+        self._items: dict[str, type[T]] = {}
+        # Maps name -> "module.path:ClassName" for components whose imports are
+        # expensive (torch takes seconds). Resolved only when actually used, so
+        # `kumaru serve --backend echo` never pays for importing torch.
+        self._lazy: dict[str, str] = {}
+        # Aliases are resolvable but hidden from user-facing listings, so the UI
+        # shows four backends rather than nine names for the same four things.
+        self._aliases: set[str] = set()
+        self._entry_points_loaded = False
 
-    @property
-    def kind(self) -> str:
-        return self._kind
+    # -- registration -------------------------------------------------------
 
-    def register(
-        self, name: str, factory: Callable[..., T] | None = None
-    ) -> Callable[..., T] | Callable[[Callable[..., T]], Callable[..., T]]:
-        """Register ``factory`` under ``name``.
+    def register(self, name: str, *, aliases: tuple[str, ...] = ()) -> Callable[[type[T]], type[T]]:
+        """Decorator that registers a class under `name` (and any aliases)."""
 
-        Usable directly (``registry.register("echo", EchoBackend)``) or as a
-        decorator (``@registry.register("echo")``).
-        """
-        key = name.strip().lower()
+        def decorator(cls: type[T]) -> type[T]:
+            for key in (name, *aliases):
+                if key in self._items:
+                    raise RegistryError(f"{self._kind} '{key}' is already registered")
+                self._items[key] = cls
+            self._aliases.update(aliases)
+            return cls
 
-        def _add(fn: Callable[..., T]) -> Callable[..., T]:
-            if key in self._items:
-                raise RegistryError(f"{self._kind} '{key}' is already registered")
-            self._items[key] = fn
-            return fn
+        return decorator
 
-        if factory is not None:
-            return _add(factory)
-        return _add
+    def register_lazy(self, name: str, target: str, *, aliases: tuple[str, ...] = ()) -> None:
+        """Register `"package.module:ClassName"` without importing it yet."""
+        for key in (name, *aliases):
+            self._lazy[key] = target
+        self._aliases.update(aliases)
 
-    def get(self, name: str) -> Callable[..., T]:
-        """Return the factory registered under ``name``."""
-        key = name.strip().lower()
-        try:
-            return self._items[key]
-        except KeyError:
-            raise RegistryError(
-                f"unknown {self._kind} '{name}'",
-                hint=f"available: {', '.join(self.names()) or '(none registered)'}",
-            ) from None
+    # -- lookup -------------------------------------------------------------
 
-    def create(self, name: str, *args: object, **kwargs: object) -> T:
-        """Look up ``name`` and call its factory."""
+    def get(self, name: str) -> type[T]:
+        """Resolve a registered class by name, importing lazily if needed."""
+        if name in self._items:
+            return self._items[name]
+
+        if name in self._lazy:
+            module_path, _, attr = self._lazy[name].partition(":")
+            module = importlib.import_module(module_path)
+            cls = getattr(module, attr)
+            self._items[name] = cls
+            return cls
+
+        if not self._entry_points_loaded:
+            self.load_entry_points()
+            if name in self._items or name in self._lazy:
+                return self.get(name)
+
+        raise RegistryError(
+            f"Unknown {self._kind}: '{name}'.",
+            hint=f"Available {self._kind}s: {', '.join(self.names()) or '(none)'}",
+        )
+
+    def create(self, name: str, *args: Any, **kwargs: Any) -> T:
+        """Resolve by name and instantiate in one step."""
         return self.get(name)(*args, **kwargs)
 
     def names(self) -> list[str]:
-        """Registered names, sorted, for help text and error hints."""
-        return sorted(self._items)
+        """Primary names only — what a human should see in a list or dropdown."""
+        return sorted((set(self._items) | set(self._lazy)) - self._aliases)
+
+    def all_names(self) -> list[str]:
+        """Every resolvable name, aliases included."""
+        return sorted(set(self._items) | set(self._lazy))
 
     def __contains__(self, name: object) -> bool:
-        return isinstance(name, str) and name.strip().lower() in self._items
+        return isinstance(name, str) and (name in self._items or name in self._lazy)
 
     def __iter__(self) -> Iterator[str]:
         return iter(self.names())
 
     def __len__(self) -> int:
-        return len(self._items)
+        return len(self.names())
+    # -- plugins ------------------------------------------------------------
+
+    def load_entry_points(self) -> None:
+        """Discover components contributed by other installed packages.
+
+        Failures are logged, never raised: one broken third-party plugin must
+        not prevent the whole application from starting.
+        """
+        self._entry_points_loaded = True
+        if not self._entry_point_group:
+            return
+        try:
+            entries = importlib_metadata.entry_points(group=self._entry_point_group)
+        except Exception as exc:  # pragma: no cover - environment dependent
+            logger.debug("entry-point scan failed for %s: %s", self._entry_point_group, exc)
+            return
+
+        for ep in entries:
+            try:
+                self._items.setdefault(ep.name, ep.load())
+                logger.debug("loaded plugin %s '%s'", self._kind, ep.name)
+            except Exception as exc:
+                logger.warning("failed to load plugin %s '%s': %s", self._kind, ep.name, exc)
+
+
+# ---------------------------------------------------------------------------
+# The global registries.
+#
+# Lazy registration keeps CLI startup fast: importing `kumaru.backends.
+# transformers_backend` pulls in torch (multiple seconds, hundreds of MB), and
+# we only want to pay that when the transformers backend is actually selected.
+# ---------------------------------------------------------------------------
+
+BACKENDS: Registry[Any] = Registry("backend", entry_point_group="kumaru.backends")
+TOOLS: Registry[Any] = Registry("tool", entry_point_group="kumaru.tools")
+
+BACKENDS.register_lazy("echo", "kumaru.backends.echo:EchoBackend")
+BACKENDS.register_lazy(
+    "transformers", "kumaru.backends.transformers_backend:TransformersBackend", aliases=("hf",)
+)
+BACKENDS.register_lazy(
+    "llamacpp", "kumaru.backends.llamacpp_backend:LlamaCppBackend", aliases=("gguf",)
+)
+BACKENDS.register_lazy(
+    "openai_compat",
+    "kumaru.backends.openai_compat:OpenAICompatBackend",
+    aliases=("ollama", "vllm", "remote"),
+)
+BACKENDS.register_lazy(
+    "llamacpp_server",
+    "kumaru.backends.llamacpp_server:LlamaServerBackend",
+    aliases=("llama-server", "llama_server"),
+)
+
+# Benchmarks for `kumaru bench`. Lazy for the same reason: listing them must not
+# import `datasets` (seconds) or download anything.
+BENCHMARKS: Registry[Any] = Registry("benchmark", entry_point_group="kumaru.benchmarks")
+
+BENCHMARKS.register_lazy("gsm8k", "kumaru.eval.benchmarks.gsm8k:GSM8K")
+BENCHMARKS.register_lazy("mmlu_pro", "kumaru.eval.benchmarks.mmlu_pro:MMLUPro", aliases=("mmlu-pro",))
+BENCHMARKS.register_lazy("ifeval", "kumaru.eval.benchmarks.ifeval:IFEval")
+BENCHMARKS.register_lazy("humaneval", "kumaru.eval.benchmarks.humaneval:HumanEval")
+BENCHMARKS.register_lazy("golden", "kumaru.eval.benchmarks.golden:GoldenSet")

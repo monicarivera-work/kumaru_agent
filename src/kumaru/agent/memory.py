@@ -1,76 +1,140 @@
-"""Bounded, in-process conversation memory.
+"""Context-window management: deciding what the model gets to remember.
 
-Why bounded
------------
-Every model has a finite context window. An unbounded history does not fail
-gracefully - it fails as a wall of backend errors, or silently truncated
-prompts, the moment a conversation gets long. This class enforces two limits at
-once:
-
-* ``max_turns`` - how many *messages* are kept (a rough proxy for depth);
-* ``max_chars`` - a hard character budget (protects against one huge paste).
-
-Trimming always removes the oldest messages first and never splits a message.
-
-Why in-process
+The constraint
 --------------
-v1 is a local single-user app, so a dict of deques is the right amount of
-machinery. The class is small and its interface is storage-shaped on purpose:
-swapping it for SQLite or Redis later means implementing the same five methods.
+A model has a fixed context window. Attention cost grows ~O(n^2) with sequence
+length and the KV cache grows ~O(n) in memory, so long conversations get slower
+and more expensive *per token* and eventually stop fitting at all. Something
+must be dropped. The only question is *what*, and that choice is a policy.
+
+Policies implemented here
+-------------------------
+``none``
+    Send everything. Correct until it is not; fails loudly when it overflows.
+``drop_oldest``
+    Remove from the front until it fits. Cheap, lossy, and surprisingly strong,
+    because recency dominates relevance in most chats.
+``sliding_window`` (default)
+    Always keep the system prompt and the most recent turns; drop from the
+    middle. Preserves both the instructions (which govern behaviour) and the
+    immediate context (which governs the answer) — the two regions that
+    actually matter.
+
+Where this goes next
+--------------------
+The `MemoryPolicy` interface is the extension point for the standard upgrades:
+*summarize* the dropped middle into a paragraph and re-inject it, or *retrieve*
+only the relevant history from a vector store (RAG). Both slot in as new
+policies without touching `ChatAgent`. See docs/SCALABILITY.md.
 """
 
 from __future__ import annotations
 
-from collections import deque
-from collections.abc import Iterable
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Sequence
 
+from kumaru.core.errors import ContextLengthExceededError
+from kumaru.core.logging import get_logger
 from kumaru.core.types import Message, Role
 
+logger = get_logger(__name__)
 
-class ConversationMemory:
-    """Per-session message history with turn and character budgets."""
+TokenCounter = Callable[[Sequence[Message]], int]
 
-    def __init__(self, max_turns: int = 12, max_chars: int = 12000) -> None:
-        if max_turns < 1:
-            raise ValueError("max_turns must be >= 1")
-        if max_chars < 1:
-            raise ValueError("max_chars must be >= 1")
-        self.max_turns = max_turns
-        self.max_chars = max_chars
-        self._sessions: dict[str, deque[Message]] = {}
 
-    def _bucket(self, session_id: str) -> deque[Message]:
-        return self._sessions.setdefault(session_id, deque(maxlen=self.max_turns))
+class MemoryPolicy(ABC):
+    """Decides which messages survive into the prompt."""
 
-    def add(self, session_id: str, message: Message) -> None:
-        """Append a message, dropping system messages and re-applying budgets."""
-        if message.role is Role.SYSTEM:
-            return  # the system prompt is rebuilt every turn; never store it
-        bucket = self._bucket(session_id)
-        bucket.append(message)
-        self._trim_chars(bucket)
+    name: str = "base"
 
-    def extend(self, session_id: str, messages: Iterable[Message]) -> None:
-        for message in messages:
-            self.add(session_id, message)
+    @abstractmethod
+    def apply(
+        self, messages: Sequence[Message], budget: int, count_tokens: TokenCounter
+    ) -> list[Message]:
+        """Return a sub-list of `messages` that fits within `budget` tokens."""
 
-    def _trim_chars(self, bucket: deque[Message]) -> None:
-        total = sum(len(m.content) for m in bucket)
-        while len(bucket) > 1 and total > self.max_chars:
-            total -= len(bucket.popleft().content)
 
-    def history(self, session_id: str) -> list[Message]:
-        """Oldest-first copy of the session history."""
-        return list(self._sessions.get(session_id, ()))
+class NoTrimPolicy(MemoryPolicy):
+    """Pass everything through; raise if it cannot fit."""
 
-    def clear(self, session_id: str) -> None:
-        self._sessions.pop(session_id, None)
+    name = "none"
 
-    def clear_all(self) -> None:
-        self._sessions.clear()
+    def apply(
+        self, messages: Sequence[Message], budget: int, count_tokens: TokenCounter
+    ) -> list[Message]:
+        used = count_tokens(messages)
+        if used > budget:
+            raise ContextLengthExceededError(
+                f"Conversation needs {used} tokens but the budget is {budget}.",
+                hint="Switch agent.memory_policy to 'sliding_window', or raise the budget.",
+            )
+        return list(messages)
 
-    def sessions(self) -> list[str]:
-        return sorted(self._sessions)
 
-    def __len__(self) -> int:
-        return len(self._sessions)
+class DropOldestPolicy(MemoryPolicy):
+    """Drop from the front (after the system message) until it fits."""
+
+    name = "drop_oldest"
+
+    def apply(
+        self, messages: Sequence[Message], budget: int, count_tokens: TokenCounter
+    ) -> list[Message]:
+        system = [m for m in messages if m.role == Role.SYSTEM][:1]
+        body = [m for m in messages if m.role != Role.SYSTEM]
+
+        while body and count_tokens([*system, *body]) > budget:
+            body.pop(0)
+        return [*system, *body]
+
+
+class SlidingWindowPolicy(MemoryPolicy):
+    """Keep the system prompt plus the newest turns; drop the middle.
+
+    `min_recent_turns` guarantees the immediate exchange survives even under a
+    tiny budget, so the model never answers a question it can no longer see.
+    """
+
+    name = "sliding_window"
+
+    def __init__(self, min_recent_turns: int = 2) -> None:
+        self.min_recent_turns = min_recent_turns
+
+    def apply(
+        self, messages: Sequence[Message], budget: int, count_tokens: TokenCounter
+    ) -> list[Message]:
+        system = [m for m in messages if m.role == Role.SYSTEM][:1]
+        body = [m for m in messages if m.role != Role.SYSTEM]
+
+        if count_tokens([*system, *body]) <= budget:
+            return [*system, *body]
+
+        # Grow a window backwards from the newest message while it still fits.
+        kept: list[Message] = []
+        for msg in reversed(body):
+            candidate = [msg, *kept]
+            if count_tokens([*system, *candidate]) > budget and len(kept) >= self.min_recent_turns:
+                break
+            kept = candidate
+
+        dropped = len(body) - len(kept)
+        if dropped:
+            logger.info(
+                "memory: dropped %d older message(s) to fit %d-token budget", dropped, budget
+            )
+        return [*system, *kept]
+
+
+POLICIES: dict[str, Callable[[], MemoryPolicy]] = {
+    "none": NoTrimPolicy,
+    "drop_oldest": DropOldestPolicy,
+    "sliding_window": SlidingWindowPolicy,
+}
+
+
+def get_policy(name: str) -> MemoryPolicy:
+    """Look up a policy by config name, defaulting to the safe one."""
+    factory = POLICIES.get(name)
+    if factory is None:
+        logger.warning("unknown memory_policy '%s'; using sliding_window", name)
+        factory = SlidingWindowPolicy
+    return factory()

@@ -1,35 +1,62 @@
-"""Shared fixtures.
+"""Shared offline fixtures for exercising Kumaru without model downloads."""
 
-Everything here runs against the ``echo`` backend so the suite needs no
-weights, no GPU and no network - a test run must stay under a few seconds or
-people stop running it.
-"""
-
-from __future__ import annotations
+import shutil
+from collections.abc import Generator
+from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from kumaru.agent.chat import ChatAgent
 from kumaru.backends.echo import EchoBackend
-from kumaru.core.config import KumaruConfig
+from kumaru.core.config import BackendConfig, KumaruConfig
+from kumaru.core.types import GenerationParams
+from kumaru.server.app import create_app
 
 
 @pytest.fixture
-def config() -> KumaruConfig:
-    cfg = KumaruConfig()
-    cfg.backend.name = "echo"
-    cfg.agent.max_history_turns = 4
-    cfg.agent.max_history_chars = 2000
-    cfg.server.serve_ui = False
-    return cfg
+def echo_config() -> KumaruConfig:
+    """Return a small deterministic config that never touches GPU-backed code."""
+    return KumaruConfig(
+        backend=BackendConfig(
+            name="echo",
+            model="echo",
+            max_context_length=2048,
+            extra={"delay_s": 0},
+        ),
+        generation=GenerationParams(max_tokens=32, temperature=0.0),
+    )
 
 
 @pytest.fixture
-def backend(config: KumaruConfig) -> EchoBackend:
-    # delay_s=0 keeps streaming tests instant.
-    return EchoBackend(config.backend, delay_s=0.0)
+async def loaded_echo_backend(echo_config: KumaruConfig) -> EchoBackend:
+    backend = EchoBackend(echo_config.backend)
+    await backend.load()
+    try:
+        yield backend
+    finally:
+        await backend.aclose()
 
 
 @pytest.fixture
-def agent(config: KumaruConfig, backend: EchoBackend) -> ChatAgent:
-    return ChatAgent(config, backend=backend)
+def chat_agent(loaded_echo_backend: EchoBackend, echo_config: KumaruConfig) -> ChatAgent:
+    return ChatAgent(loaded_echo_backend, echo_config)
+
+
+@pytest.fixture
+def test_client(echo_config: KumaruConfig) -> Generator[TestClient, None, None]:
+    app = create_app(echo_config)
+    with TestClient(app) as client:
+        yield client
+
+
+@pytest.fixture
+def scratch_dir() -> Generator[Path, None, None]:
+    """An empty directory under tests/.scratch, removed (recursively) afterwards."""
+    path = Path(__file__).resolve().parent / ".scratch"
+    shutil.rmtree(path, ignore_errors=True)
+    path.mkdir()
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)

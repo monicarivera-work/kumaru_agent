@@ -1,19 +1,34 @@
-# 6-8 GB of VRAM: keep a quantised model mostly on the GPU.
+# Profile: 6-12 GB VRAM (RTX 3060, 4060, 2080, laptop GPUs).
 #
-# Tuning loop: raise gpu_layers until loading fails or the machine swaps,
-# then drop back by 4. Lower context_length first if you hit OOM - KV cache
-# grows linearly with it.
+# Strategy: 4-bit NF4 quantization. A 7B model drops from ~15 GB to ~4.5 GB, so
+# it fits with room for a usable context window. Because single-stream decoding
+# is memory-bandwidth bound, reading 4x fewer bytes per token also makes it
+# roughly twice as fast as bf16 — quantization is a speed optimization, not only
+# a memory one.
+#
+# Quality cost is small but real: expect a slight degradation on long-chain
+# reasoning and exact recall. NF4 with double quantization (the QLoRA recipe) is
+# the best-understood trade-off available, which is why it is the default here.
+#
+# Requires:  .\scripts\setup.ps1 -Gpu -Quant   (elsewhere: pip install -e ".[torch,quant]")
+# Run:       kumaru serve -c low-vram
 
 backend:
-  name: llamacpp
-  model: models/qwen2.5-7b-instruct-q4_k_m.gguf
-  context_length: 4096
-  gpu_layers: 20
+  name: transformers
+  model: Qwen/Qwen2.5-7B-Instruct
+  device: cuda
+  dtype: bfloat16          # compute dtype; storage is 4-bit
+  load_in_4bit: true
+  # KV cache is NOT quantized, so it is now a large share of your budget.
+  # 8k tokens is the safe ceiling at 8 GB.
+  max_context_length: 8192
+
+generation:
+  max_tokens: 1024
 
 agent:
-  max_tokens: 512
-  temperature: 0.7
+  max_history_tokens: 5120
 
 server:
-  host: 127.0.0.1
-  port: 8000
+  port: 8080
+  max_concurrent_requests: 2

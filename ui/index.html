@@ -1,76 +1,142 @@
-<!doctype html>
-<html lang="en" data-theme="dark">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Kumaru</title>
-    <link rel="stylesheet" href="styles.css" />
-  </head>
-  <body>
-    <div class="app">
-      <header class="topbar">
-        <div class="brand">
-          <span class="logo" aria-hidden="true">K</span>
-          <h1>Kumaru</h1>
-        </div>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Kumaru</title>
+<link rel="stylesheet" href="/static/styles.css" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>" />
+</head>
+<body>
+<div id="app">
 
-        <div class="status" id="status" role="status" aria-live="polite">
-          <span class="dot" id="status-dot"></span>
-          <span id="status-text">connecting...</span>
-        </div>
+  <!-- ─────────────── Sidebar: status + controls ─────────────── -->
+  <aside id="sidebar">
+    <header class="brand">
+      <span class="mark">◈</span>
+      <div>
+        <h1>Kumaru</h1>
+        <p id="version">local agent</p>
+      </div>
+    </header>
 
-        <div class="actions">
-          <button id="theme-btn" class="ghost" type="button" title="Toggle light / dark">
-            Theme
-          </button>
-          <button id="clear-btn" class="ghost" type="button" title="Clear this conversation">
-            Clear
-          </button>
-        </div>
-      </header>
+    <section class="panel">
+      <div class="panel-title">Status</div>
+      <div class="status-row">
+        <span id="status-dot" class="dot loading"></span>
+        <span id="status-text">connecting…</span>
+      </div>
+      <dl class="kv" id="model-facts">
+        <dt>model</dt><dd id="fact-model">—</dd>
+        <dt>backend</dt><dd id="fact-backend">—</dd>
+        <dt>device</dt><dd id="fact-device">—</dd>
+        <dt>dtype</dt><dd id="fact-dtype">—</dd>
+        <dt>context</dt><dd id="fact-context">—</dd>
+      </dl>
+    </section>
 
-      <main id="messages" class="messages" aria-live="polite">
-        <div class="empty" id="empty-state">
-          <h2>Ask Kumaru something</h2>
-          <p>
-            Everything runs on your machine. Swap the model by changing the
-            backend in your config file - this page does not need to change.
-          </p>
-          <div class="suggestions">
-            <button class="suggestion" type="button">
-              Explain the difference between a process and a thread.
-            </button>
-            <button class="suggestion" type="button">
-              Write a Python function that merges two sorted lists.
-            </button>
-            <button class="suggestion" type="button">
-              What does the gpu_layers setting do?
-            </button>
-          </div>
-        </div>
-      </main>
+    <section class="panel">
+      <div class="panel-title">Last response</div>
+      <dl class="kv">
+        <dt>first token</dt><dd id="stat-ttft">—</dd>
+        <dt>thinking</dt><dd id="stat-think">—</dd>
+        <dt>speed</dt><dd id="stat-tps">—</dd>
+        <dt>tokens</dt><dd id="stat-tokens">—</dd>
+      </dl>
+    </section>
 
-      <footer class="composer">
-        <form id="chat-form">
-          <textarea
-            id="input"
-            rows="1"
-            placeholder="Send a message  (Enter to send, Shift+Enter for a new line)"
-            autocomplete="off"
-            autofocus
-          ></textarea>
-          <button id="send-btn" type="submit" title="Send">Send</button>
-          <button id="stop-btn" type="button" class="stop hidden" title="Stop generating">
-            Stop
-          </button>
-        </form>
-        <div class="meta">
-          <span id="usage"></span>
-          <span id="hint"></span>
+    <section class="panel">
+      <div class="panel-title">Thinking</div>
+      <small class="muted">The <b>Think</b> button under the message box lets reasoning models
+        (e.g. Qwen3.6) reason before answering: slower, meant for hard maths, code and logic.</small>
+      <label class="slider" id="budget-row">
+        <span>thinking budget <b id="val-budget">unlimited</b></span>
+        <input type="range" id="thinking-budget" min="0" max="8" step="1" value="8" />
+        <small>Cap on thinking tokens; at the cap the model is told to answer. Lower = faster.</small>
+      </label>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">Decoding</div>
+      <label class="check">
+        <input type="checkbox" id="auto-sampling" checked />
+        <span>Use the model's tuned settings</span>
+      </label>
+      <small class="muted">Recommended. Shows the profile's values, which differ when thinking.
+        Uncheck to set your own.</small>
+      <label class="slider">
+        <span>temperature <b id="val-temp">0.70</b></span>
+        <input type="range" id="temperature" min="0" max="1.5" step="0.05" value="0.7" />
+        <small>0 = deterministic. Raise for creative work, lower for factual.</small>
+      </label>
+      <label class="slider">
+        <span>max tokens <b id="val-max">1,024</b></span>
+        <input type="range" id="max-tokens" min="0" max="7" step="1" value="2" />
+        <small>Hard cap on reply length, thinking included.</small>
+      </label>
+      <label class="slider">
+        <span>top-p <b id="val-topp">0.95</b></span>
+        <input type="range" id="top-p" min="0.1" max="1" step="0.01" value="0.95" />
+        <small>Nucleus sampling: consider the smallest set of tokens totalling this probability.</small>
+      </label>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">System prompt</div>
+      <textarea id="system-prompt" rows="4" placeholder="Optional. Added on top of the server's prompt."></textarea>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">Model</div>
+      <input type="text" id="swap-model" placeholder="Qwen/Qwen2.5-7B-Instruct" />
+      <select id="swap-backend"></select>
+      <button id="swap-btn" class="secondary">Load model</button>
+      <small class="muted">Swaps in place. Frees VRAM before loading.</small>
+    </section>
+
+    <footer class="side-footer">
+      <button id="clear-btn" class="ghost">Clear conversation</button>
+      <a href="/docs" target="_blank" rel="noopener">API docs ↗</a>
+    </footer>
+  </aside>
+
+  <!-- ─────────────── Main: conversation ─────────────── -->
+  <main id="main">
+    <div id="messages">
+      <div class="empty-state">
+        <h2>Ask anything</h2>
+        <p>Running entirely on your machine. Nothing leaves this computer.</p>
+        <div class="suggestions">
+          <button class="chip">Explain what a KV cache is and why it matters</button>
+          <button class="chip">Write a Python function to parse an ISO 8601 duration</button>
+          <button class="chip">What's the difference between LoRA and full fine-tuning?</button>
         </div>
-      </footer>
+      </div>
     </div>
 
-    <script src="app.js"></script>
-  </body>
+    <div id="composer">
+      <div class="composer-inner">
+        <textarea id="input" rows="1" placeholder="Message Kumaru…  (Enter to send, Shift+Enter for newline)"></textarea>
+        <div class="composer-bar">
+          <button id="think-btn" class="pill" type="button" aria-pressed="false"
+                  title="Let the model reason before it answers (reasoning models only)">
+            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.6 10.8c.6.5 1 1.2 1.1 2V16h5v-.2c.1-.8.5-1.5 1.1-2A6 6 0 0 0 12 3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Think
+          </button>
+          <span class="spacer"></span>
+          <button id="send-btn" title="Send">
+            <svg viewBox="0 0 24 24" width="18" height="18"><path d="M3 20l18-8L3 4v6l12 2-12 2v6z" fill="currentColor"/></svg>
+          </button>
+          <button id="stop-btn" class="hidden" title="Stop">
+            <svg viewBox="0 0 24 24" width="16" height="16"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/></svg>
+          </button>
+        </div>
+      </div>
+      <p class="hint" id="hint">Local model · your data stays on device</p>
+    </div>
+  </main>
+
+</div>
+<script src="/static/app.js"></script>
+</body>
 </html>
