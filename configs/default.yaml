@@ -127,6 +127,9 @@ agent:
 
   enabled_tools: []           # chat-only so far; see src/kumaru/agent/tools.py
   max_tool_iterations: 4
+  expertise: []               # coding | playwright | windows | apis; see coder.yaml
+  knowledge_files: []         # absolute paths to JSON packs created by kumaru learn
+  max_knowledge_chars: 6000   # total reference characters added to the prompt
 
 server:
   host: 127.0.0.1             # 0.0.0.0 exposes to your LAN — set api_key first

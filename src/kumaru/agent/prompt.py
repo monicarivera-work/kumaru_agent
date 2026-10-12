@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime as _dt
 from collections.abc import Sequence
 
+from kumaru.agent.knowledge import EXPERTISE
 from kumaru.core.config import AgentConfig
 from kumaru.core.types import Message, Role
 
@@ -43,6 +44,11 @@ def build_system_prompt(
 ) -> str:
     """Compose the full system prompt from its parts."""
     sections: list[str] = [config.system_prompt.strip(), QUALITY_DIRECTIVES]
+    if config.expertise:
+        sections.append(
+            "Engineering guidance:\n"
+            + "\n".join(EXPERTISE[name] for name in dict.fromkeys(config.expertise))
+        )
 
     if include_date:
         today = _dt.datetime.now().strftime("%Y-%m-%d")
