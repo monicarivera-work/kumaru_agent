@@ -80,20 +80,24 @@ class EchoBackend(Backend):
             pieces = list(chunks_from_text(thought, size=8))
             if params.thinking_budget is not None:
                 pieces = pieces[: params.thinking_budget]
-            for piece in pieces:
+            for piece in pieces[: params.max_tokens]:
                 if self.delay_s:
                     await asyncio.sleep(self.delay_s)
                 emitted += 1
                 yield StreamChunk(reasoning=piece)
 
-        for piece in chunks_from_text(reply, size=6):
+        # Like a real model, max_tokens caps the thought and the answer together,
+        # so a long thought can leave no room for the answer.
+        answer = list(chunks_from_text(reply, size=6))
+        room = params.max_tokens - emitted
+        for piece in answer[:room]:
             if self.delay_s:
                 await asyncio.sleep(self.delay_s)
             emitted += 1
             yield StreamChunk(delta=piece)
 
         yield StreamChunk(
-            finish_reason="stop",
+            finish_reason="length" if len(answer) > room else "stop",
             usage=Usage(
                 prompt_tokens=self.count_tokens(messages), completion_tokens=emitted
             ),

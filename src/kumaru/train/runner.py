@@ -3,7 +3,8 @@
 A deliberately thin file. Its only real job is the preflight report: before a
 run that may occupy your GPU for hours, it prints what will happen and checks
 the things that commonly fail at minute 55 instead of minute 0 (missing CUDA,
-missing optional packages, a data file that does not exist).
+missing optional packages, any data file the task will read that is missing or is
+not a file).
 """
 
 from __future__ import annotations
@@ -15,6 +16,23 @@ from kumaru.core.logging import get_logger
 from kumaru.train.config import TrainConfig, load_train_config
 
 logger = get_logger(__name__)
+
+
+def _data_files(config: TrainConfig) -> list[tuple[str, str]]:
+    """Every data file the selected task will open, as (config field, path) pairs.
+
+    Mirrors the reads in `run_pretrain()` and `run_lora_finetune()` exactly, so a
+    missing file fails here instead of after the tokenizer and model load.
+    """
+    data = config.data
+    if config.task == "pretrain":
+        if data.text_file:
+            return [("data.text_file", data.text_file)]
+        return [("data.train_file, used because data.text_file is not set", data.train_file)]
+    files = [("data.train_file", data.train_file)]
+    if data.eval_file:
+        files.append(("data.eval_file", data.eval_file))
+    return files
 
 
 def preflight(config: TrainConfig) -> None:
@@ -39,10 +57,16 @@ def preflight(config: TrainConfig) -> None:
         )
     logger.info("=" * 68)
 
-    data_file = config.data.text_file if config.task == "pretrain" else config.data.train_file
-    if data_file and not Path(data_file).exists():
+    # is_file(), not exists(): a directory passes exists() but fails at open(),
+    # which would be after torch and the model have loaded.
+    missing = [
+        f"{path} ({field}) is a directory, not a file" if Path(path).is_dir() else f"{path} ({field})"
+        for field, path in _data_files(config)
+        if not Path(path).is_file()
+    ]
+    if missing:
         raise ConfigError(
-            f"Training data not found: {data_file}",
+            "Training data not found: " + "; ".join(missing),
             hint="Paths are resolved relative to the directory you run from.",
         )
 

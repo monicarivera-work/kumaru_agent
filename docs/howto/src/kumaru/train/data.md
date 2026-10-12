@@ -10,7 +10,7 @@
 
 This file owns Kumaru's training data path. For supervised fine-tuning, it validates JSONL conversations, converts Alpaca-style rows, applies the model's own chat template, masks non-assistant tokens with `-100`, and builds padded batches.
 
-For pretraining, it tokenizes raw text into a `uint32` memory-mapped token stream and exposes fixed-length next-token prediction windows. That avoids padding and lets the same code handle tiny and large corpora.
+For pretraining, it streams raw text through the tokenizer one chunk at a time into a flat `uint32` token file, then reads that file as a memory map and exposes fixed-length next-token prediction windows. That avoids padding, and neither step holds the corpus in RAM, so the same code handles tiny and large corpora.
 
 ## Why it exists
 
@@ -35,7 +35,7 @@ Two quiet data bugs can ruin an LLM fine-tune while the loss still looks healthy
 | `build_sft_dataset` | `build_sft_dataset(rows: list[dict[str, Any]], tokenizer: Any, *, max_seq_length: int, completions_only: bool = True) -> list[dict[str, list[int]]]` | Encodes all conversations and reports dropped/supervised token counts. |
 | `SFTCollator` | `SFTCollator(pad_token_id: int, pad_to_multiple_of: int = 8)` | Dynamic-padding collator for Hugging Face `Trainer`. |
 | `SFTCollator.__call__` | `__call__(features: list[dict[str, list[int]]]) -> dict[str, Any]` | Builds `input_ids`, `labels`, and `attention_mask` tensors. |
-| `pack_corpus_to_memmap` | `pack_corpus_to_memmap(text_file: str | Path, out_path: str | Path, tokenizer: Any, *, chunk_chars: int = 1_000_000) -> Path` | Tokenizes raw text to a flat `uint32` memmap. |
+| `pack_corpus_to_memmap` | `pack_corpus_to_memmap(text_file: str | Path, out_path: str | Path, tokenizer: Any, *, chunk_chars: int = 1_000_000) -> Path` | Tokenizes raw text `chunk_chars` characters at a time, appending each chunk's `uint32` ids to `<out_path>.tmp`, then renames the finished file over `out_path`. Raises `ConfigError` if the corpus is missing or yields zero tokens. |
 | `PackedTokenDataset` | `PackedTokenDataset(memmap_path: str | Path, seq_length: int)` | Dataset of fixed-length packed token windows. |
 | `PackedTokenDataset.__len__` | `__len__() -> int` | Returns number of training windows. |
 | `PackedTokenDataset.__getitem__` | `__getitem__(idx: int) -> dict[str, Any]` | Returns one window with shifted `input_ids` and `labels`. |
@@ -87,8 +87,8 @@ from kumaru.train.data import pack_corpus_to_memmap, PackedTokenDataset
 
 tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
 path = pack_corpus_to_memmap("data/samples/corpus.txt", "runs/nano/tokens.bin", tok)
-dataset = PackedTokenDataset(path, seq_length=512)
-for batch in dataset.iter_batches(batch_size=16, seed=42):
+dataset = PackedTokenDataset(path, seq_length=256)
+for batch in dataset.iter_batches(batch_size=4, seed=42):
     print(batch["input_ids"].shape, batch["labels"].shape)
     break
 ```
@@ -108,15 +108,17 @@ Overlong SFT examples are dropped, not truncated. If more than 10% are dropped, 
 
 For pretraining, packing is a throughput feature. Concatenating documents and slicing fixed windows removes padding, so every token in every batch contributes loss. The code uses `uint32` because Qwen tokenizers have vocabularies larger than 65,536; `uint16` would corrupt token ids.
 
+Packing is also memory-bounded. `pack_corpus_to_memmap()` tokenizes one `chunk_chars` slice (1,000,000 characters by default) and appends its ids to `<out_path>.tmp` with `ndarray.tofile()` before reading the next, so peak RAM is set by one chunk, about 0.2 GB with the Qwen tokenizer, not by the corpus. The output takes 4 bytes of disk per token. The file is flushed, synced, and renamed over `out_path` only when complete, so a crash or a zero-token corpus never leaves a truncated `tokens.bin` that `run_pretrain()` would later reuse. A process killed outright can leave the `.tmp` file behind; the next pack overwrites it. The format is a headerless native-endian `uint32` array, which is what `PackedTokenDataset` maps with `np.memmap(..., mode="r")`. Packing is sequential, about 1.4 MB of text per second in local testing.
+
 On a 24 GB RTX 3090:
 
 - `lora-qwen.yaml`: about 9-11 GB VRAM with 4-bit base, batch 1, accumulation 16, checkpointing; about 20-40 minutes per epoch for about 1,000 examples of about 1k tokens.
 - `lora-small.yaml`: about 2 GB VRAM, a few minutes, good for catching data and masking problems.
-- `pretrain-nano.yaml`: sample corpus overfits quickly; a properly sized run of its ~101M-parameter model wants about 2B tokens.
+- `pretrain-nano.yaml`: sample corpus overfits quickly; a properly sized run of its ~101M-parameter model wants about 2B tokens, which packs to about 8 GB of `tokens.bin`.
 
 If you hit OOM or data collapse, change these in order:
 
-1. Lower `data.max_seq_length` only after checking whether examples are genuinely too long.
+1. Lower `data.max_seq_length` (LoRA only; pretraining windows come from `model.max_seq_length`) only after checking whether examples are genuinely too long.
 2. Keep `optim.per_device_batch_size` small and raise accumulation instead.
 3. Use QLoRA (`load_in_4bit: true`) for 7B.
 4. Turn on gradient checkpointing in the training config.
@@ -149,6 +151,8 @@ To add a pretraining document separator, append or tokenize a separator between 
 | Loss drops but model predicts prompts | `train_on_completions_only` is false or labels include user text | Keep completion-only masking; inspect `example_preview.txt`. |
 | Adapter learns not to stop | Assistant end-of-turn token not supervised due to broken template behavior | Use an instruct tokenizer with a valid chat template. |
 | Pretraining raises `too few for seq_length` | Tokenized corpus has fewer than `seq_length + 1` tokens | Use a larger `text_file` or smaller `model.max_seq_length`. |
+| `Corpus not found` or `produced zero tokens` from packing | The text file is missing or empty | Fix the path or the file. Nothing is written to `out_path` in either case. |
+| `tokens.bin.tmp` beside the output | Packing was killed before it finished | Harmless; the next pack overwrites it. Delete it to reclaim disk space. |
 | Quality is mysteriously bad after packing | Token ids corrupted by an incorrect dtype in custom code | Keep `uint32` memmaps for modern tokenizers. |
 
 ## Related files

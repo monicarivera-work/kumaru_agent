@@ -35,12 +35,12 @@ async def test_echo_backend_load_info_stream_and_generate(loaded_echo_backend: E
     assert info.device == "cpu"
 
     messages = [Message.user("hello")]
-    params = GenerationParams(max_tokens=8, temperature=0.0)
+    params = GenerationParams(max_tokens=64, temperature=0.0)  # room for the whole reply
     chunks = [chunk async for chunk in loaded_echo_backend.stream(messages, params)]
     stream_text = "".join(chunk.delta for chunk in chunks)
     result = await loaded_echo_backend.generate(messages, params)
     assert result.message.content == stream_text
-    assert chunks[-1].finish_reason == "stop"
+    assert chunks[-1].finish_reason == result.finish_reason == "stop"
     assert result.usage.prompt_tokens > 0
     assert result.usage.completion_tokens == len([chunk for chunk in chunks if chunk.delta])
 
@@ -99,9 +99,9 @@ class TestStopSequenceTracker:
 @pytest.mark.asyncio
 async def test_echo_thinking_uses_only_the_reasoning_channel(loaded_echo_backend: EchoBackend) -> None:
     messages = [Message.user("hello")]
-    plain = await loaded_echo_backend.generate(messages, GenerationParams(max_tokens=8))
+    plain = await loaded_echo_backend.generate(messages, GenerationParams(max_tokens=64))
     thought = await loaded_echo_backend.generate(
-        messages, GenerationParams(max_tokens=8, thinking=True)
+        messages, GenerationParams(max_tokens=64, thinking=True)
     )
     assert plain.message.reasoning is None
     assert thought.message.reasoning == ECHO_THOUGHT
@@ -117,6 +117,64 @@ async def test_echo_thinking_budget_caps_the_thought(
     params = GenerationParams(max_tokens=8, thinking=True, thinking_budget=budget)
     result = await loaded_echo_backend.generate([Message.user("hello")], params)
     assert result.message.reasoning == expected  # echo thinks in 8-character pieces
+
+
+# -- echo: the max_tokens cap ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_echo_max_tokens_cuts_the_answer_short_and_reports_length(
+    loaded_echo_backend: EchoBackend,
+) -> None:
+    messages = [Message.user("hello")]
+    full = (await loaded_echo_backend.generate(messages, GenerationParams(max_tokens=64))).message
+    params = GenerationParams(max_tokens=3)
+    chunks = [chunk async for chunk in loaded_echo_backend.stream(messages, params)]
+    result = await loaded_echo_backend.generate(messages, params)
+    # One 6-character piece per token, then a final chunk that says why it stopped.
+    assert [chunk.delta for chunk in chunks[:-1]] == [full.content[i : i + 6] for i in (0, 6, 12)]
+    assert (chunks[-1].finish_reason, chunks[-1].usage.completion_tokens) == ("length", 3)
+    assert (result.message.content, result.finish_reason) == (full.content[:18], "length")
+    assert result.usage.completion_tokens == 3
+
+
+@pytest.mark.asyncio
+async def test_echo_reports_stop_when_the_reply_fits_the_cap_exactly(
+    loaded_echo_backend: EchoBackend,
+) -> None:
+    messages = [Message.user("hello")]
+    # The reply quotes its cap, so two-digit caps all give a reply of the same length.
+    roomy = await loaded_echo_backend.generate(messages, GenerationParams(max_tokens=99))
+    pieces = roomy.usage.completion_tokens
+    exact = await loaded_echo_backend.generate(messages, GenerationParams(max_tokens=pieces))
+    short = await loaded_echo_backend.generate(messages, GenerationParams(max_tokens=pieces - 1))
+    assert (roomy.finish_reason, exact.finish_reason) == ("stop", "stop")
+    assert exact.usage.completion_tokens == pieces
+    assert (short.finish_reason, short.usage.completion_tokens) == ("length", pieces - 1)
+    assert len(short.message.content) == 6 * (pieces - 1)  # whole 6-character pieces
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("max_tokens", "reasoning", "answer_pieces"),
+    [
+        (5, ECHO_THOUGHT[:40], 0),  # the cap runs out mid-thought: no answer at all
+        (14, ECHO_THOUGHT, 2),  # all 12 thought pieces, then 2 answer pieces
+    ],
+)
+async def test_echo_max_tokens_counts_thinking_tokens_too(
+    loaded_echo_backend: EchoBackend, max_tokens: int, reasoning: str, answer_pieces: int
+) -> None:
+    messages = [Message.user("hello")]
+    full = (await loaded_echo_backend.generate(messages, GenerationParams(max_tokens=64))).message
+    params = GenerationParams(max_tokens=max_tokens, thinking=True)
+    chunks = [chunk async for chunk in loaded_echo_backend.stream(messages, params)]
+    result = await loaded_echo_backend.generate(messages, params)
+    assert len([chunk for chunk in chunks if chunk.delta]) == answer_pieces
+    assert result.message.reasoning == reasoning
+    assert result.message.content == full.content[: 6 * answer_pieces]
+    assert (chunks[-1].finish_reason, result.finish_reason) == ("length", "length")
+    assert result.usage.completion_tokens == max_tokens
 
 
 @pytest.mark.asyncio

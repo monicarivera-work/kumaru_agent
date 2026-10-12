@@ -26,7 +26,7 @@ The 27 questions, grouped by first tag:
 | `knowledge` | 4 | Well-known facts. | `contains` ×2, `regex`, `contains_any` | `capital-au`, `tungsten`, `austen`, `photosynthesis` |
 | `honesty` | 2 | False-premise questions. The model must reject the premise instead of inventing an answer. | `contains_any` ×2 | `mars-walk`, `atlantis` |
 | `code` | 3 | What a short Python snippet prints. | `numeric` ×3 | `list-aliasing`, `sum-squares`, `off-by-one` |
-| `format` | 4 | Exact output shape: one capitalised word, three bare lines, JSON only, a sentence without the letter "e". | `regex` ×4 | `banana-caps`, `three-colors`, `json-ada`, `no-e` |
+| `format` | 4 | Exact output shape: one capitalised word and nothing else, the three primary colours one per line, a JSON object with exactly two keys, a sentence without the letter "e". | `regex` ×4 | `banana-caps`, `three-colors`, `json-ada`, `no-e` |
 | `language` | 1 | A one-word translation. | `contains` | `spanish` |
 
 Grader totals: `numeric` 13, `regex` 6, `contains` 4, `contains_any` 3, `choice` 1. No shipped row uses `exact`, `not_contains`, `system` or `max_tokens`. Only `fahrenheit` sets `tolerance`; the other 12 `numeric` rows must match exactly.
@@ -155,6 +155,7 @@ How the command line treats files:
 - **Put project questions in your own file.** The shipped rows are a shared canary.
 - **Adding shipped rows** is expected: the set is meant to grow with every bug you fix. No test pins its size; `tests\test_bench_graders.py::TestGoldenSetLoader::test_shipped_golden_set_loads_with_unique_ids_and_known_graders` checks that it loads with unique ids and known graders. Check with `.\.venv\Scripts\python.exe -m pytest tests\test_bench_graders.py -q -p no:cacheprovider`.
 - **Editing a question** changes its record key, so resuming an older run asks it again. `compare` pairs on ids only and doesn't notice the change, so give a changed question a new id.
+- **Editing only how a row is graded** (`grader`, `answer` or `tolerance`) leaves the record key alone. A resumed run neither asks those questions again nor re-grades them: it keeps the verdicts it saved, and `bench report` and `compare` read those saved verdicts too. To score old replies with the new grader, start a new run folder. When `banana-caps`, `three-colors` and `json-ada` were tightened, re-grading the 135 golden replies saved by the five runs reported in [`docs\BENCHMARKS.md`](../../../BENCHMARKS.md) changed no verdict.
 
 ## How to extend it
 
@@ -167,7 +168,7 @@ How the command line treats files:
 | a word or name | `contains` | `"Canberra"`; a list means all must appear | — | `capital-au` |
 | any of several phrasings | `contains_any` | `["carbon dioxide", "CO2", "CO₂"]` | — | `photosynthesis` |
 | a rejected false premise | `contains_any` | many phrasings, with both apostrophe styles | — | `mars-walk`, `atlantis` |
-| an exact output shape | `regex` | `"^BANANA\\.?$"`; a list passes if any one pattern matches | The shape, explicitly | `banana-caps`, `json-ada` |
+| an exact output shape | `regex` | `"^BANANA$"`; a list passes if any one pattern matches | The shape, explicitly | `banana-caps`, `json-ada` |
 | something that must not appear | `not_contains` | `["as an AI"]` | — | none shipped |
 | a short reply and nothing else | `exact` | `"Paris"`, or a list | "Reply with only …" | none shipped |
 
@@ -182,7 +183,8 @@ Rules that decide whether a row measures what you think:
 3. **Regex is strict.**
    - It is case-sensitive and searches the trimmed reply with no flags, so `^` and `$` anchor the whole reply. Use `(?i)`, `(?s)` and `(?m)` inline.
    - A list of patterns passes if any one matches, each with its own inline flags. For "all of these", use `contains` with a list, or one pattern with lookaheads.
-   - Allow harmless decoration, as the shipped rows do: Markdown bold before "yes" (`syllogism`: `(?i)^[\W_]*yes\b`), a trailing period (`banana-caps`), a code fence around JSON (`json-ada`).
+   - Allow harmless decoration, as the shipped rows do: Markdown bold before "yes" (`syllogism`: `(?i)^[\W_]*yes\b`), list markers or bold around each colour (`three-colors`), a code fence around JSON (`json-ada`).
+   - Rule out everything the prompt rules out. "Nothing else" means no trailing period (`banana-caps`: `^BANANA$`). "The three primary colours" means all three, not any three lines naming one of them (`three-colors` adds a lookahead per colour). "Exactly two keys" means no third key (`json-ada` spells out both key orders). Test the forbidden replies as well as the right ones, as `tests\test_bench_graders.py::TestShippedFormatQuestions` does.
 4. **Double every backslash.** The pattern lives inside a JSON string, so `"\\bW\\b"` is the regex `\bW\b`.
    - A single `\b` is valid JSON for a backspace character: the row loads and then never matches.
    - A single `\d` fails to load with `Invalid \escape`.
@@ -211,6 +213,7 @@ Every loader error, such as a missing `prompt` or `answer`, an unknown grader, a
 | `<file>:<line>: 'tolerance' must be a number >= 0, e.g. 0.001 (got None)` | `"tolerance": null`. | Omit the key for exact matching, or give a number. |
 | A `numeric` row fails though the model's value looks right | Matching is exact: `37.78` is not `37.8`. | Say how to round in the prompt, or set `tolerance` if the answer is approximate by nature. |
 | A `regex` row with a list passes a reply that misses some patterns | Any one pattern matching is enough. | For "all of these", `contains` with a list, or one pattern with lookaheads: `"(?is)^(?=.*\\bred\\b)(?=.*\\bblue\\b)"`. |
+| A format row passes a reply that breaks its prompt: a trailing period, a repeated item, an extra JSON key | The pattern checks the rough shape only, e.g. an optional `\.?`, any three matching lines, or `[^{}]*` between the required keys. | Pin what the prompt rules out (rule 3) and add the forbidden replies to `TestShippedFormatQuestions`. |
 | `compare` pairs the wrong questions | Rows without `id` use line numbers, which shift when a line is inserted; or a question was edited under the same id. | Set every `id`; use a new id for a changed question. |
 | `compare`: `The two runs share no benchmark.` | The file was renamed between runs, so the benchmark name changed. | Keep the file name stable. |
 | Only 100 of your rows ran | `-n/--limit` defaults to 100. | `--full`. |

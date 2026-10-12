@@ -1,20 +1,25 @@
 """Protect pure training-data preparation without downloading tokenizers or models."""
 
 import json
+import tracemalloc
 from pathlib import Path
 
 import pytest
 
-# kumaru.train.data imports numpy at the top; a base install (no training extras) skips this file.
+# kumaru.train.data imports numpy at the top; the dev extra installs it, so only an install without dev skips this file.
 pytest.importorskip("numpy")
+
+import numpy as np
 
 from kumaru.core.config import REPO_ROOT
 from kumaru.core.errors import ConfigError
 from kumaru.train.data import (
     IGNORE_INDEX,
+    PackedTokenDataset,
     SFTCollator,
     encode_conversation,
     load_chat_jsonl,
+    pack_corpus_to_memmap,
     split_rows,
 )
 
@@ -138,3 +143,134 @@ def test_sft_collator_pads_shapes_labels_and_multiple() -> None:
     assert batch["labels"][0, -1].item() == IGNORE_INDEX
     assert batch["labels"][0, -1].item() != 9
     assert batch["attention_mask"][0].tolist() == [1, 1, 1, 0, 0, 0, 0, 0]
+
+
+# Pretraining: token packing. The fake tokenizer maps each character to its code point,
+# so the astral characters here produce ids above 65,535 and prove the stream is uint32.
+PACK_TEXT = "Kumaru packs text: \u00d1and\u00fa, caf\u00e9, \u6771\u4eac, \U0001f600, \U0001d11e.\n" * 40
+
+
+def reference_pack(text_file: Path, out_path: Path, tokenizer: FakeTokenizer, chunk_chars: int) -> None:
+    """The previous packer, which held every chunk in RAM and wrote one memmap at the end."""
+    chunks = []
+    with text_file.open("r", encoding="utf-8", errors="replace") as fh:
+        while chunk := fh.read(chunk_chars):
+            ids = tokenizer(chunk, add_special_tokens=False)["input_ids"]
+            chunks.append(np.asarray(ids, dtype=np.uint32))
+    flat = np.concatenate(chunks)
+    memmap = np.memmap(out_path, dtype=np.uint32, mode="w+", shape=(flat.size,))
+    memmap[:] = flat
+    memmap.flush()
+    del memmap
+
+
+class WatchingTokenizer(FakeTokenizer):
+    """Snapshots the output folder each time the packer asks for the next chunk."""
+
+    def __init__(self, out_dir: Path) -> None:
+        self.out_dir = out_dir
+        self.ids: list[int] = []
+        self.snapshots: list[tuple[bytes, bytes, bool]] = []
+
+    def __call__(self, text: str, add_special_tokens: bool = False) -> dict:
+        on_disk = b"".join(p.read_bytes() for p in sorted(self.out_dir.iterdir()))
+        expected = np.asarray(self.ids, dtype=np.uint32).tobytes()
+        self.snapshots.append((on_disk, expected, (self.out_dir / "tokens.bin").exists()))
+        result = super().__call__(text, add_special_tokens)
+        self.ids.extend(result["input_ids"])
+        return result
+
+
+class CrashingTokenizer(FakeTokenizer):
+    def __init__(self, crash_on_call: int) -> None:
+        self.calls = 0
+        self.crash_on_call = crash_on_call
+
+    def __call__(self, text: str, add_special_tokens: bool = False) -> dict:
+        self.calls += 1
+        if self.calls == self.crash_on_call:
+            raise RuntimeError("tokenizer crashed")
+        return super().__call__(text, add_special_tokens)
+
+
+def test_pack_corpus_matches_previous_format_and_replaces_old_output(
+    scratch_dir: Path, fake_tokenizer: FakeTokenizer
+) -> None:
+    corpus = scratch_dir / "corpus.txt"
+    corpus.write_bytes(PACK_TEXT.encode("utf-8"))
+    reference = scratch_dir / "reference.bin"
+    reference_pack(corpus, reference, fake_tokenizer, chunk_chars=7)
+    out_dir = scratch_dir / "run"
+    out_dir.mkdir()
+    (out_dir / "tokens.bin").write_bytes(b"\xff" * 8 * len(PACK_TEXT))  # longer than the result
+
+    dst = pack_corpus_to_memmap(corpus, out_dir / "tokens.bin", fake_tokenizer, chunk_chars=7)
+
+    assert dst == out_dir / "tokens.bin"
+    assert dst.read_bytes() == reference.read_bytes()
+    assert [p.name for p in out_dir.iterdir()] == ["tokens.bin"]
+    expected = np.asarray([ord(char) for char in PACK_TEXT], dtype=np.uint32)
+    assert expected.max() > 65_535
+    dataset = PackedTokenDataset(dst, seq_length=16)
+    assert len(dataset) == (expected.size - 1) // 16
+    assert np.array_equal(dataset.tokens, expected)
+    del dataset  # release the memmap so Windows can delete the scratch folder
+
+
+def test_pack_corpus_streams_each_chunk_to_disk_before_reading_the_next(scratch_dir: Path) -> None:
+    corpus = scratch_dir / "corpus.txt"
+    corpus.write_bytes(b"x" * 50_000)
+    out_dir = scratch_dir / "run"
+    out_dir.mkdir()
+    tokenizer = WatchingTokenizer(out_dir)
+
+    dst = pack_corpus_to_memmap(corpus, out_dir / "tokens.bin", tokenizer, chunk_chars=4_096)
+
+    assert len(tokenizer.snapshots) == 13  # ceil(50,000 / 4,096)
+    for on_disk, expected, published in tokenizer.snapshots:
+        assert on_disk == expected  # every earlier chunk is already on disk, in order
+        assert not published  # tokens.bin appears only once packing is complete
+    assert dst.stat().st_size == 4 * 50_000
+
+
+def test_pack_corpus_failure_keeps_previous_output_and_no_temp_file(scratch_dir: Path) -> None:
+    corpus = scratch_dir / "corpus.txt"
+    corpus.write_bytes(b"y" * 10_000)
+    out_dir = scratch_dir / "run"
+    out_dir.mkdir()
+    dst = out_dir / "tokens.bin"
+    dst.write_bytes(b"previous")
+
+    with pytest.raises(RuntimeError, match="tokenizer crashed"):
+        pack_corpus_to_memmap(corpus, dst, CrashingTokenizer(crash_on_call=3), chunk_chars=1_000)
+
+    assert [p.name for p in out_dir.iterdir()] == ["tokens.bin"]
+    assert dst.read_bytes() == b"previous"
+
+
+def test_pack_corpus_with_zero_tokens_raises_and_writes_nothing(
+    scratch_dir: Path, fake_tokenizer: FakeTokenizer
+) -> None:
+    corpus = scratch_dir / "empty.txt"
+    corpus.write_bytes(b"")
+    out_dir = scratch_dir / "run"
+
+    with pytest.raises(ConfigError, match="produced zero tokens"):
+        pack_corpus_to_memmap(corpus, out_dir / "tokens.bin", fake_tokenizer)
+
+    assert list(out_dir.iterdir()) == []
+
+
+def test_pack_corpus_memory_stays_bounded_by_one_chunk(scratch_dir: Path, fake_tokenizer: FakeTokenizer) -> None:
+    corpus = scratch_dir / "corpus.txt"
+    corpus.write_bytes(b"z" * 2_000_000)  # 2M tokens: 8 MB of uint32 ids
+
+    tracemalloc.start()
+    try:
+        pack_corpus_to_memmap(corpus, scratch_dir / "run" / "tokens.bin", fake_tokenizer, chunk_chars=20_000)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # Holding the stream in RAM would peak at 16 MB (the ids plus a concatenated copy).
+    assert peak < 2_000_000

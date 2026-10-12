@@ -37,7 +37,8 @@ class DataConfig(_Base):
     eval_split: float = Field(default=0.05, ge=0.0, lt=0.5)
 
     # Sequences longer than this are dropped (not truncated). Truncating an SFT
-    # example mid-answer teaches the model to stop mid-sentence.
+    # example mid-answer teaches the model to stop mid-sentence. LoRA only:
+    # pretraining packs windows of `model.max_seq_length` and never reads this.
     max_seq_length: int = 2048
 
     # Compute loss only on assistant turns. Almost always correct for SFT: you
@@ -130,7 +131,7 @@ class NanoModelConfig(_Base):
     n_kv_heads: int = 4  # < n_heads enables grouped-query attention
     d_model: int = 512
     d_ff: int = 1408  # ~2.75 x d_model, the usual SwiGLU ratio
-    max_seq_length: int = 512
+    max_seq_length: int = 512  # packed window and max context; the length pretraining uses
     dropout: float = 0.0
     rope_theta: float = 10000.0
     tie_embeddings: bool = True  # share input/output embeddings; saves parameters

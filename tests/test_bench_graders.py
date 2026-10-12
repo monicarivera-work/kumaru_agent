@@ -193,6 +193,41 @@ class TestGoldenSetLoader:
         assert all(i.meta["grader"] in GRADERS for i in items)
 
 
+class TestShippedFormatQuestions:
+    """A format question must fail a reply that breaks a rule its prompt states."""
+
+    @pytest.mark.parametrize(
+        ("question", "reply", "correct"),
+        [
+            ("banana-caps", "BANANA", True),
+            ("banana-caps", " BANANA\n", True),
+            ("banana-caps", "BANANA.", False),  # "and nothing else"
+            ("banana-caps", "Banana", False),
+            ("three-colors", "Red\nGreen\nBlue", True),
+            ("three-colors", "- blue\n- RED\n- green", True),  # any order, case or bullet
+            ("three-colors", "red\nred\nred", False),  # "the three primary colours"
+            ("three-colors", "Red\nGreen\nGreen", False),
+            ("three-colors", "Red, Green, Blue", False),  # "one per line"
+            ("three-colors", "Red\nGreen\nBlue\nYellow", False),
+            ("three-colors", "Red light\nGreen\nBlue", False),  # "with no other text"
+            ("json-ada", '{"name": "Ada", "age": 36}', True),
+            ("json-ada", '{\n  "age": 36,\n  "name": "Ada"\n}', True),  # either key order
+            ("json-ada", '```json\n{"name": "Ada", "age": 36}\n```', True),
+            ("json-ada", '{"name":"Ada","age":36,"admin":true}', False),  # "exactly two keys"
+            ("json-ada", '{"admin": true, "name": "Ada", "age": 36}', False),
+            ("json-ada", '{"name": "Ada", "age": 360}', False),
+            ("json-ada", '{"name": "Ada"}', False),
+            ("json-ada", 'Here it is: {"name": "Ada", "age": 36}', False),  # "only the JSON"
+        ],
+    )
+    def test_grader_accepts_exactly_what_the_prompt_asks_for(
+        self, question: str, reply: str, correct: bool
+    ) -> None:
+        bench = GoldenSet()
+        item = next(i for i in bench.load() if i.id == f"golden/{question}")
+        assert bench.grade(item, reply).correct == correct
+
+
 class TestGsm8kAndMmluPro:
     def test_gsm8k_gold_answer_is_the_number_after_the_marker(self) -> None:
         assert gold_answer("She has 3 + 4 = 7 pens.\n#### 1,234") == "1234"

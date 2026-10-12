@@ -7,7 +7,7 @@
 ---
 
 ## What it does
-This file composes the full system prompt from configured persona text, quality directives, the current date, enabled tool descriptions, and optional retrieved context. It also ensures every message list has exactly one system message at index 0. Client-supplied system text augments, rather than replaces, server-side instructions.
+This file composes the full system prompt from configured persona text, quality directives, the current date, enabled tool descriptions, and optional retrieved context. It also ensures every message list has exactly one system message at index 0. Client-supplied system text augments, rather than replaces, server-side instructions: every nonblank client system message is appended after Kumaru's prompt, in the order sent.
 
 ## Why it exists
 The system prompt is the fastest way to change answer behavior without fine-tuning. Keeping assembly in one module makes prompt order deliberate and testable. Without normalization, clients could send no system prompt, several system prompts, or a replacement prompt that accidentally drops Kumaru's guardrails.
@@ -15,7 +15,7 @@ The system prompt is the fastest way to change answer behavior without fine-tuni
 ## Mental model
 - Stable identity goes first; volatile context goes last near the user's question.
 - Server guardrails always apply, even when a client sends `role="system"`.
-- `ensure_system_message()` removes all original system messages from the body.
+- `ensure_system_message()` removes all original system messages from the body and merges them into the one at index 0: Kumaru's prompt first, then each nonblank client system message, stripped, in the order sent, separated by blank lines. Blank ones add nothing, and none is ever dropped.
 
 ## Public API
 
@@ -71,11 +71,12 @@ from kumaru.core.types import Message, Role
 messages = [
     Message(role=Role.SYSTEM, content="Use terse answers."),
     Message.user("What is Kumaru?"),
+    Message(role=Role.SYSTEM, content="Answer in English."),
 ]
 normalized = ensure_system_message(messages, "You are Kumaru.")
 
-assert normalized[0].role == Role.SYSTEM
-assert normalized[0].content == "You are Kumaru.\n\nUse terse answers."
+assert [m.role for m in normalized] == [Role.SYSTEM, Role.USER]
+assert normalized[0].content == "You are Kumaru.\n\nUse terse answers.\n\nAnswer in English."
 assert normalized[1].content == "What is Kumaru?"
 ```
 
@@ -108,7 +109,7 @@ If the new section is optional and request-specific, prefer the existing `extra_
 | Prompt contains a stale date in tests | `include_date=True` uses wall-clock time. | Pass `include_date=False` in deterministic tests. |
 | Tool use is never mentioned | `ToolBelt.descriptions()` is empty because `agent.enabled_tools` is empty. | Register the tool and add its name to config. |
 | Retrieved context seems ignored | Context was placed in an earlier user message instead of `extra_context`. | Pass `extra_context` to `ChatAgent.prepare`, `complete`, or `stream`. |
-| Multiple system messages disappear | Normalization intentionally keeps only the first client system message. | Combine required client instructions into one system message before sending. |
+| A client system message seems ignored | It was blank or whitespace-only, which adds nothing; otherwise it is in the merged message, after Kumaru's prompt. | Send nonblank text. To see the merged prompt, call `ChatAgent.prepare()` on the same messages. |
 
 ## Related files
 
@@ -117,4 +118,6 @@ If the new section is optional and request-specific, prefer the existing `extra_
 - `src\kumaru\core\config.py` — defines `AgentConfig.system_prompt`.
 - `src\kumaru\core\types.py` — defines `Message` and `Role.SYSTEM`.
 - `ui\app.js` — lets the browser prepend one client system message from the UI.
+- `tests\test_agent.py` — pins the merge: order, stripping, blank and missing client system messages.
+- `tests\test_server.py` — `test_every_client_system_message_reaches_the_model` checks the HTTP path end to end.
 
