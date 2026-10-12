@@ -1,6 +1,6 @@
 # `tests/`
 
-> The offline regression suite. 429 tests, no GPU, no downloads, under a minute.
+> The offline regression suite. 432 tests, no GPU, no downloads, under a minute.
 
 **Read this when:** you have changed something and want to know whether you broke it, or you are adding a feature and need to know where its test belongs.
 
@@ -50,7 +50,7 @@ The parts that genuinely need a GPU are covered by `scripts\verify.ps1 -Full`, w
 | `test_bench_runner.py` | The files a run leaves behind, exact resume, refusing to mix settings, surviving bad requests and graders, and the paired comparison of two runs |
 | `test_bench_stats.py` | Wilson intervals, McNemar's test, the paired bootstrap or Holm's correction drifting from hand-checked values |
 | `test_train_data.py` | **Loss masking regressing** — the highest-consequence silent bug in the project; collator padding labels with a real token id; corpus packing changing the `tokens.bin` format, holding the whole corpus in RAM, or leaving a partial file behind |
-| `test_train_runner.py` | Training preflight missing a data file the task will read (LoRA `train_file` and `eval_file`; pretraining `text_file` or its `train_file` fallback), so a bad path fails at minute 0 instead of after the tokenizer and model load |
+| `test_train_runner.py` | Training preflight missing a data file the task will read (LoRA `train_file` and `eval_file`; pretraining `text_file` or its `train_file` fallback), or accepting a directory as one, so a bad path fails at minute 0 instead of after the tokenizer and model load |
 
 ## Fixtures
 

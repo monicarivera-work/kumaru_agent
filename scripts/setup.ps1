@@ -21,6 +21,13 @@ Set-Location $repo
 
 function Step($msg) { Write-Host "`n>> $msg" -ForegroundColor Cyan }
 
+# A failing native command (pip, python) sets $LASTEXITCODE instead of throwing,
+# even under ErrorActionPreference=Stop. Check it after every step that must
+# succeed, so a failed install never ends in "Setup complete."
+function Assert-Success($what) {
+    if ($LASTEXITCODE -ne 0) { throw "$what failed (exit code $LASTEXITCODE); see the output above." }
+}
+
 # --- virtualenv ------------------------------------------------------------
 if (-not (Test-Path ".venv")) {
     Step "Creating virtual environment"
@@ -36,6 +43,7 @@ $py = Join-Path $repo ".venv\Scripts\python.exe"
 # The dev extra (pytest, ruff, mypy, numpy) is small, and verify.ps1 runs the tests.
 Step "Installing Kumaru (base: server, UI, CLI, plus the test tools)"
 & $py -m pip install -e ".[dev]" --quiet
+Assert-Success "Installing Kumaru"
 
 # --- torch -----------------------------------------------------------------
 # PyTorch is installed separately because the correct wheel depends on your
@@ -69,10 +77,11 @@ if ($Gpu) {
         Step "Installing PyTorch with CUDA ($CudaVersion)"
         & $py -m pip install "torch>=2.3" --index-url $torchIndex
     }
-    if ($LASTEXITCODE -ne 0) { throw "Installing PyTorch from $torchIndex failed; see pip's output above." }
+    Assert-Success "Installing PyTorch from $torchIndex"
 
     Step "Installing training stack (transformers, peft, accelerate, datasets)"
     & $py -m pip install -e ".[train]" --quiet
+    Assert-Success "Installing the training stack"
 
     Step "Checking that PyTorch can use the GPU"
     $cuda, $gpuFound = "$(& $py -c $torchProbe)" -split " "
@@ -93,16 +102,19 @@ if ($Gpu) {
 if ($Quant) {
     Step "Installing bitsandbytes (4-bit / QLoRA)"
     & $py -m pip install -e ".[quant]" --quiet
+    Assert-Success "Installing bitsandbytes"
 }
 
 if ($Gguf) {
     Step "Installing llama-cpp-python (GGUF backend)"
     & $py -m pip install -e ".[gguf]" --quiet
+    Assert-Success "Installing llama-cpp-python"
 }
 
 # --- verify ----------------------------------------------------------------
 Step "Verifying installation"
 & $py -m kumaru.cli info
+Assert-Success "Verifying the installation (kumaru info)"
 
 Write-Host "`nSetup complete." -ForegroundColor Green
 Write-Host "Next:" -ForegroundColor Green

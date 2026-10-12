@@ -3,7 +3,8 @@
 A deliberately thin file. Its only real job is the preflight report: before a
 run that may occupy your GPU for hours, it prints what will happen and checks
 the things that commonly fail at minute 55 instead of minute 0 (missing CUDA,
-missing optional packages, any data file the task will read that does not exist).
+missing optional packages, any data file the task will read that is missing or is
+not a file).
 """
 
 from __future__ import annotations
@@ -56,10 +57,16 @@ def preflight(config: TrainConfig) -> None:
         )
     logger.info("=" * 68)
 
-    missing = [(field, path) for field, path in _data_files(config) if not Path(path).exists()]
+    # is_file(), not exists(): a directory passes exists() but fails at open(),
+    # which would be after torch and the model have loaded.
+    missing = [
+        f"{path} ({field}) is a directory, not a file" if Path(path).is_dir() else f"{path} ({field})"
+        for field, path in _data_files(config)
+        if not Path(path).is_file()
+    ]
     if missing:
         raise ConfigError(
-            "Training data not found: " + "; ".join(f"{path} ({field})" for field, path in missing),
+            "Training data not found: " + "; ".join(missing),
             hint="Paths are resolved relative to the directory you run from.",
         )
 

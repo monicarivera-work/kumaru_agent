@@ -5,6 +5,7 @@ stub (or blocked outright), and every path points at the repo's own sample files
 """
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -79,6 +80,25 @@ def test_pretrain_missing_text_file_fails_before_torch(torch_blocked: None) -> N
     with pytest.raises(ConfigError, match="Training data not found") as excinfo:
         preflight(pretrain(MISSING, train_file=CORPUS))
     assert f"{MISSING} (data.text_file)" in excinfo.value.message
+
+
+@pytest.mark.parametrize(
+    ("build", "field"),
+    [
+        (lambda d: lora(d), "data.train_file"),
+        (lambda d: lora(CHAT, eval_file=d), "data.eval_file"),
+        (lambda d: pretrain(d, train_file=CORPUS), "data.text_file"),
+    ],
+    ids=["lora-train", "lora-eval", "pretrain-text"],
+)
+def test_a_directory_is_not_a_data_file(
+    torch_blocked: None, build: Callable[[str], TrainConfig], field: str
+) -> None:
+    # A directory passes Path.exists() but fails at open(), long after torch loads.
+    directory = str(SAMPLES)
+    with pytest.raises(ConfigError, match="Training data not found") as excinfo:
+        preflight(build(directory))
+    assert f"{directory} ({field}) is a directory, not a file" in excinfo.value.message
 
 
 def test_pretrain_with_text_file_ignores_a_missing_train_file(cpu_only_torch: None) -> None:

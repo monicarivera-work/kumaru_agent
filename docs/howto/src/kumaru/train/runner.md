@@ -8,7 +8,7 @@
 
 ## What it does
 
-`runner.py` loads a YAML file into `TrainConfig`, logs the planned task, model, output directory, epochs, effective batch, learning rate, LoRA settings, and GPU info, then checks common early failures. It verifies that every data file the task will read exists: for LoRA, `data.train_file` plus `data.eval_file` when it is set; for pretraining, `data.text_file`, or `data.train_file` when `text_file` is unset (the same fallback `run_pretrain()` uses). All missing files are reported in one error, before PyTorch is imported. It then imports PyTorch, warns if CUDA is unavailable, checks bf16 support, and validates bitsandbytes when 4-bit loading is requested.
+`runner.py` loads a YAML file into `TrainConfig`, logs the planned task, model, output directory, epochs, effective batch, learning rate, LoRA settings, and GPU info, then checks common early failures. It verifies that every data file the task will read is an existing file: for LoRA, `data.train_file` plus `data.eval_file` when it is set; for pretraining, `data.text_file`, or `data.train_file` when `text_file` is unset (the same fallback `run_pretrain()` uses). A directory counts as missing, because it passes `Path.exists()` but fails at `open()`. All missing files are reported in one error, before PyTorch is imported. It then imports PyTorch, warns if CUDA is unavailable, checks bf16 support, and validates bitsandbytes when 4-bit loading is requested.
 
 After preflight, it dispatches `task: lora` to `run_lora_finetune()` or `task: pretrain` to `run_pretrain()`.
 
@@ -101,7 +101,7 @@ If the new task reads data files, add a branch for it to `_data_files()` so pref
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `Training data not found: <path> (<field>); ...` | A file the task reads is missing: LoRA `data.train_file` or `data.eval_file`; pretraining `data.text_file`, or `data.train_file` when `text_file` is unset. Paths resolve from the current directory. | Run from the repo root or fix the YAML paths. The message lists every missing file with the field it came from. |
+| `Training data not found: <path> (<field>); ...` | A file the task reads is missing: LoRA `data.train_file` or `data.eval_file`; pretraining `data.text_file`, or `data.train_file` when `text_file` is unset. Paths resolve from the current directory. An entry ending in `is a directory, not a file` names a folder where a file was expected. | Run from the repo root or fix the YAML paths. The message lists every missing file with the field it came from. |
 | `PyTorch is not installed` | Training extra missing | `.\scripts\setup.ps1 -Gpu`; elsewhere `pip install -e ".[train]"` in the Kumaru folder. The hint (`install_command('train')`) says the same. |
 | Warning: no CUDA device visible | CPU-only PyTorch or driver/CUDA issue | Run `kumaru info`; install CUDA-enabled PyTorch. |
 | Warning: bf16 requested but unsupported | GPU or PyTorch build lacks bf16 | Set `optim.bf16: false`; for LoRA consider `optim.fp16: true`. |
