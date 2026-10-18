@@ -24,8 +24,8 @@ counts equals `read`.
 * error, wrong, unfinished, format, empty, too_long: read straight from the
   benchmark records. Only complete, correct answers that end with the
   "Answer: N" line the prompt asked for survive.
-* contaminated: the question or the answer shares a 13-word run with an
-  evaluation question (`NearCopyIndex`).
+* contaminated: the question or the answer copies an evaluation question, or
+  shares a 13-word run with one outside their instruction text (`NearCopyIndex`).
 * arithmetic: a right final answer can still contain a wrong step
   ("12 x 3 = 35"). `wrong_steps` recomputes the simple ones.
 * duplicate, over_cap: identical answers to one question count once, and a
@@ -61,7 +61,7 @@ import os
 import re
 import statistics
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -84,8 +84,9 @@ FILES = ("train.jsonl", "val.jsonl", "manifest.json")
 
 # Word-run length of the near-copy check: the contamination test of GPT-3.
 NGRAM = 13
-# A run of words found in more than this share of the questions is boilerplate.
-COMMON_SHARE = 0.01
+# A run of words found in more than this share of one benchmark's prompts is
+# instruction text: the template is in every prompt, a question's words in few.
+INSTRUCTION_SHARE = 0.5
 EXAMPLES_PER_REASON = 5
 
 # Why an answer was dropped, in the order the checks run.
@@ -280,69 +281,110 @@ def _agrees(value: float, stated: str, *, percent: bool) -> bool:
 _WORD = re.compile(r"\w+")
 
 
-def _grams(text: str, n: int = NGRAM) -> list[str]:
-    words = _WORD.findall(text.lower())
+def _words(text: str) -> list[str]:
+    return _WORD.findall(text.lower())
+
+
+def _grams(words: Sequence[str], n: int) -> list[str]:
     return [" ".join(words[i : i + n]) for i in range(len(words) - n + 1)]
 
 
-def _common(gram_sets: Iterable[set[str]], share: float) -> set[str]:
-    """Grams found in more than `share` of the texts, and in at least two."""
-    counts: Counter[str] = Counter()
-    texts = 0
-    for grams in gram_sets:
-        counts.update(grams)
-        texts += 1
-    limit = max(1.0, share * texts)
-    return {gram for gram, count in counts.items() if count > limit}
+def _benchmark_of(item_id: str) -> str:
+    """The benchmark an item id names ("gsm8k/12" -> "gsm8k"), or "" if none."""
+    name, slash, _ = item_id.partition("/")
+    return name if slash else ""
+
+
+def _instruction(
+    prompts: Mapping[str, str], n: int, share: float, within: set[str] | None = None
+) -> set[str]:
+    """Runs found in more than `share` of one benchmark's prompts, and in at least two.
+
+    With `within`, only the runs in it are counted.
+    """
+    benchmarks: defaultdict[str, set[str]] = defaultdict(set)
+    for item_id, prompt in prompts.items():
+        benchmarks[_benchmark_of(item_id)].add(prompt)
+    found: set[str] = set()
+    for texts in benchmarks.values():
+        counts: Counter[str] = Counter()
+        for text in texts:
+            grams = set(_grams(_words(text), n))
+            counts.update(grams if within is None else grams & within)
+        limit = max(1.0, share * len(texts))
+        found |= {gram for gram, count in counts.items() if count > limit}
+    return found
 
 
 class NearCopyIndex:
-    """Finds text that shares a 13-word run with an evaluation question.
+    """Finds text that copies an evaluation question or shares a 13-word run with one.
 
     A 13-word overlap is the contamination test of GPT-3 (Brown et al., 2020),
     since used by many papers: long enough that a match is no coincidence,
-    short enough to catch a lightly edited copy. A run found in more than 1% of
-    the evaluation questions, or of the training questions, is boilerplate
-    (such as the instruction every GSM8K prompt starts with). Boilerplate is
-    cut out of a text before its runs are formed, so a run cannot straddle it
-    either: otherwise "...with no units. John" would tie together every pair
-    of questions that start with "John".
+    short enough to catch a lightly edited copy.
 
-    It finds near-copies, not every leak: a paraphrased or translated question
-    shares no 13-word run and passes.
+    Prompts also share instruction text: a benchmark asks every question with
+    one template (GSM8K's starts with the same instruction each time). So a
+    run found in more than half of one benchmark's prompts, evaluation or
+    training, is instruction text; a question's own words are in a few at
+    most. Instruction text is cut out before runs are formed, so a run cannot
+    straddle it either: otherwise "...with no units. John" would tie together
+    every pair of questions that start with "John". Prompts are grouped by
+    the benchmark their id names ("gsm8k/12"), so mixing benchmarks with
+    different templates hides none of them.
+
+    An exact copy of an evaluation prompt (the same words, ignoring case and
+    punctuation) is found whatever was cut.
+
+    It finds copies, not every leak: a paraphrased or translated question
+    shares no 13-word run, and a question under 13 words is found only as an
+    exact copy. A benchmark with very few prompts cannot show its template,
+    so text they all share is taken for instruction text.
     """
 
     def __init__(
         self,
-        eval_prompts: dict[str, str],
-        train_prompts: Iterable[str] = (),
+        eval_prompts: Mapping[str, str],
+        train_prompts: Mapping[str, str] | None = None,
         *,
         n: int = NGRAM,
-        share: float = COMMON_SHARE,
+        share: float = INSTRUCTION_SHARE,
     ) -> None:
         self.n = n
-        grams_of = {prompt: _grams(prompt, n) for prompt in set(eval_prompts.values())}
-        seen = {gram for grams in grams_of.values() for gram in grams}
-        self.boilerplate = _common((set(grams) for grams in grams_of.values()), share)
+        self.instruction = _instruction(eval_prompts, n, share)
         # Only runs that occur in an evaluation question can cause a match, so
         # only those are counted on the training side.
-        self.boilerplate |= _common(
-            ({gram for gram in _grams(prompt, n) if gram in seen} for prompt in set(train_prompts)),
-            share,
-        )
+        seen = {gram for prompt in set(eval_prompts.values()) for gram in _grams(_words(prompt), n)}
+        self.instruction |= _instruction(train_prompts or {}, n, share, within=seen)
+        self._exact: dict[str, str] = {}
         self._owner: dict[str, str] = {}
         for eval_id, prompt in eval_prompts.items():
-            for gram in self.grams(prompt):
+            words = _words(prompt)
+            if words:
+                self._exact.setdefault(" ".join(words), eval_id)
+            for gram in self._outside_instruction(words):
                 self._owner.setdefault(gram, eval_id)
 
     def grams(self, text: str) -> list[str]:
-        """The n-word runs of `text` that lie wholly outside boilerplate."""
-        words = _WORD.findall(text.lower())
+        """The n-word runs of `text` that lie wholly outside instruction text."""
+        return self._outside_instruction(_words(text))
+
+    def find(self, text: str) -> str | None:
+        """The id of an evaluation question `text` copies or overlaps, or None."""
+        words = _words(text)
+        if (owner := self._exact.get(" ".join(words))) is not None:
+            return owner
+        for gram in self._outside_instruction(words):
+            if (owner := self._owner.get(gram)) is not None:
+                return owner
+        return None
+
+    def _outside_instruction(self, words: Sequence[str]) -> list[str]:
         n = self.n
-        grams = [" ".join(words[i : i + n]) for i in range(len(words) - n + 1)]
+        grams = _grams(words, n)
         masked = [False] * len(words)
         for i, gram in enumerate(grams):
-            if gram in self.boilerplate:
+            if gram in self.instruction:
                 masked[i : i + n] = [True] * n
         clean: list[str] = []
         run = 0  # unmasked words ending at position p
@@ -351,13 +393,6 @@ class NearCopyIndex:
             if run >= n:
                 clean.append(grams[p - n + 1])
         return clean
-
-    def find(self, text: str) -> str | None:
-        """The id of the first evaluation question `text` overlaps, or None."""
-        for gram in self.grams(text):
-            if (owner := self._owner.get(gram)) is not None:
-                return owner
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -614,7 +649,7 @@ def _finish(
     index = None
     if evals:
         eval_prompts = {item.id: item.prompt for bench in evals for item in bench.load()}
-        index = NearCopyIndex(eval_prompts, (c.prompt for c in candidates))
+        index = NearCopyIndex(eval_prompts, {c.id: c.prompt for c in candidates})
     prompt_hits: dict[str, str | None] = {}
     seen: set[tuple[str, str]] = set()
     per_question: Counter[str] = Counter()
@@ -749,7 +784,19 @@ def render(console: Console, manifest: Manifest, out: Path) -> None:
             "report a score from a model trained on it."
         )
     console.print(f"\n[dim]saved to[/] {out}")
+    config = "then `kumaru train <config>` (see configs/train/distill-gsm8k.yaml)"
+    if manifest.val_rows:
+        console.print(
+            f"[dim]train:[/] point data.train_file at {out / 'train.jsonl'} and data.eval_file "
+            f"at {out / 'val.jsonl'}, {config}"
+        )
+        return
     console.print(
-        f"[dim]train:[/] point data.train_file at {out / 'train.jsonl'} and data.eval_file "
-        f"at {out / 'val.jsonl'}, then `kumaru train <config>` (see configs/train/distill-gsm8k.yaml)"
+        f"[dim]train:[/] point data.train_file at {out / 'train.jsonl'}, set data.eval_file: null "
+        f"and data.eval_split: 0, {config}"
+    )
+    console.print(
+        "[yellow]no held-out questions:[/] val.jsonl is empty, which the trainer refuses, and a "
+        "row split (data.eval_split) would put answers to one question on both sides. For an "
+        "eval loss, hold out questions with --val-fraction (with --match: in the matched dataset)."
     )

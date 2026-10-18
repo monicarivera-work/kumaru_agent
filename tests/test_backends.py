@@ -10,6 +10,7 @@ import types
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -409,11 +410,12 @@ class FakeTokenizer:
         return "w " * len(ids)
 
 
-def tiny_gpt2(steps: list[int], finished: threading.Event) -> object:
+def tiny_gpt2(steps: list[int], finished: threading.Event, positions: int = 4096) -> object:
     """A random two-layer GPT-2 (no download) that counts its decoding steps.
 
     It has no end-of-sequence token, so only max_new_tokens or Kumaru's halt
     can end a generation: exactly what the test below needs to tell apart.
+    Like any GPT-2, it fails on a sequence longer than its `positions`.
     """
     import transformers
 
@@ -422,7 +424,7 @@ def tiny_gpt2(steps: list[int], finished: threading.Event) -> object:
         n_head=2,
         n_embd=32,
         vocab_size=100,
-        n_positions=4096,
+        n_positions=positions,
         bos_token_id=None,
         eos_token_id=None,
     )
@@ -600,10 +602,18 @@ class ScriptedModel:
 
 
 def batching_backend(
-    max_batch_size: int, model: object = None, tokenizer: object = None
+    max_batch_size: int,
+    model: object = None,
+    tokenizer: object = None,
+    max_context_length: int = 8192,
 ) -> TransformersBackend:
     backend = TransformersBackend(
-        BackendConfig(name="transformers", model="scripted", max_batch_size=max_batch_size)
+        BackendConfig(
+            name="transformers",
+            model="scripted",
+            max_batch_size=max_batch_size,
+            max_context_length=max_context_length,
+        )
     )
     backend.model = ScriptedModel() if model is None else model
     backend.tokenizer = ScriptTokenizer() if tokenizer is None else tokenizer
@@ -769,6 +779,39 @@ async def test_a_batched_reply_is_the_reply_the_model_gives_alone(repetition_pen
 
 
 @pytest.mark.asyncio
+async def test_a_batch_never_spans_more_than_the_context_window() -> None:
+    needs_transformers()
+    steps: list[int] = []
+    model = tiny_gpt2(steps, threading.Event(), positions=32)
+    batched = batching_backend(8, model, ScriptTokenizer(eos=None), max_context_length=32)
+    alone = batching_backend(1, model, ScriptTokenizer(eos=None), max_context_length=32)
+    batches: list[list[tuple[int, int]]] = []
+    run_batch = batched._run_batch
+
+    def recording(batch: Any) -> Any:
+        batches.append([(len(request.ids), request.max_new) for request in batch.requests])
+        return run_batch(batch)
+
+    batched._run_batch = recording  # type: ignore[method-assign]
+    # (prompt, max_tokens). A prompt of k numbers is k + 2 tokens, and each
+    # budget is cut to what the 32-token window leaves it.
+    requests = [(" ".join(map(str, range(10, 33))), 100), ("3", 100), ("3", 4)]
+
+    together = await asyncio.gather(
+        *(batched.generate([Message.user(p)], greedy(n)) for p, n in requests)
+    )
+
+    # Together, the first two would span 25 + 29 = 54 tokens and run GPT-2 past
+    # its 32 positions. The third fits beside the first exactly, so it joins it.
+    assert batches == [[(25, 7), (3, 4)], [(3, 29)]]
+    assert len(steps) == 7 + 29
+    assert [result.usage.completion_tokens for result in together] == [7, 29, 4]
+    for (prompt, max_tokens), result in zip(requests, together, strict=True):
+        single = await alone.generate([Message.user(prompt)], greedy(max_tokens))
+        assert (result.message.content, result.usage) == (single.message.content, single.usage)
+
+
+@pytest.mark.asyncio
 async def test_a_batch_stops_once_every_caller_has_gone() -> None:
     needs_transformers()
     steps: list[int] = []
@@ -809,6 +852,61 @@ async def test_closing_the_backend_fails_waiting_callers_and_stops_their_batch()
     assert len(steps) < 200 and backend.model is None
     outcomes = await asyncio.gather(*callers, return_exceptions=True)
     assert all(isinstance(o, BackendError) and "closed" in str(o) for o in outcomes), outcomes
+
+
+@pytest.mark.asyncio
+async def test_requests_made_while_the_backend_closes_are_refused() -> None:
+    needs_transformers()
+    steps: list[int] = []
+    finished = threading.Event()
+    backend = batching_backend(2, tiny_gpt2(steps, finished), ScriptTokenizer(eos=None))
+    caller = asyncio.create_task(backend.generate([Message.user("1")], greedy(2000)))
+    await wait_until(lambda: len(steps) >= 3)
+
+    closing = asyncio.create_task(backend.aclose())
+    await asyncio.sleep(0)  # the close has begun and waits for the decoding thread
+    assert not closing.done()
+    # A server swapping models still holds the old agent, so requests can arrive now.
+    # Accepted, a batched one would start a batch that the close never stops.
+    for params in (greedy(2000), GenerationParams(max_tokens=2000, temperature=0.7)):
+        with pytest.raises(BackendError, match="closing"):
+            await backend.generate([Message.user("2")], params)
+    await closing
+
+    assert finished.is_set() and backend.model is None
+    decoded = len(steps)
+    await asyncio.sleep(0.05)
+    assert len(steps) == decoded < 200  # nothing is decoding any more
+    with pytest.raises(BackendError, match="closed"):
+        await caller
+
+
+@pytest.mark.asyncio
+async def test_a_close_during_a_load_waits_for_it_and_releases_what_it_loaded() -> None:
+    needs_transformers()
+    backend = batching_backend(2)
+    model, tokenizer = backend.model, backend.tokenizer
+    backend.model = backend.tokenizer = None
+    backend._loaded = False
+    may_finish = asyncio.Event()
+
+    async def slow_load() -> None:
+        await may_finish.wait()
+        backend.model, backend.tokenizer = model, tokenizer
+
+    backend._load = slow_load  # type: ignore[method-assign]
+    caller = asyncio.create_task(backend.generate([Message.user("5 50")], greedy(4)))
+    await wait_until(lambda: backend._load_lock is not None and backend._load_lock.locked())
+    closing = asyncio.create_task(backend.aclose())
+    await asyncio.sleep(0.05)
+    assert not closing.done()  # it waits for the load instead of racing it
+    may_finish.set()
+
+    with pytest.raises(BackendError, match="closing"):
+        await caller
+    await closing
+    assert backend.model is None and not backend.is_loaded
+    assert model.calls == []  # loaded, then released without decoding anything
 
 
 @pytest.mark.asyncio

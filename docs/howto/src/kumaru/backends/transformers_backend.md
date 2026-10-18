@@ -41,6 +41,7 @@
 
 - With `backend.max_batch_size` at 1 (the default), or a sampled request (`temperature > 0`), it is `Backend.generate()`: it drains `stream()`.
 - Otherwise the request joins a queue. A batch starts when it holds `max_batch_size` requests, when no new request has arrived for 20 ms (`BATCH_IDLE_S`), or 250 ms after the first one queued (`BATCH_MAX_WAIT_S`).
+- A batch takes the oldest requests that fit together: its longest prompt plus its largest output budget must fit `max_context_length`, since prompts are padded to the longest and decoding can run to the largest budget. A request that does not fit waits at the front of the queue for the next batch; no budget is cut to make it fit.
 - One `model.generate` call decodes the whole batch on a worker thread. Each caller gets its own `ChatResult`, finished as the streaming path finishes a reply (`_result()`).
 
 ### Changed since v0.2.0
@@ -51,6 +52,7 @@
 | Generation ends on any end token the tokenizer or the checkpoint's `generation_config.json` lists (`_eos_ids()`; Qwen2.5-Instruct: `<\|im_end\|>` and `<\|endoftext\|>`). | Only the tokenizer's `eos_token` ended it; a reply could run on past an `<\|endoftext\|>`. |
 | `generate()` batches greedy requests when `backend.max_batch_size` > 1. | One `generate` call per request. |
 | `info().extra["max_batch_size"]` reports the batch size in use. | — |
+| `aclose()` waits for running batches and for a load under way; requests made meanwhile are refused with `The backend is closing, so it cannot take new requests.` | `aclose()` released the model at once: there were no batches to wait for. |
 
 A greedy run made before this change is not comparable with one made after it: start a new benchmark run directory rather than resuming an old one.
 
@@ -91,7 +93,7 @@ A greedy run made before this change is not comparable with one made after it: s
    - **The batching is static.** A batch runs until its longest row ends, and finished rows wait as padding. With GSM8K's mix of short and long answers, roughly 30–50% of the row-steps do useful work. Continuous batching (`llamacpp_server`, vLLM) refills a finished row at once.
    - **A row ends on an end token, its own budget, or its caller leaving.** A stop sequence does not end a row early. The reply is cut at it afterwards, so the text is what `stream()` would return.
    - **Out of memory halves the batch.** The batch goes back to the queue and is retried at half the size. The lower size stays until the next `load()`. A single request that does not fit fails.
-   - **Closing the backend** fails every queued and running caller with `The backend was closed before this request finished.` It then waits up to 10 s for the decoding thread before it releases the model.
+   - **Closing the backend** fails every queued and running caller with `The backend was closed before this request finished.` It then waits up to 10 s for the decoding thread before it releases the model. Requests that arrive while it closes are refused (`The backend is closing, so it cannot take new requests.`), so no batch starts behind its back. A load already under way finishes first and is then released too. The next request after the close loads the model again.
 6. **Ending the stream halts the GPU work a few tokens later.**
    - The producer's `finally` sets `halt` and waits up to 1 s (`worker.join(timeout=1.0)`) for `generate` to return. It runs when `generate` finishes, when a stop sequence matches, and when the reader goes away; for the last case, `iterate_in_thread` closes the producer on its worker thread.
    - `HaltWhenAsked` then ends `generate` about one decoding step later.
@@ -114,7 +116,7 @@ A greedy run made before this change is not comparable with one made after it: s
 | `TransformersBackend.supports_adapters` | `supports_adapters = True` | Declares that `_load()` attaches `adapter_path`. It is the only backend that sets it; `Backend.load()` refuses an adapter on every other backend. |
 | `TransformersBackend.model`, `.tokenizer` | `model: Any = None`, `tokenizer: Any = None` (set in `__init__`) | The loaded `PreTrainedModel` (or `PeftModel`) and tokenizer; `None` before load and after `aclose()`. |
 | `TransformersBackend._load` | `async def _load(self) -> None` | The load sequence above. Raises `DependencyMissingError` (`transformers` → extra `torch`; `bitsandbytes` → extra `quant`; `peft` → extra `train`) or `BackendError` (`Unknown dtype`, `Adapter not found`). |
-| `TransformersBackend.aclose` | `async def aclose(self) -> None` | Fails queued and running batched callers, stops the batch scheduler, waits up to 10 s for a decoding thread, then drops the model and tokenizer, runs `gc.collect()`, and empties the CUDA cache. |
+| `TransformersBackend.aclose` | `async def aclose(self) -> None` | Refuses new requests until it returns. Fails queued and running batched callers, stops the batch scheduler, waits up to 10 s for a decoding thread, waits for a load under way, then drops the model and tokenizer, runs `gc.collect()`, and empties the CUDA cache. |
 | `TransformersBackend.info` | `def info(self) -> BackendInfo` | `model_id` = `backend.model`; `device` and `dtype` as resolved (`"cpu"` and `"unknown"` before load); `context_length` after the clamp; `quantization` = `"4bit-nf4"`, `"8bit"` or `None`; `extra` = `{"parameters": ..., "adapter": adapter_path, "max_batch_size": ...}`, the batch size in use after any out-of-memory halving. |
 | `TransformersBackend.count_tokens` | `def count_tokens(self, messages: Sequence[Message]) -> int` | Exact token count of the rendered prompt (rendered without the thinking flag). The base heuristic before load. |
 | `TransformersBackend._render_prompt` | `def _render_prompt(self, messages: Sequence[Message], thinking: bool \| None = None) -> str` | The exact prompt string. Use it to debug prompt format. |
@@ -288,6 +290,7 @@ Under `kumaru serve`, load errors show in `/healthz` (`status: "error"`) and as 
 | Log: `out of GPU memory decoding <n> requests together; retrying <m> at a time` | A batch did not fit. The batch size stays lowered until the next load. | Nothing to do. To avoid the retry, lower `max_batch_size` or `--max-tokens`. |
 | `Out of GPU memory while answering a single request.` | Even a batch of one does not fit beside the other GPU programs. | Lower `--max-tokens` or `backend.max_context_length`, close other GPU programs, or use a smaller model (the hint says so too). |
 | `The backend was closed before this request finished.` | The backend was closed or reloaded (`POST /v1/backend`, shutdown) while the request waited in or rode a batch. | Retry once the backend is loaded again. |
+| `The backend is closing, so it cannot take new requests.` | The request arrived while the backend was being closed or swapped out. | Retry once the model switch or shutdown has finished (the hint says so too). |
 | A benchmark on the `student` profile is slow, and **cut off** is high | Looping answers ran to the token budget, holding their batches that long. | Pass `--max-tokens 1024`; read the cut-off outputs. |
 | Thinking shows up in the answer | The model registers `<think>` and `</think>` as special tokens, so `skip_special_tokens=True` strips them before the splitter sees them. Qwen3's are not special. | Use `llamacpp_server`, which parses reasoning server-side. |
 | `--thinking-budget` or `presence_penalty` changes nothing | Not supported by this backend. | `llamacpp_server` |
@@ -312,7 +315,7 @@ Under `kumaru serve`, load errors show in `/healthz` (`status: "error"`) and as 
 - `configs\local-gpu.yaml`, `configs\low-vram.yaml`, `configs\default.yaml` — profiles for this backend; see [`local-gpu.yaml.md`](../../../configs/local-gpu.yaml.md), [`low-vram.yaml.md`](../../../configs/low-vram.yaml.md) and [`default.yaml.md`](../../../configs/default.yaml.md).
 - `configs\student.yaml` — greedy batching at 32 for benchmarking a distillation student; see [`student.yaml.md`](../../../configs/student.yaml.md).
 - `src\kumaru\eval\benchmarks\runner.py` — `default_concurrency()` fills a batch for greedy runs; see [`runner.md`](../eval/benchmarks/runner.md).
-- `tests\test_backends.py` — the batching tests: one shared batch, `max_batch_size`, per-row penalties, cancellation, `aclose()`, and the out-of-memory retry.
+- `tests\test_backends.py` — the batching tests: one shared batch, `max_batch_size`, per-row penalties, batches that fit the context window, cancellation, `aclose()` (including requests and loads during a close), and the out-of-memory retry.
 - `configs\train\lora-qwen.yaml` — the QLoRA recipe whose adapter this backend serves.
 - `src\kumaru\backends\llamacpp_server.py` — GGUF, thinking budgets and continuous batching; see [`llamacpp_server.md`](llamacpp_server.md).
 - `src\kumaru\backends\openai_compat.py` — vLLM and remote servers; see [`openai_compat.md`](openai_compat.md).

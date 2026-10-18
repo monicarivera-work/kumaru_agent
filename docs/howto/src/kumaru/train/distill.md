@@ -50,7 +50,7 @@ The first six read each answer's benchmark record. The last five run in `_finish
 | `empty` | the answer is blank | |
 | `too_long` | it has more than `--max-tokens` tokens | The trainer drops rows longer than `max_seq_length` anyway. |
 | `not_matched` | `gold --match` only: the question is not in the teacher dataset | Both arms must cover the same questions. |
-| `contaminated` | the question or the answer shares a 13-word run with an evaluation question (§4) | Training on the test inflates the score. |
+| `contaminated` | the question or the answer copies an evaluation question, or shares a 13-word run with one outside their instruction text (§4) | Training on the test inflates the score. |
 | `arithmetic` | a simple step `a op b = c` has the wrong `c` (§5) | A right answer with a wrong step teaches the wrong step. |
 | `duplicate` | the same answer (whitespace-normalised) to the same question is already kept | Copies only re-weight; distinct solutions are what help (§7). |
 | `over_cap` | the question already has `--per-question` answers | Easy questions, which every sample gets right, would crowd out hard ones. |
@@ -65,7 +65,13 @@ A bad source is **refused as a whole, before anything is written**, rather than 
 
 Two texts that share a run of 13 consecutive words are near-copies. That is GPT-3's contamination test (Brown et al., 2020): long enough that a match is no coincidence, and short enough to catch a lightly edited copy. Both the question and the answer are checked against every question of each `--eval-set`.
 
-**Boilerplate is masked first.** Every GSM8K prompt starts with the same instruction. A 13-word run found in more than 1% of the evaluation questions, or of the training questions, is boilerplate. It is cut out before runs are formed, so a run cannot straddle it either. Without that, "...with no units. John" would tie together every pair of questions that start with "John". An early smoke test caught exactly that bug.
+**Instruction text is masked first.** A benchmark asks every question with one template: every GSM8K prompt starts with the same 27-word instruction. A 13-word run found in more than half of one benchmark's prompts (and in at least two) is instruction text. Both sides count: the evaluation prompts, and the training prompts being checked. Prompts are grouped by the benchmark their id names (`gsm8k/12`), so mixing benchmarks with different templates hides none of them. Instruction text is cut out before runs are formed, so a run cannot straddle it either. Without that, "...with no units. John" would tie together every pair of questions that start with "John". An early smoke test caught exactly that bug.
+
+Why more than half: a template is in every prompt of its benchmark, while a question's own words are in a few at most. An earlier version masked any run found in more than 1% of the prompts. That also masked words a few questions share, such as an opening "John has", and could leave a short question with no run left to check.
+
+**Exact copies are always found.** An evaluation prompt repeated word for word (ignoring case and punctuation) is caught by a separate lookup that masking cannot affect.
+
+On GSM8K, the masked text is exactly the 15 runs of the instruction, and the shortest test question has 15 words, so every test question is checked by runs of its own.
 
 **What it found in GSM8K.** Four training questions are template siblings of test questions: the same problem with new names and numbers.
 
@@ -147,11 +153,11 @@ One row:
 | `Manifest` | pydantic model: `kind` (`teacher`/`gold`), `created_at`, `kumaru_version`, `git_commit`, `settings`, `sources`, `read`, `kept`, `train_rows`, `val_rows`, `questions`, `val_questions`, `dropped`, `mean_answer_tokens`, `mean_answer_chars`, `examples`, `files` | `manifest.json`. `dropped` lists the non-zero checks in check order; `examples` keeps up to 5 per check; `files` maps each data file to its sha256. |
 | `Candidate` | dataclass: `id`, `prompt`, `answer`, `source`, `tokens` | One answer before the dataset-level checks. |
 | `wrong_steps` | `wrong_steps(text: str) -> list[str]` | Every simple step with a wrong result (§5). |
-| `NearCopyIndex` | `NearCopyIndex(eval_prompts: dict[str, str], train_prompts: Iterable[str] = (), *, n: int = 13, share: float = 0.01)`; `.grams(text)`, `.find(text) -> str \| None`, `.boilerplate` | The near-copy check (§4). `find` returns the id of the first evaluation question `text` overlaps. |
+| `NearCopyIndex` | `NearCopyIndex(eval_prompts: Mapping[str, str], train_prompts: Mapping[str, str] \| None = None, *, n: int = 13, share: float = 0.5)`; `.grams(text)`, `.find(text) -> str \| None`, `.instruction` | The near-copy check (§4). Both mappings are id → prompt, and an id names its benchmark (`gsm8k/12`). `find` returns the id of an evaluation question `text` copies or overlaps. |
 | `split_of` | `split_of(question_id: str, seed: int, val_fraction: float) -> "train" \| "val"` | The split (§6). |
 | `gold_rationale` | `gold_rationale(solution: str) -> str \| None` | A GSM8K solution in the teacher's format: calculator notes (`<<48/2=24>>`) removed, `#### 72` → `Answer: 72`. `None` when there is no `####` or no body. |
 | `render` | `render(console: Console, manifest: Manifest, out: Path) -> None` | The console report. |
-| Constants | `REASONS` (check → meaning, in check order), `SIDES = ("train", "val")`, `FILES`, `NGRAM = 13`, `COMMON_SHARE = 0.01`, `EXAMPLES_PER_REASON = 5`, `ROUNDED_DECIMALS = 3` | |
+| Constants | `REASONS` (check → meaning, in check order), `SIDES = ("train", "val")`, `FILES`, `NGRAM = 13`, `INSTRUCTION_SHARE = 0.5`, `EXAMPLES_PER_REASON = 5`, `ROUNDED_DECIMALS = 3` | |
 
 Every refusal is a `ConfigError` with a hint, raised before anything is written ([failure modes](#failure-modes)).
 
@@ -200,7 +206,7 @@ Flags, verified against `kumaru distill build --help` and `kumaru distill gold -
 | `-o/--out` | required | A new folder for the three files. |
 | `--max-tokens` | 1024 | `build` only. Drop answers longer than this; keep it below the training `max_seq_length` minus the prompt (GSM8K prompts are at most ~280 tokens). |
 | `--per-question` | 4 | `build` only. Distinct answers kept per question. |
-| `--val-fraction` | 0.05 | 0..0.5. Share of *questions* held out. |
+| `--val-fraction` | 0.05 | 0..0.5. Share of *questions* held out. With 0, or too few questions for any to be held out, `val.jsonl` is empty and the report says how to train without it. |
 | `--seed` | 42 | Picks the held-out questions. Keep it equal across datasets you compare. |
 | `--check-arithmetic/--no-check-arithmetic` | on | The `arithmetic` check. |
 | `--eval-set` | `gsm8k` | Repeatable. A benchmark the student will be scored on; its questions never become training data. |
@@ -238,6 +244,7 @@ runs\distill\data-gold\val.jsonl, then `kumaru train <config>` (see configs/trai
 - **`dropped`:** one row per check that dropped anything, in check order.
 - **Examples:** up to three per check for `contaminated` (which evaluation question it matches) and `arithmetic` (the first wrong step). The manifest keeps up to five per check.
 - **`not decontaminated:`** in yellow, when you passed `--no-decontaminate`.
+- **`train:`** what to put in the training config. When no question was held out, `val.jsonl` is empty, so it says to set `data.eval_file: null` and `data.eval_split: 0` instead, and a yellow `no held-out questions:` line says why. The trainer refuses an empty eval file. A row split (`data.eval_split`) would put answers to one question on both sides, so the eval loss would score questions the model trained on.
 
 A teacher build keeps a little less than the teacher's accuracy, since wrong answers are the main loss. If it keeps much less, read `dropped` before you train; [Failure modes](#failure-modes) says what each large count usually means.
 
@@ -284,10 +291,13 @@ manifest.kept, manifest.dropped   # the report's numbers: an int, and {check: co
 | Many `too_long` | The teacher ran with a larger budget than distill's `--max-tokens`. | Fine if few. Raising `--max-tokens` also needs a larger training `max_seq_length`. |
 | `kumaru train` logs `dropped N/M example(s) (x%) longer than 1536 tokens` | Rows longer than `data.max_seq_length`. | Lower distill's `--max-tokens`, or raise `max_seq_length` (more VRAM). |
 | `Training data not found: runs\distill\data-teacher\train.jsonl` | The dataset is not built yet, or was built elsewhere. | Build it, or point `data.train_file` and `data.eval_file` at it. |
+| `kumaru train` says `<dir>\val.jsonl contains no usable examples` | `data.eval_file` points at an empty `val.jsonl`: the dataset was built with `--val-fraction 0`, or had too few questions for any to be held out. | Set `data.eval_file: null` and `data.eval_split: 0` (no eval loss), or rebuild with a `--val-fraction` that holds questions out. |
 
 ## Known limitations
 
 - **Paraphrases pass the near-copy check.** A reworded or translated test question shares no 13-word run. Decontamination here is a floor, not a guarantee.
+- **A question under 13 words is found only as an exact copy:** it has no 13-word run of its own. Every GSM8K test question has at least 15 words.
+- **A benchmark with very few prompts cannot show its template.** Text that more than half of them share is taken for instruction text; with two prompts, that is everything they have in common. Exact copies are still found.
 - **The arithmetic check sees one operation at a time.** A chain like `2 + 3 x 4 = 14` is skipped, a wrong method with right arithmetic passes, and a step written in words ("twice 12 is 25") is not seen. Grading every step needs a process reward model ("Let's Verify Step by Step", Lightman et al., 2023).
 - **Duplicates must match exactly** (after whitespace is collapsed). Two answers that differ by one word both count as distinct.
 - **The grader trusts GSM8K's labels.** At least one is wrong (gsm8k_train/167). A teacher that gets that question right is graded wrong, and its answer is dropped.

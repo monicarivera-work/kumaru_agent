@@ -1,6 +1,6 @@
 # `tests/`
 
-> The offline regression suite. 511 tests, no GPU, no downloads, under a minute.
+> The offline regression suite. 517 tests, no GPU, no downloads, under a minute.
 
 **Read this when:** you have changed something and want to know whether you broke it, or you are adding a feature and need to know where its test belongs.
 
@@ -38,7 +38,7 @@ The parts that genuinely need a GPU are covered by `scripts\verify.ps1 -Full`, w
 | `test_config.py` | Config precedence silently changing; profiles failing to parse; typos being ignored; env var coercion breaking |
 | `test_registry.py` | Plugin resolution breaking; aliases leaking into user-facing lists; duplicate registration passing silently |
 | `test_types.py` | The wire vocabulary changing shape; `merged()` mutating shared state; division-by-zero in throughput maths |
-| `test_backends.py` | `generate()` drifting from `stream()`; **stop sequences split across chunk boundaries being missed**; echo ignoring `max_tokens` or misreporting `length`; a batched greedy reply differing from the one the model gives alone, or a batch too big for the GPU failing instead of retrying in halves |
+| `test_backends.py` | `generate()` drifting from `stream()`; **stop sequences split across chunk boundaries being missed**; echo ignoring `max_tokens` or misreporting `length`; a batched greedy reply differing from the one the model gives alone, a batch spanning more than the context window, or a batch too big for the GPU failing instead of retrying in halves; a request or load slipping past `aclose()` |
 | `test_agent.py` | Prompt assembly losing the system message or dropping client system messages; memory policies overflowing the budget or dropping the system prompt |
 | `test_tools.py` | A hung tool stalling the agent; a failing or unknown tool raising instead of returning `ERROR: ...` text |
 | `test_server.py` | API shape changing; SSE framing breaking; auth being bypassable; error responses losing their shape |
@@ -51,7 +51,7 @@ The parts that genuinely need a GPU are covered by `scripts\verify.ps1 -Full`, w
 | `test_bench_stats.py` | Wilson intervals, McNemar's test, the paired bootstrap or Holm's correction drifting from hand-checked values |
 | `test_train_data.py` | **Loss masking regressing** — the highest-consequence silent bug in the project; collator padding labels with a real token id; corpus packing changing the `tokens.bin` format, holding the whole corpus in RAM, or leaving a partial file behind |
 | `test_train_runner.py` | Training preflight missing a data file the task will read (LoRA `train_file` and `eval_file`; pretraining `text_file` or its `train_file` fallback), or accepting a directory as one, so a bad path fails at minute 0 instead of after the tokenizer and model load |
-| `test_distill.py` | **Test questions leaking into training data**; wrong, cut-off or wrongly-stepped answers being kept; the two arms covering different questions or splits; the manifest's counts not adding up; the three distillation recipes differing in more than the factor each tests |
+| `test_distill.py` | **Test questions leaking into training data**, including ones that open like other questions or are copied into several training prompts; wrong, cut-off or wrongly-stepped answers being kept; the two arms covering different questions or splits; the manifest's counts not adding up; the report's training advice failing when nothing was held out; the three distillation recipes differing in more than the factor each tests |
 | `test_finetune_lora.py` | A recipe setting silently dropped on its way to transformers, as `warmup_ratio` was once (transformers 5.2 removed it, so runs trained without warmup); `peak_gpu_memory_gb` misreporting |
 
 ## Fixtures

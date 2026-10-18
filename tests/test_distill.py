@@ -60,6 +60,9 @@ PARAPHRASE = (
     "adds 20 pages more. What is her page total?"
 )
 MARBLES = "Tom has 4 marbles and his sister gives him 5 more. How many marbles does Tom have now?"
+# Two 14-word questions that open alike: without "John has" they are under 13 words.
+APPLES = "John has 5 apples and buys 7 more. How many apples does he have?"
+PENS = "John has 3 pens and then loses 1. How many pens does he have?"
 QUESTIONS = [
     "Ann has 2 apples and buys 2 more. How many apples does she have?",
     "A bus carries 10 people and 2 get off. How many are left on the bus?",
@@ -191,8 +194,8 @@ def test_near_copies_are_found_and_shared_instructions_are_not() -> None:
     assert index.find(prompt(JULIE)) == "e/julie"
     assert index.find("Warm-up: " + JULIE.upper()) == "e/julie"  # case and context do not hide it
     assert index.find(prompt(BAKER)) == "e/baker"
-    # The instruction every prompt starts with is boilerplate, and a run may not
-    # straddle it: "...with no units. Julie" must not tie JULIE_SIBLING to JULIE.
+    # The instruction every prompt starts with is instruction text, and a run may
+    # not straddle it: "...with no units. Julie" must not tie JULIE_SIBLING to JULIE.
     assert index.find(prompt(JULIE_SIBLING)) is None
     assert index.find(prompt("")) is None
     assert index.grams(prompt(JULIE)) == index.grams(JULIE)
@@ -200,15 +203,75 @@ def test_near_copies_are_found_and_shared_instructions_are_not() -> None:
     assert index.find(prompt(PARAPHRASE)) is None
 
 
-def test_boilerplate_is_also_learned_from_the_training_prompts() -> None:
-    # One evaluation question cannot show what is boilerplate; the training prompts can.
+def test_instruction_text_is_also_learned_from_the_training_prompts() -> None:
+    # One evaluation question cannot show what is instruction text; the training prompts can.
     eval_prompts = {"e/julie": prompt(JULIE)}
     assert NearCopyIndex(eval_prompts).find(prompt(MARBLES)) == "e/julie"
 
-    index = NearCopyIndex(eval_prompts, [prompt(JULIE_SIBLING), prompt(MARBLES), prompt(JULIE)])
+    train = {"t/1": prompt(JULIE_SIBLING), "t/2": prompt(MARBLES), "t/3": prompt(JULIE)}
+    index = NearCopyIndex(eval_prompts, train)
     assert index.find(prompt(MARBLES)) is None
     assert index.find(prompt(JULIE_SIBLING)) is None
     assert index.find(prompt(JULIE)) == "e/julie"
+
+
+def test_questions_that_open_alike_are_still_found() -> None:
+    eval_prompts = {
+        "e/apples": prompt(APPLES),
+        "e/pens": prompt(PENS),
+        "e/julie": prompt(JULIE),
+        "e/baker": prompt(BAKER),
+    }
+    index = NearCopyIndex(eval_prompts)
+    # "John has" opens half of these questions, not more: it is question text.
+    assert index.find(prompt(APPLES)) == "e/apples"
+    assert index.find(prompt(PENS)) == "e/pens"
+    assert index.find("Warm-up: " + APPLES) == "e/apples"
+    assert index.find(prompt(MARBLES)) is None
+
+    # With only the two, "John has" is in every prompt and is taken for
+    # instruction text, leaving 12 words; exact copies are still found.
+    pair = NearCopyIndex({"e/apples": prompt(APPLES), "e/pens": prompt(PENS)})
+    assert pair.grams(prompt(APPLES)) == []
+    assert pair.find(prompt(APPLES).upper()) == "e/apples"
+    assert pair.find(prompt(PENS) + " ") == "e/pens"
+    assert pair.find(prompt("")) is None
+
+
+def test_a_question_copied_into_the_training_prompts_is_not_instruction_text() -> None:
+    eval_prompts = {"e/julie": prompt(JULIE)}
+    copy, variant = prompt(JULIE), prompt("Warm-up: " + JULIE)
+    train = {
+        "t/copy": copy,
+        "t/variant": variant,
+        "t/marbles": prompt(MARBLES),
+        "t/sibling": prompt(JULIE_SIBLING),
+        "t/baker": prompt(BAKER),
+    }
+    index = NearCopyIndex(eval_prompts, train)
+    assert index.find(copy) == "e/julie"
+    assert index.find(variant) == "e/julie"
+    assert index.find(prompt(MARBLES)) is None
+    assert index.find(prompt(JULIE_SIBLING)) is None
+    # With only the copy and the variant, the question is in every training
+    # prompt and is taken for instruction text; the exact copy is still found.
+    assert NearCopyIndex(eval_prompts, {"t/copy": copy, "t/variant": variant}).find(copy) == "e/julie"
+
+
+def test_each_benchmark_template_is_found_among_its_own_prompts() -> None:
+    # Two templates, each in only half of all the prompts but in all of its own.
+    other = "Read the problem below carefully and reply with the final number only, nothing else. Problem: {}"
+    eval_prompts = {
+        "gsm8k/0": prompt(JULIE),
+        "gsm8k/1": prompt(BAKER),
+        "other/0": other.format(MARBLES),
+        "other/1": other.format(JULIE_SIBLING),
+    }
+    index = NearCopyIndex(eval_prompts)
+    assert index.find(prompt(PARAPHRASE)) is None
+    assert index.find(other.format(PARAPHRASE)) is None
+    assert index.find(other.format(JULIE)) == "gsm8k/0"
+    assert index.find(prompt(MARBLES)) == "other/0"
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +566,23 @@ def test_the_cli_builds_a_dataset_and_says_what_to_run_next(scratch_dir: Path, e
     assert re.search(r"\bwrong\W+1\W+graded wrong", text)
     assert "configs/train/distill-gsm8k.yaml" in text
     assert "not decontaminated" not in text
+    # No question was held out, and the trainer refuses an empty eval file.
+    assert "set data.eval_file: null and data.eval_split: 0" in text
+    assert "val.jsonl is empty" in text
+    assert "data.eval_file at" not in text
+
+    both = write_run(scratch_dir / "both", [
+        answer("gsm8k_train/0", QUESTIONS[0]),
+        answer("gsm8k_train/1", QUESTIONS[1]),
+    ])  # fmt: skip
+    held = ["distill", "build", str(both), "--eval-set", str(eval_set), "--val-fraction", "0.5"]
+    result = runner.invoke(app, [*held, "-o", str(scratch_dir / "held")], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    text = " ".join(ANSI.sub("", result.output).split())
+    assert "1 train rows, 1 val rows" in text
+    assert "data.eval_file at" in text
+    assert str(scratch_dir / "held" / "val.jsonl") in "".join(text.split())  # rich may fold a long path
+    assert "data.eval_split: 0" not in text
 
     smoke = [*args, "-o", str(scratch_dir / "smoke"), "--no-decontaminate"]
     result = runner.invoke(app, smoke, env={"COLUMNS": "200"})

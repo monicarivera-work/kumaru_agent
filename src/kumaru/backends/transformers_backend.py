@@ -172,6 +172,9 @@ class TransformersBackend(Backend):
         self._running: list[_Batch] = []
         # Lowered after an out-of-memory error, for the rest of this load.
         self._batch_cap: int | None = None
+        # aclose() calls under way. New requests are refused meanwhile, so the
+        # batches a close stops are all the batches there are.
+        self._closing = 0
 
     # -- hardware resolution ------------------------------------------------
 
@@ -331,29 +334,51 @@ class TransformersBackend(Backend):
         return None
 
     async def aclose(self) -> None:
-        # Callers still waiting on a batch get an answer rather than a hang,
-        # and the decoding thread stops before the model is released.
-        running, self._running = self._running, []
-        for batch in running:
-            batch.halt.set()
-        queued = list(self._queue)
-        self._queue.clear()
-        self._fail(
-            queued + [request for batch in running for request in batch.requests],
-            "The backend was closed before this request finished.",
-        )
-        drainer, self._drainer = self._drainer, None
-        if (
-            drainer is not None
-            and not drainer.done()
-            and drainer.get_loop() is asyncio.get_running_loop()
-        ):
-            drainer.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await drainer
-        for batch in running:
-            await asyncio.to_thread(batch.finished.wait, 10.0)
+        # Refuse new requests before the first await below: one accepted
+        # meanwhile could start a batch that nothing here stops or waits for.
+        self._closing += 1
+        try:
+            # Callers still waiting on a batch get an answer rather than a hang,
+            # and the decoding thread stops before the model is released.
+            running, self._running = self._running, []
+            for batch in running:
+                batch.halt.set()
+            queued = list(self._queue)
+            self._queue.clear()
+            self._fail(
+                queued + [request for batch in running for request in batch.requests],
+                "The backend was closed before this request finished.",
+            )
+            drainer, self._drainer = self._drainer, None
+            if (
+                drainer is not None
+                and not drainer.done()
+                and drainer.get_loop() is asyncio.get_running_loop()
+            ):
+                drainer.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await drainer
+            for batch in running:
+                await asyncio.to_thread(batch.finished.wait, 10.0)
+            # A load under way finishes first, so the model it loads is
+            # released here too rather than outliving the close.
+            if self._load_lock is None:
+                self._release()
+            else:
+                async with self._load_lock:
+                    self._release()
+        finally:
+            self._closing -= 1
 
+    def _refuse_if_closing(self) -> None:
+        if self._closing:
+            raise BackendError(
+                "The backend is closing, so it cannot take new requests.",
+                hint="Retry once the model switch or shutdown has finished.",
+            )
+
+    def _release(self) -> None:
+        """Drop the model and tokenizer, and return their memory to the GPU."""
         self.model = None
         self.tokenizer = None
         self._loaded = False
@@ -432,8 +457,10 @@ class TransformersBackend(Backend):
     async def stream(
         self, messages: Sequence[Message], params: GenerationParams
     ) -> AsyncIterator[StreamChunk]:
+        self._refuse_if_closing()
         if not self._loaded:
             await self.load()
+            self._refuse_if_closing()  # a close may have begun during the load
 
         import torch
         from transformers import StoppingCriteria, StoppingCriteriaList, TextIteratorStreamer
@@ -603,8 +630,11 @@ class TransformersBackend(Backend):
         """
         if self.config.max_batch_size <= 1 or params.temperature > 0:
             return await super().generate(messages, params)
+        self._refuse_if_closing()
         if not self._loaded:
             await self.load()
+            self._refuse_if_closing()  # a close may have begun during the load
+        # No await from here until the request is queued, where a close finds it.
         request = self._prepare(messages, params)
         self._queue.append(request)
         loop = asyncio.get_running_loop()
@@ -663,13 +693,31 @@ class TransformersBackend(Backend):
                 return
 
     def _take_batch(self) -> list[_Request]:
+        """Take the next batch off the queue, oldest request first.
+
+        Prompts are padded on the left to the longest one, and every row keeps
+        stepping until the largest budget is spent, finished rows included. So
+        a batch spans its longest prompt plus its largest budget, and a request
+        joins only if that still fits the context window: past it, a model with
+        fixed positions (GPT-2) fails the whole batch, though each request fits
+        alone. A request left out keeps its place at the front of the queue.
+        """
         loop = asyncio.get_running_loop()
         batch: list[_Request] = []
+        left_out: list[_Request] = []
+        width = budget = 0
         while self._queue and len(batch) < self._cap():
             request = self._queue.popleft()
             # Skip callers that gave up while queued, and any a closed event loop left behind.
-            if not request.future.done() and request.future.get_loop() is loop:
-                batch.append(request)
+            if request.future.done() or request.future.get_loop() is not loop:
+                continue
+            wider, longer = max(width, len(request.ids)), max(budget, request.max_new)
+            if batch and wider + longer > self.config.max_context_length:
+                left_out.append(request)
+                continue
+            batch.append(request)
+            width, budget = wider, longer
+        self._queue.extendleft(reversed(left_out))
         return batch
 
     async def _decode(self, requests: list[_Request]) -> None:
