@@ -8,7 +8,7 @@
 
 ## What it does
 
-This file freezes a pretrained causal LM and trains a small PEFT LoRA adapter on Kumaru chat data. It loads the tokenizer, verifies a chat template exists, builds completion-masked datasets, optionally quantizes the base model to 4-bit NF4, configures PEFT, runs `Trainer`, and saves the adapter, tokenizer, metrics, and resolved training config.
+This file freezes a pretrained causal LM and trains a small PEFT LoRA adapter on Kumaru chat data. It loads the tokenizer, verifies a chat template exists, builds completion-masked datasets, optionally quantizes the base model to 4-bit NF4, configures PEFT, runs `Trainer`, and saves the adapter, tokenizer, metrics, and resolved training config. `metrics.json` records the training time, the peak GPU memory PyTorch reserved (`peak_gpu_memory_gb`, `null` on the CPU), the row counts, the trainable parameters, and the last 30 log entries.
 
 It also supports `--dry-run`, which validates config and data and writes `example_preview.txt` without loading or training the base model.
 
@@ -23,6 +23,10 @@ Without this file, Kumaru would have no practical local training path for style,
 1. **The base model is frozen.** Only low-rank adapter weights are trainable.
 2. **QLoRA saves base-weight memory.** `load_in_4bit` stores the frozen base in NF4 while adapter math runs in bf16/float.
 3. **Good SFT depends on data masking.** The Trainer sees labels where only assistant tokens are supervised.
+4. **Every Trainer setting passes through `_filter_kwargs`.** It keeps only the arguments the installed transformers accepts, so the code runs across releases. The price: a field a new release renames is dropped with only a debug log line, and the run trains without it.
+   - transformers 5.2 removed `warmup_ratio` (deprecated in 5.0, where `warmup_steps` began reading a float below 1 as a share of the steps). v0.2.0 still passed the old name, so on transformers 5.2 and later the ratio was dropped this way and every LoRA run started at the full learning rate. `_warmup_kwargs` now passes it under the name the installed release reads.
+   - `tests\test_finetune_lora.py` builds the real `TrainingArguments` from every checked-in recipe and fails if any setting is dropped, so the next rename fails a test instead of a run.
+5. **With evaluation data, the run ends on its best checkpoint.** `load_best_model_at_end` reloads the checkpoint with the lowest `eval_loss` before the adapter is saved. transformers can only return to an evaluation it saved a checkpoint for, so keep `save_steps` equal to `eval_steps`, as the distillation recipes do. (`lora-small` evaluates every 10 steps but saves every 50, so its best evaluation usually has no checkpoint, and the run may not end on it.)
 
 ## Public API
 
@@ -32,6 +36,9 @@ Without this file, Kumaru would have no practical local training path for style,
 | `ListDataset.__len__` | `__len__() -> int` | Returns number of encoded examples. |
 | `ListDataset.__getitem__` | `__getitem__(idx: int) -> dict[str, list[int]]` | Returns one encoded item for Trainer. |
 | `_filter_kwargs` | `_filter_kwargs(cls: Any, kwargs: dict[str, Any]) -> dict[str, Any]` | Internal compatibility helper for different `TrainingArguments` versions. |
+| `_warmup_kwargs` | `_warmup_kwargs(training_args_cls: Any, ratio: float) -> dict[str, float]` | `{"warmup_ratio": ratio}` where the release still has that field (before transformers 5.2), otherwise `{"warmup_steps": ratio}`. |
+| `_training_arguments` | `_training_arguments(training_args_cls: Any, config: TrainConfig, out_dir: Path, *, has_eval: bool, cuda: bool) -> dict[str, Any]` | Every setting the Trainer is given, before `_filter_kwargs`. Both spellings of renamed fields are included; `has_eval` switches on evaluation and best-checkpoint reloading; `cuda` gates `bf16` and pinned memory. |
+| `_peak_gpu_memory_gb` | `_peak_gpu_memory_gb(torch: Any) -> float \| None` | `torch.cuda.max_memory_reserved()` in GB, rounded to 0.01; `None` without CUDA. Reserved rather than allocated, because PyTorch keeps freed blocks for reuse: that is the memory other programs could not use. |
 | `run_lora_finetune` | `run_lora_finetune(config: TrainConfig, *, resume: str | None = None, dry_run: bool = False) -> Path` | Executes or validates a LoRA/QLoRA run and returns the adapter/output path. |
 | `_preview` | `_preview(item: dict[str, list[int]], tokenizer: Any, out_dir: Path) -> None` | Internal dry-run helper that writes full/supervised text preview. |
 
@@ -118,6 +125,8 @@ The memory budget in the source is the key fact:
 
 The checked-in `lora-qwen.yaml` reports about 9-11 GB VRAM on a 3090 and about 20-40 minutes per epoch on roughly 1,000 examples of about 1k tokens. Use `lora-small.yaml` first; it finishes in a few minutes and about 2 GB VRAM.
 
+**On small models, the logits set peak memory.** The loss is computed over the whole vocabulary at every position, and transformers upcasts the logits to fp32 to compute it. With Qwen's 151,936-token vocabulary, each position holds about 1.5 MB in the forward pass (bf16 logits, their fp32 copy, the log-softmax), and somewhat more in the backward pass. A batch is padded to its longest row, so 4 rows of 1,330 tokens need 8-10 GB for the logits alone, whatever the model's size. Halving `per_device_batch_size` halves it; doubling `gradient_accumulation_steps` keeps the effective batch.
+
 Most important hyperparameters:
 
 - `lora.r`: capacity. 8-16 for style/format, 32-64 for harder domain behavior. Higher ranks overfit faster on small datasets.
@@ -155,7 +164,7 @@ lora:
     - down_proj
 ```
 
-To support a new Trainer argument, add the field to `OptimConfig` or `TrainConfig`, then include it in the kwargs dictionary passed to `TrainingArguments`. Keep `_filter_kwargs()` in place so older Transformers versions ignore unsupported names.
+To support a new Trainer argument, add the field to `OptimConfig` or `TrainConfig`, then add it to `_training_arguments()`. Keep `_filter_kwargs()` in place so older Transformers versions ignore unsupported names, and run `pytest tests\test_finetune_lora.py`: it fails if any recipe setting would be dropped. When a release renames a field, either pass both spellings (as `eval_strategy` and `evaluation_strategy` are) and add the unused one to `VERSION_SPELLINGS` in that test, or pick the name by signature, as `_warmup_kwargs()` does.
 
 To add another PEFT method, add a new config section in `config.py`, branch in `run_lora_finetune()`, and keep the adapter save contract (`out_dir / "adapter"`) so `kumaru chat --adapter ...` continues to work.
 
@@ -169,6 +178,8 @@ To add another PEFT method, add a new config section in `config.py`, branch in `
 | Base model has no chat template | Non-instruct tokenizer/model | Use an `-Instruct` checkpoint or set a tokenizer chat template. |
 | Adapter not changing output | Wrong adapter path, too little data, or labels supervise wrong tokens | Load `runs\...\adapter`, inspect `example_preview.txt`, use 500+ examples. |
 | Eval loss rises while train loss falls | Overfitting small data or rank too high | Reduce epochs/rank, add data, watch held-out eval loss. |
+| A run made with v0.2.0 on transformers 5.2 or later logged the full learning rate from its first step | transformers 5.2 removed `warmup_ratio`, and `_filter_kwargs` dropped it: there was no warmup. | Fixed by `_warmup_kwargs`. Retrain before comparing such a run with a newer one. |
+| `warmup_ratio` error: `Input should be less than 1` | The ratio is a share of the steps, from 0 up to (not including) 1. | Use 0.02-0.05. |
 
 ## Related files
 
@@ -177,4 +188,6 @@ To add another PEFT method, add a new config section in `config.py`, branch in `
 - `src\kumaru\train\runner.py` — calls `run_lora_finetune` when `task: lora`.
 - `configs\train\lora-qwen.yaml` — production-like QLoRA starter.
 - `configs\train\lora-small.yaml` — fast smoke-test starter.
+- `configs\train\distill-gsm8k.yaml` — the distillation recipe; its data comes from `src\kumaru\train\distill.py` ([`distill.md`](distill.md)).
+- `tests\test_finetune_lora.py` — builds the real `TrainingArguments` from every recipe and checks no setting is dropped.
 - `src\kumaru\cli.py` — exposes `kumaru train <config> [--resume] [--dry-run]`.

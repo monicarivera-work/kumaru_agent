@@ -13,5 +13,10 @@ The from-scratch path exists for two reasons: it makes every mechanism visible
 scales to real pretraining if you ever have the compute. Same file, same loop,
 more GPUs.
 
+Distillation feeds the first path: ``kumaru distill`` (``distill.py``) turns a
+strong teacher's graded answers into training data, and
+``kumaru train configs/train/distill-gsm8k.yaml`` fine-tunes a small, fast
+student on it.
+
 See docs/TRAINING.md for the full walkthrough.
 """

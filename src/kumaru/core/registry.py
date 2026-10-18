@@ -189,6 +189,9 @@ BACKENDS.register_lazy(
 BENCHMARKS: Registry[Any] = Registry("benchmark", entry_point_group="kumaru.benchmarks")
 
 BENCHMARKS.register_lazy("gsm8k", "kumaru.eval.benchmarks.gsm8k:GSM8K")
+BENCHMARKS.register_lazy(
+    "gsm8k_train", "kumaru.eval.benchmarks.gsm8k:GSM8KTrain", aliases=("gsm8k-train",)
+)
 BENCHMARKS.register_lazy("mmlu_pro", "kumaru.eval.benchmarks.mmlu_pro:MMLUPro", aliases=("mmlu-pro",))
 BENCHMARKS.register_lazy("ifeval", "kumaru.eval.benchmarks.ifeval:IFEval")
 BENCHMARKS.register_lazy("humaneval", "kumaru.eval.benchmarks.humaneval:HumanEval")

@@ -107,6 +107,12 @@ class BackendConfig(_Base):
     attn_implementation: str | None = None  # e.g. "flash_attention_2" when available
     max_context_length: int = 8192
     trust_remote_code: bool = False
+    # transformers only. Greedy (temperature 0) requests that arrive together
+    # are decoded as one batch of up to this many; 1 turns batching off. A
+    # decoding step reads every weight once for the whole batch, so a batch of
+    # 32 runs nearly as fast as one request: what makes a full benchmark of a
+    # small model take minutes, not hours. Sampled requests never batch.
+    max_batch_size: int = Field(default=1, ge=1, le=512)
 
     # LoRA adapters produced by `kumaru train`. Loading an adapter is how you
     # deploy a fine-tune without touching the multi-gigabyte base weights.

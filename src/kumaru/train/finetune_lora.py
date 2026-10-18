@@ -86,6 +86,69 @@ def _filter_kwargs(cls: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k in accepted}
 
 
+def _warmup_kwargs(training_args_cls: Any, ratio: float) -> dict[str, float]:
+    """The warmup share, under the name this transformers release reads.
+
+    transformers 5.2 removed `warmup_ratio` (deprecated in 5.0, where
+    `warmup_steps` began reading a float below 1 as a share of the optimizer
+    steps). Passed under the old name, the ratio would be filtered out with only
+    a debug line, and the run would start at the full learning rate.
+    """
+    if "warmup_ratio" in inspect.signature(training_args_cls.__init__).parameters:
+        return {"warmup_ratio": ratio}
+    return {"warmup_steps": ratio}
+
+
+def _training_arguments(
+    training_args_cls: Any, config: TrainConfig, out_dir: Path, *, has_eval: bool, cuda: bool
+) -> dict[str, Any]:
+    """Everything the Trainer is told, before `_filter_kwargs` drops what this release lacks."""
+    return {
+        "output_dir": str(out_dir),
+        "run_name": config.run_name or out_dir.name,
+        "num_train_epochs": config.optim.epochs,
+        "per_device_train_batch_size": config.optim.per_device_batch_size,
+        "per_device_eval_batch_size": config.optim.per_device_batch_size,
+        "gradient_accumulation_steps": config.optim.gradient_accumulation_steps,
+        "learning_rate": config.optim.learning_rate,
+        "lr_scheduler_type": config.optim.lr_scheduler,
+        **_warmup_kwargs(training_args_cls, config.optim.warmup_ratio),
+        "weight_decay": config.optim.weight_decay,
+        "max_grad_norm": config.optim.max_grad_norm,
+        "gradient_checkpointing": config.optim.gradient_checkpointing,
+        "optim": config.optim.optimizer,
+        "bf16": config.optim.bf16 and cuda,
+        "fp16": config.optim.fp16,
+        "seed": config.optim.seed,
+        "logging_steps": config.logging_steps,
+        "eval_strategy": "steps" if has_eval else "no",
+        "evaluation_strategy": "steps" if has_eval else "no",
+        "eval_steps": config.eval_steps,
+        "save_strategy": "steps",
+        "save_steps": config.save_steps,
+        "save_total_limit": config.save_total_limit,
+        "load_best_model_at_end": has_eval,
+        "metric_for_best_model": "eval_loss" if has_eval else None,
+        "greater_is_better": False,
+        "report_to": config.report_to or "none",
+        "remove_unused_columns": False,  # our collator needs the raw fields
+        "dataloader_pin_memory": cuda,
+        "group_by_length": False,
+    }
+
+
+def _peak_gpu_memory_gb(torch: Any) -> float | None:
+    """The most GPU memory PyTorch reserved during the run, in GB; None without CUDA.
+
+    Reserved, not allocated: PyTorch keeps freed blocks for reuse, so the
+    reserved peak is what a game or OBS sharing the GPU could not have.
+    nvidia-smi shows a few hundred MB more, the CUDA context.
+    """
+    if not torch.cuda.is_available():
+        return None
+    return round(torch.cuda.max_memory_reserved() / 1e9, 2)
+
+
 def run_lora_finetune(config: TrainConfig, *, resume: str | None = None, dry_run: bool = False) -> Path:
     """Execute a LoRA/QLoRA fine-tuning run. Returns the adapter directory."""
     try:
@@ -218,43 +281,11 @@ def run_lora_finetune(config: TrainConfig, *, resume: str | None = None, dry_run
     )
 
     # -- trainer ------------------------------------------------------------
-    args = TrainingArguments(
-        **_filter_kwargs(
-            TrainingArguments,
-            {
-                "output_dir": str(out_dir),
-                "run_name": config.run_name or out_dir.name,
-                "num_train_epochs": config.optim.epochs,
-                "per_device_train_batch_size": config.optim.per_device_batch_size,
-                "per_device_eval_batch_size": config.optim.per_device_batch_size,
-                "gradient_accumulation_steps": config.optim.gradient_accumulation_steps,
-                "learning_rate": config.optim.learning_rate,
-                "lr_scheduler_type": config.optim.lr_scheduler,
-                "warmup_ratio": config.optim.warmup_ratio,
-                "weight_decay": config.optim.weight_decay,
-                "max_grad_norm": config.optim.max_grad_norm,
-                "gradient_checkpointing": config.optim.gradient_checkpointing,
-                "optim": config.optim.optimizer,
-                "bf16": config.optim.bf16 and torch.cuda.is_available(),
-                "fp16": config.optim.fp16,
-                "seed": config.optim.seed,
-                "logging_steps": config.logging_steps,
-                "eval_strategy": "steps" if eval_items else "no",
-                "evaluation_strategy": "steps" if eval_items else "no",
-                "eval_steps": config.eval_steps,
-                "save_strategy": "steps",
-                "save_steps": config.save_steps,
-                "save_total_limit": config.save_total_limit,
-                "load_best_model_at_end": bool(eval_items),
-                "metric_for_best_model": "eval_loss" if eval_items else None,
-                "greater_is_better": False,
-                "report_to": config.report_to or "none",
-                "remove_unused_columns": False,  # our collator needs the raw fields
-                "dataloader_pin_memory": torch.cuda.is_available(),
-                "group_by_length": False,
-            },
-        )
+    settings = _training_arguments(
+        TrainingArguments, config, out_dir,
+        has_eval=bool(eval_items), cuda=torch.cuda.is_available(),
     )
+    args = TrainingArguments(**_filter_kwargs(TrainingArguments, settings))
 
     trainer = Trainer(
         model=model,
@@ -268,6 +299,7 @@ def run_lora_finetune(config: TrainConfig, *, resume: str | None = None, dry_run
     logger.info("training started")
     trainer.train(resume_from_checkpoint=resume)
     elapsed = time.perf_counter() - started
+    peak_gb = _peak_gpu_memory_gb(torch)
 
     # -- save ---------------------------------------------------------------
     adapter_dir = out_dir / "adapter"
@@ -276,6 +308,7 @@ def run_lora_finetune(config: TrainConfig, *, resume: str | None = None, dry_run
 
     metrics = {
         "train_seconds": round(elapsed, 1),
+        "peak_gpu_memory_gb": peak_gb,
         "train_examples": len(train_items),
         "eval_examples": len(eval_items),
         "trainable_parameters": trainable,
@@ -285,6 +318,8 @@ def run_lora_finetune(config: TrainConfig, *, resume: str | None = None, dry_run
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
 
     logger.info("training finished in %.1f min", elapsed / 60)
+    if peak_gb is not None:
+        logger.info("peak GPU memory: %.1f GB reserved", peak_gb)
     logger.info("adapter saved to %s", adapter_dir)
     logger.info("try it:  kumaru chat --model %s --adapter %s", config.base_model, adapter_dir)
     return adapter_dir

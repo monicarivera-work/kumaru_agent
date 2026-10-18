@@ -79,6 +79,11 @@ class Benchmark(ABC):
     needs_code_execution: ClassVar[bool] = False
     # True if `grade` blocks (subprocesses); the runner moves it to a thread.
     blocking_grader: ClassVar[bool] = False
+    # True only for questions from a dataset's *training* split, whose graded
+    # answers may become training data (`kumaru distill`). Everything else is
+    # an evaluation set, whatever its dataset calls the split (IFEval's only
+    # split is named "train"): training on it inflates the score it measures.
+    training_data: ClassVar[bool] = False
 
     def preflight(self) -> None:  # noqa: B027 - optional hook; most benchmarks need no checks
         """Raise before any model loads if something this benchmark needs is missing."""

@@ -1,14 +1,14 @@
 # `src\kumaru\train\__init__.py`
 
-> Package-level orientation for Kumaru training: LoRA fine-tuning for practical adaptation and NanoLM pretraining for learning the mechanics.
+> Package-level orientation for Kumaru training: LoRA fine-tuning for practical adaptation, NanoLM pretraining for learning the mechanics, and distillation, which builds LoRA data from a teacher's verified answers.
 
-**Read this when:** you need to choose between `kumaru train configs/train/lora-qwen.yaml` and `kumaru train configs/train/pretrain-nano.yaml`, or you want the shortest map of the training package.
+**Read this when:** you need to choose between `kumaru train configs/train/lora-qwen.yaml` and `kumaru train configs/train/pretrain-nano.yaml`, want to know where distillation fits, or want the shortest map of the training package.
 
 ---
 
 ## What it does
 
-This file makes `kumaru.train` a Python package and documents the two supported training paths. It points operators toward LoRA/QLoRA for real adaptation work and toward from-scratch pretraining when they want to study or scale the training loop itself.
+This file makes `kumaru.train` a Python package and documents the two supported training paths. It points operators toward LoRA/QLoRA for real adaptation work and toward from-scratch pretraining when they want to study or scale the training loop itself. It also notes that distillation feeds the LoRA path.
 
 The module has no runtime code. Its value is the docstring: it states the operating default for Kumaru training.
 
@@ -23,12 +23,13 @@ LoRA fine-tuning changes style, format, and domain-specific behavior on existing
 1. **Use LoRA by default.** If you already have a capable instruct model, train an adapter.
 2. **Use NanoLM pretraining to understand the loop.** The nano path is educational and scalable, not a shortcut to a production assistant.
 3. **Both paths enter through `kumaru train`.** The YAML `task` field selects the implementation.
+4. **Distillation is a data source, not a third path.** `kumaru distill` turns a stronger teacher's graded answers into `train.jsonl`, and a `task: lora` recipe trains the student on it.
 
 ## Public API
 
 | Name | Signature | What it's for |
 |---|---|---|
-| Module docstring | n/a | Documents the two training paths and points to `docs/TRAINING.md`. |
+| Module docstring | n/a | Documents the two training paths, notes that distillation feeds the LoRA path, and points to `docs/TRAINING.md`. |
 
 This module intentionally exports no classes, functions, or constants.
 
@@ -63,6 +64,13 @@ For multiple GPUs, bypass the Typer command and launch the pretraining module wi
 torchrun --nproc_per_node=4 -m kumaru.train.pretrain_nano configs\train\pretrain-nano.yaml
 ```
 
+To distill, build the data first, then train the student with the LoRA path. The whole experiment, including the control arm and the evaluation, is in `docs\TRAINING.md` (Part 3).
+
+```powershell
+kumaru distill build runs\distill\teacher-qwen36 -o runs\distill\data-teacher
+kumaru train configs\train\distill-gsm8k.yaml
+```
+
 ## Tuning / operational notes
 
 | Path | Best use | 24 GB RTX 3090 expectation |
@@ -70,6 +78,8 @@ torchrun --nproc_per_node=4 -m kumaru.train.pretrain_nano configs\train\pretrain
 | `lora-small.yaml` | Pipeline smoke test on Qwen2.5-0.5B | A few minutes, about 2 GB VRAM. |
 | `lora-qwen.yaml` | Practical QLoRA on Qwen2.5-7B-Instruct | About 9-11 GB VRAM; about 20-40 minutes per epoch on 1,000 examples of about 1k tokens. |
 | `pretrain-nano.yaml` | Understanding and debugging from-scratch training | Under an hour for the ~101M-parameter model on sample-sized data; quality is not assistant-grade. |
+| `distill-gsm8k-0.5b.yaml` | Distillation pilot on Qwen2.5-0.5B | Estimated 20-30 minutes; peak about 12 GB, because a batch of 4 long teacher answers makes the loss over the vocabulary large. |
+| `distill-gsm8k.yaml` | Distillation into Qwen2.5-1.5B-Instruct | Estimated about an hour; plan for about 15 GB at peak. The pilot's `metrics.json` gives measured numbers. |
 
 The most important knobs live below this package:
 
@@ -116,4 +126,5 @@ Keep the docstring's decision rule current whenever a new training task is added
 - `src\kumaru\train\config.py` — validates the YAML files used by both paths.
 - `src\kumaru\train\finetune_lora.py` — implements LoRA/QLoRA supervised fine-tuning.
 - `src\kumaru\train\pretrain_nano.py` — implements the visible from-scratch pretraining loop.
+- `src\kumaru\train\distill.py` — builds distillation data for the LoRA path (`docs\howto\src\kumaru\train\distill.md`).
 - `docs\TRAINING.md` — broader operator walkthrough referenced by the module docstring.

@@ -1,0 +1,60 @@
+# Distillation pilot: the teacher-arm recipe of distill-gsm8k.yaml on the 0.5B
+# student. It needs about a third of the compute, so it is the cheap way to
+# check the whole pipeline, and to see whether distillation helps at all,
+# before spending the 1.5B run. It saves time, not memory: the loss over the
+# 151,936-token vocabulary, the same in both models, sets the peak, so expect
+# only 2-3 GB less than the 1.5B run.
+#
+#   kumaru train configs/train/distill-gsm8k-0.5b.yaml --dry-run
+#   kumaru train configs/train/distill-gsm8k-0.5b.yaml
+#   kumaru bench run gsm8k -c student -m Qwen/Qwen2.5-0.5B-Instruct --full --max-tokens 1024 --label student0.5b-base -o runs/distill/eval-0.5b-base
+#   kumaru bench run gsm8k -c student -m Qwen/Qwen2.5-0.5B-Instruct --full --max-tokens 1024 --adapter runs/distill/qwen0.5b-teacher/adapter --label student0.5b-teacher -o runs/distill/eval-0.5b-teacher
+#   kumaru bench compare runs/distill/eval-0.5b-base runs/distill/eval-0.5b-teacher
+#
+# Identical to distill-gsm8k.yaml apart from base_model, output_dir and
+# run_name (a test enforces it), so what the pilot shows carries over. On the
+# smaller model, 8 x 4 instead of 4 x 8 (same effective batch) would run a
+# little faster; it is kept equal so the pilot is exactly the same recipe.
+
+task: lora
+base_model: Qwen/Qwen2.5-0.5B-Instruct
+output_dir: runs/distill/qwen0.5b-teacher
+run_name: distill-gsm8k-teacher-0.5b
+
+# 0.5B parameters in bf16 are ~1 GB: no need to quantize the frozen base.
+load_in_4bit: false
+
+data:
+  train_file: runs/distill/data-teacher/train.jsonl
+  eval_file: runs/distill/data-teacher/val.jsonl   # held-out questions, not just held-out rows
+  max_seq_length: 1536     # prompt + chat template + an answer of up to 1,024 tokens
+  train_on_completions_only: true
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  bias: none
+
+optim:
+  epochs: 2                # each question is seen twice; more mostly memorizes
+  per_device_batch_size: 4
+  gradient_accumulation_steps: 8    # effective batch = 4 x 8 = 32
+  learning_rate: 1.0e-4    # the low end for LoRA: the student must keep what it knows
+  lr_scheduler: cosine
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  gradient_checkpointing: true
+  optimizer: adamw_torch
+  bf16: true
+  seed: 42
+
+logging_steps: 10
+eval_steps: 50
+# Equal to eval_steps: the adapter kept at the end is the checkpoint with the
+# lowest eval loss, and the trainer can only return to evaluations it saved.
+save_steps: 50
+save_total_limit: 3
+report_to: []              # ["tensorboard"] for curves: tensorboard --logdir runs/

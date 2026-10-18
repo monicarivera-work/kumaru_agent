@@ -280,15 +280,24 @@ def default_label(model_id: str, profile: str | None, params: GenerationParams) 
     return safe_name(f"{base}-{mode}")
 
 
-def default_concurrency(cfg: KumaruConfig, backend: Any, per_request_tokens: int) -> int:
+def default_concurrency(
+    cfg: KumaruConfig,
+    backend: Any,
+    per_request_tokens: int,
+    params: GenerationParams | None = None,
+) -> int:
     """Questions in flight when `--concurrency` is not given.
 
-    Only llama-server batches concurrent requests (its `parallel` slots);
-    every other backend serves one at a time, so sending more only queues
+    llama-server batches concurrent requests (its `parallel` slots), and the
+    transformers backend batches concurrent greedy ones (`max_batch_size`);
+    every other case is served one at a time, so sending more only queues
     them — and a queued request can hit the read timeout. With a unified KV
     cache all slots share one context window, so the number in flight is also
     capped by how many worst-case requests fit in it at once.
     """
+    if backend.name == "transformers":
+        greedy = params is not None and params.temperature == 0
+        return max(1, cfg.backend.max_batch_size) if greedy else 1
     if backend.name != "llamacpp_server":
         return 1
     options = cfg.backend.llama_server
@@ -753,7 +762,7 @@ class BenchRunner:
             (backend.count_tokens(q.messages) + q.params.max_tokens for q in todo), default=0
         )
         concurrency = self.settings.concurrency or default_concurrency(
-            self.cfg, backend, worst_case + PROMPT_MARGIN_TOKENS
+            self.cfg, backend, worst_case + PROMPT_MARGIN_TOKENS, params=params
         )
 
         recorded_params = params.model_dump(mode="json", exclude={"seed"})
