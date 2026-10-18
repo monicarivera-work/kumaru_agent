@@ -1,0 +1,38 @@
+# Profile: the distillation *student*, Qwen2.5-1.5B-Instruct, as a benchmark
+# taker. Greedy answers are decoded 32 at a time (backend.max_batch_size), so
+# all 1,319 GSM8K questions take minutes instead of hours.
+#
+# The same profile scores the model before and after distillation; only
+# --adapter differs. Always pass --max-tokens: without it a benchmark allows
+# 8,192 tokens, and one looping answer holds its whole batch that long.
+#
+#   kumaru bench run gsm8k -c student --full --max-tokens 1024 --label student-base -o runs/distill/eval-base
+#   kumaru bench run gsm8k -c student --full --max-tokens 1024 --adapter runs/distill/qwen1.5b-teacher/adapter --label student-teacher -o runs/distill/eval-teacher
+#   kumaru bench compare runs/distill/eval-base runs/distill/eval-teacher
+#
+# --label names each run in the compare table; without it every run of this
+# profile is called student-default, adapter or not.
+#
+# VRAM, estimated: weights 1.5B x 2 bytes ~3.1 GB; KV cache 28 layers x 2 KV
+# heads x 128 dim x 2 (K and V) x 2 bytes = 28 KB per token, x 32 answers x
+# ~1.2k tokens ~1.1 GB. About 5 GB in all, so it fits beside other work.
+#
+# Reproducibility: in bfloat16 a batched answer can differ from a one-at-a-time
+# one where two tokens are near-tied (accuracy was unchanged in our tests).
+# float32 makes that rare (16 of 16 answers matched), at twice the memory:
+#   $env:KUMARU_BACKEND__DTYPE = "float32"
+# Only max_batch_size: 1 matches one-at-a-time decoding exactly.
+
+backend:
+  name: transformers
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  device: cuda
+  dtype: bfloat16
+  max_context_length: 4096
+  max_batch_size: 32
+
+generation:
+  max_tokens: 1024
+  temperature: 0.0          # greedy: deterministic, and the only mode that batches
+  top_p: 1.0
+  repetition_penalty: 1.0   # none: score the model as trained (a penalty would also discourage copying the question's numbers)

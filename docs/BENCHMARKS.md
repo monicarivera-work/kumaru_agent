@@ -63,10 +63,12 @@ The first run of a public benchmark downloads its dataset (cached afterwards). `
 What each is good for:
 
 - **MMLU-Pro** separates models best: it is hard (10 options, many need calculation), broad, and far from saturated. Weight it most.
-- **GSM8K** is nearly saturated by modern models (both score in the 90s). It is a smoke test: a big drop means something broke.
+- **GSM8K** is nearly saturated by modern models (both score in the 90s). It is a smoke test: a big drop means something broke. Small models still have room: the Qwen2.5 report gives about 73% for Qwen2.5-1.5B, so [distillation](TRAINING.md#part-3--distillation) is measured on it.
 - **IFEval** is the closest proxy for "does what I asked". It reports four scores: *prompt-level* (every instruction in the prompt followed) and *instruction-level* (share of individual instructions followed), each *strict* (checked literally) or *loose* (forgiving markdown asterisks or a "Sure, here it is" first line). The headline is prompt-level strict, the strictest and the one model cards usually quote.
 - **HumanEval** runs the model's code against unit tests, so it measures working code, not plausible-looking code. It is opt-in (`--allow-code-exec`, [§7](#7-caveats-read-before-quoting-these-numbers)).
 - **golden** is the only benchmark that cannot have leaked into a model's training data, and the only one that measures what *you* care about.
+
+`kumaru bench list` also shows **`gsm8k_train`**, GSM8K's 7,473 training problems. It is not a score: a teacher model answers it to make distillation data, and `kumaru distill` accepts only runs of training splits like it ([TRAINING.md Part 3](TRAINING.md#part-3--distillation)).
 
 ## 3. How the comparison was run
 

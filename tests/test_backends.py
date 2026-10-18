@@ -2,10 +2,12 @@
 
 import asyncio
 import contextlib
+import functools
 import sys
 import threading
 import time
 import types
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -16,7 +18,7 @@ from kumaru.backends.base import Backend, ReasoningSplitter, StopSequenceTracker
 from kumaru.backends.echo import EchoBackend
 from kumaru.backends.llamacpp_backend import LlamaCppBackend
 from kumaru.backends.openai_compat import OpenAICompatBackend, normalize_finish_reason
-from kumaru.backends.transformers_backend import TransformersBackend
+from kumaru.backends.transformers_backend import TransformersBackend, _row_repetition_penalty
 from kumaru.core.config import BackendConfig
 from kumaru.core.errors import BackendError, ConfigError, DependencyMissingError, install_command
 from kumaru.core.registry import BACKENDS
@@ -427,11 +429,15 @@ def tiny_gpt2(steps: list[int], finished: threading.Event) -> object:
     model = transformers.GPT2LMHeadModel(config).eval()
     forward, generate = model.forward, model.generate
 
+    # `wraps` keeps forward's signature visible: transformers reads it to decide
+    # whether to derive position ids from the attention mask, which padding needs.
+    @functools.wraps(forward)
     def counting_forward(*args: object, **kwargs: object) -> object:
         steps.append(1)
         time.sleep(0.002)
         return forward(*args, **kwargs)
 
+    @functools.wraps(generate)
     def watched_generate(*args: object, **kwargs: object) -> object:
         try:
             return generate(*args, **kwargs)
@@ -488,6 +494,345 @@ async def test_transformers_counts_tokens_not_pieces_of_text() -> None:
     assert [chunk.delta for chunk in chunks if chunk.delta] == ["w" * 20]
     assert chunks[-1].usage is not None and chunks[-1].usage.completion_tokens == 20
     assert chunks[-1].finish_reason == "length"  # the budget ran out mid-answer
+
+
+# -- transformers: greedy micro-batching ----------------------------------------------
+
+THINK, END_THINK, EOS, EOS_2 = 90, 91, 50, 51
+
+
+def needs_transformers() -> None:
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+
+class ScriptTokenizer:
+    """Reads each number in a text as a token id (any other word is id 1).
+
+    It decodes id n as "n ", and 90/91 as <think>/</think>. So a user message
+    such as "5 7 50" is its own reply script: see ScriptedModel.
+    """
+
+    pad_token_id, chat_template = 0, None
+
+    def __init__(self, eos: int | None = EOS) -> None:
+        self.eos_token_id = eos
+
+    def __call__(self, text: str, return_tensors: str | None = None, **kwargs: object) -> dict:
+        ids = [int(word) if word.isdigit() else 1 for word in text.split()]
+        if return_tensors is None:
+            return {"input_ids": ids}
+        import torch
+
+        return {
+            "input_ids": torch.tensor([ids]),
+            "attention_mask": torch.ones(1, len(ids), dtype=torch.long),
+        }
+
+    def decode(self, ids: list[int], skip_special_tokens: bool = False, **kwargs: object) -> str:
+        skipped = {EOS, EOS_2, self.pad_token_id} if skip_special_tokens else set()
+        names = {THINK: "<think>", END_THINK: "</think>"}
+        return "".join(names.get(i, f"{i} ") for i in ids if i not in skipped)
+
+
+class ScriptedModel:
+    """Replies with the numbers in each prompt, finishing rows as `generate` does.
+
+    A row's prompt is what its attention mask keeps, so left padding is
+    honoured. A row ends at an end-of-sequence id or when a stopping criterion
+    says so, and is padded after that; past its script it repeats RAMBLE, like
+    a model that will not stop. With a streamer, tokens reach it one by one.
+    """
+
+    RAMBLE = 33
+    device = "cpu"
+
+    def __init__(self, configured_eos: object = (EOS, EOS_2), fits: int = 64) -> None:
+        self.generation_config = types.SimpleNamespace(eos_token_id=configured_eos)
+        self.fits = fits  # rows per call before it "runs out of GPU memory"
+        self.calls: list[dict] = []
+
+    def generate(
+        self,
+        input_ids: object,
+        attention_mask: object,
+        max_new_tokens: int,
+        pad_token_id: int = 0,
+        eos_token_id: object = None,
+        stopping_criteria: object = (),
+        streamer: object = None,
+        **kwargs: object,
+    ) -> object:
+        import torch
+
+        self.calls.append(
+            {"rows": len(input_ids), "streamer": streamer is not None, "eos": eos_token_id, **kwargs}
+        )
+        if len(input_ids) > self.fits:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory.")
+        ends = set(eos_token_id) if isinstance(eos_token_id, list) else {eos_token_id}
+        scripts = [
+            row[mask.bool()].tolist()[1:-1]
+            for row, mask in zip(input_ids, attention_mask, strict=True)
+        ]
+        if streamer is not None:
+            streamer.put(input_ids)
+        done = [False] * len(scripts)
+        for step in range(max_new_tokens):
+            column = [
+                pad_token_id if finished else script[step] if step < len(script) else self.RAMBLE
+                for finished, script in zip(done, scripts, strict=True)
+            ]
+            input_ids = torch.cat([input_ids, torch.tensor([column]).T], dim=1)
+            if streamer is not None:
+                streamer.put(torch.tensor(column))
+            done = [
+                finished or token in ends for finished, token in zip(done, column, strict=True)
+            ]
+            for criterion in stopping_criteria:
+                stops = criterion(input_ids, None).tolist()
+                done = [finished or stop for finished, stop in zip(done, stops, strict=True)]
+            if all(done):
+                break
+        if streamer is not None:
+            streamer.end()
+        return input_ids
+
+
+def batching_backend(
+    max_batch_size: int, model: object = None, tokenizer: object = None
+) -> TransformersBackend:
+    backend = TransformersBackend(
+        BackendConfig(name="transformers", model="scripted", max_batch_size=max_batch_size)
+    )
+    backend.model = ScriptedModel() if model is None else model
+    backend.tokenizer = ScriptTokenizer() if tokenizer is None else tokenizer
+    backend._loaded = True
+    return backend
+
+
+def greedy(max_tokens: int, **kwargs: object) -> GenerationParams:
+    return GenerationParams(max_tokens=max_tokens, temperature=0.0, **kwargs)
+
+
+async def wait_until(condition: Callable[[], bool], timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "timed out waiting"
+        await asyncio.sleep(0.005)
+
+
+# name: (reply script, max_tokens, stop) -> (content, reasoning, finish_reason, completion_tokens)
+REPLIES = {
+    "runs to its budget": (("5 7 9", 6, []), ("5 7 9 33 33 33 ", None, "length", 6)),
+    "ends at end-of-sequence": (("5 50 7", 6, []), ("5 ", None, "stop", 2)),
+    "ends at the checkpoint's other end token": (("5 51 7", 6, []), ("5 ", None, "stop", 2)),
+    "ends on its last allowed token": (("5 6 50", 3, []), ("5 6 ", None, "stop", 3)),
+    "is cut by a stop sequence": (("5 7 9", 3, ["7 "]), ("5 ", None, "stop", 3)),
+    "thinks first": (("90 5 91 6 50", 9, []), ("6 ", "5 ", "stop", 5)),
+}
+
+
+@pytest.mark.asyncio
+async def test_greedy_requests_made_together_share_one_batch_and_end_like_streamed_ones() -> None:
+    needs_transformers()
+    batched, streamed = batching_backend(8), batching_backend(1)
+
+    async def ask(backend: TransformersBackend, script: str, max_tokens: int, stop: list[str]):
+        return await backend.generate([Message.user(script)], greedy(max_tokens, stop=stop))
+
+    together = await asyncio.gather(*(ask(batched, *request) for request, _ in REPLIES.values()))
+
+    assert [call["rows"] for call in batched.model.calls] == [len(REPLIES)]
+    for (name, (request, expected)), result in zip(REPLIES.items(), together, strict=True):
+        got = result.message.content, result.message.reasoning, result.finish_reason
+        assert (*got, result.usage.completion_tokens) == expected, name
+        assert result.usage.prompt_tokens == len(request[0].split()) + 2  # + "USER:", "ASSISTANT:"
+        alone = await ask(streamed, *request)
+        assert (alone.message.content, alone.message.reasoning, alone.finish_reason) == got, name
+        if request[2]:  # a stop sequence ends a stream early, so it may count fewer tokens
+            assert alone.usage.completion_tokens <= result.usage.completion_tokens
+        else:
+            assert alone.usage == result.usage, name
+    # Both paths end a reply at every end token the checkpoint declares.
+    assert all(
+        call["eos"] == [EOS, EOS_2] for call in batched.model.calls + streamed.model.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_batch_holds_at_most_max_batch_size_requests() -> None:
+    needs_transformers()
+    backend = batching_backend(2)
+
+    replies = await asyncio.gather(
+        *(backend.generate([Message.user(f"{n} 50")], greedy(4)) for n in range(2, 7))
+    )
+
+    assert [reply.message.content for reply in replies] == ["2 ", "3 ", "4 ", "5 ", "6 "]
+    assert [call["rows"] for call in backend.model.calls] == [2, 2, 1]
+    assert backend.info().extra["max_batch_size"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_caller_that_gives_up_while_queued_is_never_decoded() -> None:
+    needs_transformers()
+    backend = batching_backend(2)
+    callers = [
+        asyncio.create_task(backend.generate([Message.user(f"{n} 50")], greedy(4)))
+        for n in (2, 3, 4)
+    ]
+    await asyncio.sleep(0)  # all three are queued; the first two make a batch
+    callers[2].cancel()
+
+    outcomes = await asyncio.gather(*callers, return_exceptions=True)
+    await wait_until(lambda: backend._drainer is not None and backend._drainer.done())
+
+    assert [reply.message.content for reply in outcomes[:2]] == ["2 ", "3 "]
+    assert isinstance(outcomes[2], asyncio.CancelledError)
+    assert [call["rows"] for call in backend.model.calls] == [2]
+
+
+@pytest.mark.asyncio
+async def test_sampled_requests_are_never_batched() -> None:
+    needs_transformers()
+    backend = batching_backend(8)
+    sampled = GenerationParams(max_tokens=4, temperature=0.7)
+
+    await asyncio.gather(*(backend.generate([Message.user("5 50")], sampled) for _ in range(3)))
+
+    assert [(call["rows"], call["streamer"]) for call in backend.model.calls] == [(1, True)] * 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_batch_size", [1, 8])
+async def test_greedy_decoding_applies_the_requested_repetition_penalty(max_batch_size: int) -> None:
+    needs_transformers()
+    backend = batching_backend(max_batch_size)
+
+    await backend.generate([Message.user("5 50")], greedy(4, repetition_penalty=1.3))
+
+    [call] = backend.model.calls
+    if max_batch_size == 1:
+        # Passed even though greedy: otherwise the checkpoint's own default applies.
+        assert call["repetition_penalty"] == 1.3
+    else:
+        # Applied row by row instead, so padding is never penalised.
+        assert call["repetition_penalty"] == 1.0
+        assert [type(p).__name__ for p in call["logits_processor"]] == ["RowRepetitionPenalty"]
+
+
+@pytest.mark.parametrize(
+    ("penalties", "dtype"),
+    [([1.3] * 3, "float32"), ([1.3, 0.8, 1.5], "float32"), ([1.3] * 3, "bfloat16")],
+)
+def test_row_repetition_penalty_is_the_built_in_penalty_on_each_unpadded_row(
+    penalties: list[float], dtype: str
+) -> None:
+    needs_transformers()
+    import torch
+    from transformers import RepetitionPenaltyLogitsProcessor
+
+    # Left-padded prompts (pad id 0), then two generated tokens each. Row 2
+    # catches padding being penalised; row 3 generates 0 itself, a real token
+    # that must still be penalised.
+    input_ids = torch.tensor([[7, 3, 9, 4, 3], [0, 0, 5, 6, 5], [0, 0, 8, 0, 2]])
+    padding = torch.tensor([[False, False, False], [True, True, False], [True, True, False]])
+    unpadded = [[7, 3, 9, 4, 3], [5, 6, 5], [8, 0, 2]]
+    scores = torch.randn(3, 12, generator=torch.Generator().manual_seed(0)).to(getattr(torch, dtype))
+
+    processed = _row_repetition_penalty(penalties, padding, [7, 5, 8])(input_ids, scores)
+
+    for row, (ids, penalty) in enumerate(zip(unpadded, penalties, strict=True)):
+        alone = RepetitionPenaltyLogitsProcessor(penalty)(torch.tensor([ids]), scores[row : row + 1])
+        assert torch.equal(processed[row : row + 1], alone), row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repetition_penalty", [1.0, 1.3])
+async def test_a_batched_reply_is_the_reply_the_model_gives_alone(repetition_penalty: float) -> None:
+    needs_transformers()
+    steps: list[int] = []
+    model = tiny_gpt2(steps, threading.Event())
+    batched = batching_backend(8, model, ScriptTokenizer(eos=None))
+    alone = batching_backend(1, model, ScriptTokenizer(eos=None))
+    # Different lengths, so the shorter prompts are padded on the left.
+    prompts = ["3", "14 15 92", "65 35 89 79 32 38 46"]
+    params = greedy(12, repetition_penalty=repetition_penalty)
+
+    together = await asyncio.gather(*(batched.generate([Message.user(p)], params) for p in prompts))
+
+    assert len(steps) == 12  # one forward pass per token, for all three prompts at once
+    for prompt, result in zip(prompts, together, strict=True):
+        single = await alone.generate([Message.user(prompt)], params)
+        assert (result.message.content, result.usage) == (single.message.content, single.usage)
+
+
+@pytest.mark.asyncio
+async def test_a_batch_stops_once_every_caller_has_gone() -> None:
+    needs_transformers()
+    steps: list[int] = []
+    finished = threading.Event()
+    backend = batching_backend(4, tiny_gpt2(steps, finished), ScriptTokenizer(eos=None))
+    callers = [
+        asyncio.create_task(backend.generate([Message.user(p)], greedy(2000))) for p in ("1 2", "3")
+    ]
+    await wait_until(lambda: len(steps) >= 3)
+    assert [len(batch.requests) for batch in backend._running] == [2]
+
+    callers[0].cancel()
+    await asyncio.sleep(0.05)
+    assert not finished.is_set()  # the other caller still wants its reply
+    callers[1].cancel()
+
+    assert await asyncio.to_thread(finished.wait, 5)
+    assert len(steps) < 200  # not the 2000 it would run to unattended
+    await asyncio.gather(*callers, return_exceptions=True)
+    await backend.aclose()
+
+
+@pytest.mark.asyncio
+async def test_closing_the_backend_fails_waiting_callers_and_stops_their_batch() -> None:
+    needs_transformers()
+    steps: list[int] = []
+    finished = threading.Event()
+    backend = batching_backend(2, tiny_gpt2(steps, finished), ScriptTokenizer(eos=None))
+    callers = [
+        asyncio.create_task(backend.generate([Message.user(p)], greedy(2000))) for p in "123"
+    ]
+    await wait_until(lambda: len(steps) >= 3)
+    assert len(backend._queue) == 1  # two being decoded, one waiting for room
+
+    await backend.aclose()
+
+    assert finished.is_set()  # decoding stopped before the model was released
+    assert len(steps) < 200 and backend.model is None
+    outcomes = await asyncio.gather(*callers, return_exceptions=True)
+    assert all(isinstance(o, BackendError) and "closed" in str(o) for o in outcomes), outcomes
+
+
+@pytest.mark.asyncio
+async def test_a_batch_too_big_for_the_gpu_is_retried_in_halves() -> None:
+    needs_transformers()
+    backend = batching_backend(4, ScriptedModel(fits=1))
+
+    replies = await asyncio.gather(
+        *(backend.generate([Message.user(f"{n} 50")], greedy(4)) for n in (2, 3))
+    )
+
+    assert [reply.message.content for reply in replies] == ["2 ", "3 "]
+    assert [call["rows"] for call in backend.model.calls] == [2, 1, 1]
+    assert backend.info().extra["max_batch_size"] == 1  # remembered until the next load
+
+
+@pytest.mark.asyncio
+async def test_a_single_request_too_big_for_the_gpu_fails_with_advice() -> None:
+    needs_transformers()
+    backend = batching_backend(4, ScriptedModel(fits=0))
+
+    with pytest.raises(BackendError, match="Out of GPU memory") as caught:
+        await backend.generate([Message.user("5 50")], greedy(4))
+    assert "--max-tokens" in (caught.value.hint or "")
 
 
 # -- ReasoningSplitter --------------------------------------------------------------

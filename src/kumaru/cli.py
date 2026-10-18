@@ -1,6 +1,6 @@
 """Command-line entry point: `kumaru <command>`.
 
-One binary, seven commands::
+One binary, eight commands::
 
     kumaru serve     # API + web UI
     kumaru chat      # terminal REPL, no server needed
@@ -9,6 +9,7 @@ One binary, seven commands::
     kumaru train     # fine-tune or pretrain
     kumaru eval      # quick check: speed and a few known answers
     kumaru bench     # public benchmarks with confidence intervals; compare runs
+    kumaru distill   # turn a teacher model's graded answers into training data
 
 Two rules keep the CLI fast and debuggable:
 
@@ -410,6 +411,79 @@ def bench_report(
     from kumaru.eval.benchmarks.runner import load_summaries, render_summaries
 
     render_summaries(console, load_summaries(Path(run)), details=True)
+
+
+# ---------------------------------------------------------------------------
+# kumaru distill ...
+# ---------------------------------------------------------------------------
+
+distill_app = typer.Typer(
+    help="Build training data from a teacher model's graded answers (knowledge distillation).",
+    no_args_is_help=True,
+)
+app.add_typer(distill_app, name="distill")
+
+DISTILL_OUT_HELP = "New folder for train.jsonl, val.jsonl and manifest.json."
+VAL_FRACTION_HELP = "Share of questions held out for validation loss."
+SPLIT_SEED_HELP = "Picks the held-out questions; keep it equal across datasets you compare."
+ARITHMETIC_HELP = 'Drop answers with a wrong step such as "3 x 4 = 13".'
+EVAL_SET_HELP = "A benchmark the student will be scored on (repeat for several); its questions never become training data."
+DECONTAMINATE_HELP = "Accept only training-split sources (e.g. gsm8k_train) and drop near-copies of evaluation questions. Turn off only for smoke tests."
+FORCE_HELP = "Replace a dataset already in --out."
+
+
+@distill_app.command("build")
+def distill_build(
+    runs: list[str] = typer.Argument(..., help="Teacher runs from `kumaru bench run` (a run folder or one benchmark's folder)."),
+    out: str = typer.Option(..., "--out", "-o", help=DISTILL_OUT_HELP),
+    max_tokens: int = typer.Option(1024, "--max-tokens", min=1, help="Drop answers longer than this many tokens; keep it below the training max_seq_length."),
+    per_question: int = typer.Option(4, "--per-question", min=1, help="Distinct answers kept per question."),
+    val_fraction: float = typer.Option(0.05, "--val-fraction", min=0.0, max=0.5, help=VAL_FRACTION_HELP),
+    seed: int = typer.Option(42, "--seed", help=SPLIT_SEED_HELP),
+    check_arithmetic: bool = typer.Option(True, "--check-arithmetic/--no-check-arithmetic", help=ARITHMETIC_HELP),
+    eval_set: list[str] = typer.Option(["gsm8k"], "--eval-set", help=EVAL_SET_HELP),
+    decontaminate: bool = typer.Option(True, "--decontaminate/--no-decontaminate", help=DECONTAMINATE_HELP),
+    allow_thinking: bool = typer.Option(False, "--allow-thinking", help="Accept thinking runs; the student sees the answers, not the reasoning."),
+    force: bool = typer.Option(False, "--force", help=FORCE_HELP),
+) -> None:
+    """Teacher answers -> SFT data, keeping only correct, complete, clean answers."""
+    from kumaru.train.distill import DistillSettings, build_from_runs, render
+
+    settings = DistillSettings(
+        max_tokens=max_tokens,
+        per_question=per_question,
+        val_fraction=val_fraction,
+        seed=seed,
+        check_arithmetic=check_arithmetic,
+        eval_sets=eval_set,
+        decontaminate=decontaminate,
+        allow_thinking=allow_thinking,
+    )
+    render(console, build_from_runs(runs, out, settings, force=force), Path(out))
+
+
+@distill_app.command("gold")
+def distill_gold(
+    out: str = typer.Option(..., "--out", "-o", help=DISTILL_OUT_HELP),
+    match: str = typer.Option(None, "--match", help="A teacher dataset folder: keep only its questions, each on the same side of the split (then --val-fraction and --seed are unused)."),
+    val_fraction: float = typer.Option(0.05, "--val-fraction", min=0.0, max=0.5, help=VAL_FRACTION_HELP),
+    seed: int = typer.Option(42, "--seed", help=SPLIT_SEED_HELP),
+    check_arithmetic: bool = typer.Option(True, "--check-arithmetic/--no-check-arithmetic", help=ARITHMETIC_HELP),
+    eval_set: list[str] = typer.Option(["gsm8k"], "--eval-set", help=EVAL_SET_HELP),
+    decontaminate: bool = typer.Option(True, "--decontaminate/--no-decontaminate", help=DECONTAMINATE_HELP),
+    force: bool = typer.Option(False, "--force", help=FORCE_HELP),
+) -> None:
+    """The control arm: GSM8K's human-written solutions, in the teacher's format."""
+    from kumaru.train.distill import DistillSettings, build_gold, render
+
+    settings = DistillSettings(
+        val_fraction=val_fraction,
+        seed=seed,
+        check_arithmetic=check_arithmetic,
+        eval_sets=eval_set,
+        decontaminate=decontaminate,
+    )
+    render(console, build_gold(out, settings, match=match, force=force), Path(out))
 
 
 def main() -> None:

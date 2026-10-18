@@ -410,6 +410,17 @@ Chinchilla-optimal training is roughly **20 tokens per parameter**:
 
 The 70B row is why nobody pretrains a frontier model on their own hardware, and why the fine-tuning path is the one that matters for you. Kumaru's from-scratch trainer exists to make the mechanisms legible and to be *correct* at any scale — not to pretend the last row is reachable.
 
+### Distillation: a big model's compute, a small model's speed
+
+A large teacher answers questions slowly, a grader keeps its correct answers, and a small student trained on them answers fast ([TRAINING.md Part 3](TRAINING.md#part-3--distillation)). The other axes then feed the student:
+
+- **A stronger teacher** (§1) raises what the data can teach.
+- **More answers per question.** Rerun the teacher with another `--seed` and pass every run to `kumaru distill build`, which keeps up to 4 distinct correct answers per question. Yuan et al. (2023) found that distinct correct solutions help, and help weaker students most.
+- **Serving throughput** (§2) sets how fast the data is written: an estimated 16 hours for GSM8K's 7,473 training questions on this machine, beside a game.
+- **Any task with a grader and a training split** can be a source, not just GSM8K ([how](howto/src/kumaru/train/distill.md#how-to-extend-it)).
+
+The limit is the student. Li et al. (2025) found that students of 3B parameters or fewer often learn less from a strong teacher's long reasoning than from short reasoning, so a stronger teacher alone does not guarantee a better small student. Measure each step against a control arm, as Part 3 does.
+
 ---
 
 ## 6. Data scale

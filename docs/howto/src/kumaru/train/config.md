@@ -69,7 +69,7 @@ A training config is the experiment record. Six months after an adapter is saved
 | `optim.gradient_accumulation_steps` | int | 16 | Micro-batches per optimizer step. | Increase effective batch without much memory cost. |
 | `optim.learning_rate` | float | `2e-4` | Peak LR. | `2e-4` LoRA; `3e-4` NanoLM starter. |
 | `optim.lr_scheduler` | `cosine`, `linear`, `constant` | `cosine` | LR schedule. | Use cosine unless comparing schedules. |
-| `optim.warmup_ratio` | float | 0.03 | Warmup fraction. | 0.02-0.05 in checked-in configs. |
+| `optim.warmup_ratio` | float, 0 to under 1 | 0.03 | Share of the optimizer steps over which the LR ramps up from 0. | 0.02-0.05 in checked-in configs. 1 or more is refused: transformers 5 reads a warmup of 1 or more as a count of steps. |
 | `optim.weight_decay` | float | 0.0 | AdamW decay. | 0 for LoRA; 0.1 for NanoLM matrices. |
 | `optim.max_grad_norm` | float | 1.0 | Global gradient clipping. | Keep 1.0 unless diagnosing instability. |
 | `optim.gradient_checkpointing` | bool | true | Recompute activations to save memory. | Enable on OOM; about 30% slower, about 40% less activation memory. |

@@ -22,7 +22,9 @@ decision in this file:
 2. **Batching is nearly free.** Weights are read once per *step*, not per
    sequence, so serving 8 concurrent users costs far less than 8x. This is why
    vLLM's continuous batching is the single biggest throughput upgrade available
-   (see `openai_compat.py` and docs/SCALABILITY.md).
+   (see `openai_compat.py` and docs/SCALABILITY.md). This backend batches only
+   greedy requests made at the same time (`backend.max_batch_size`), which is
+   exactly what a benchmark sends: see `generate()`.
 3. **Prompt processing is different.** Prefill is compute bound and highly
    parallel, which is why a 4,000-token prompt is processed far faster than
    4,000 tokens are generated.
@@ -30,10 +32,16 @@ decision in this file:
 
 from __future__ import annotations
 
+import asyncio
+import collections
 import contextlib
+import functools
 import importlib.util
 import os
+import threading
+import time
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from kumaru.backends.base import (
@@ -46,9 +54,95 @@ from kumaru.core.config import BackendConfig
 from kumaru.core.errors import BackendError, DependencyMissingError
 from kumaru.core.logging import get_logger
 from kumaru.core.registry import BACKENDS
-from kumaru.core.types import BackendInfo, GenerationParams, Message, StreamChunk, Usage
+from kumaru.core.types import (
+    BackendInfo,
+    ChatResult,
+    GenerationParams,
+    Message,
+    StreamChunk,
+    Usage,
+)
 
 logger = get_logger(__name__)
+
+
+@dataclass(eq=False)
+class _Request:
+    """One greedy request, waiting for a batch or riding in one."""
+
+    ids: list[int]  # the rendered prompt, tokenized
+    max_new: int  # this request's own output budget
+    repetition_penalty: float
+    stop: list[str]
+    starts_in_reasoning: bool
+    future: asyncio.Future[ChatResult]
+    started: float  # time.perf_counter() when it was submitted
+
+
+@dataclass(eq=False)
+class _Batch:
+    """Requests decoded by one `model.generate` call, and its stop signals.
+
+    `dropped` and the two events are shared with the worker thread: the event
+    loop writes them, the decoding loop reads them after every token.
+    """
+
+    requests: list[_Request]
+    halt: threading.Event = field(default_factory=threading.Event)
+    finished: threading.Event = field(default_factory=threading.Event)
+    dropped: list[bool] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.dropped = [False] * len(self.requests)
+
+    def settled(self, index: int, future: asyncio.Future[ChatResult]) -> None:
+        """A caller that gave up frees its row; once all have, the batch stops."""
+        if future.cancelled():
+            self.dropped[index] = True
+            if all(self.dropped):
+                self.halt.set()
+
+
+class _OutOfMemory(Exception):
+    """A batch did not fit in GPU memory; a smaller one may."""
+
+
+def _row_repetition_penalty(penalties: list[float], padding: Any, fillers: list[int]) -> Any:
+    """transformers' repetition penalty, applied to a left-padded batch row by row.
+
+    The built-in processor penalises every id in `input_ids`, padding included,
+    so batching would penalise a short prompt's pad token (often end-of-text)
+    and change its reply. Here each pad column is swapped for a token its row
+    already holds, which leaves the set of penalised tokens exactly what it is
+    when the prompt is decoded alone. Rows may carry different penalties.
+    """
+    import torch
+    from transformers import LogitsProcessor
+
+    device = padding.device
+    width = padding.shape[1]
+    filler = torch.tensor(fillers, dtype=torch.long, device=device).unsqueeze(1)
+    uniform = len(set(penalties)) == 1
+    rows = torch.tensor(penalties, dtype=torch.float32, device=device).unsqueeze(1)
+
+    class RowRepetitionPenalty(LogitsProcessor):
+        def __call__(self, input_ids: Any, scores: Any) -> Any:
+            ids = input_ids.clone()
+            ids[:, :width] = torch.where(padding, filler, ids[:, :width])
+            score = torch.gather(scores, 1, ids)
+            if uniform:
+                # A Python float, as the built-in processor uses: the same
+                # arithmetic to the last bit.
+                penalty = penalties[0]
+                score = torch.where(score < 0, score * penalty, score / penalty)
+            else:
+                # In float32, as a Python float is applied: bfloat16 would
+                # round a penalty of 1.05 to 1.046875.
+                wide = score.float()
+                score = torch.where(wide < 0, wide * rows, wide / rows).to(scores.dtype)
+            return scores.scatter(1, ids, score)
+
+    return RowRepetitionPenalty()
 
 
 @BACKENDS.register("transformers", aliases=("hf",))
@@ -58,12 +152,26 @@ class TransformersBackend(Backend):
     name = "transformers"
     supports_adapters = True
 
+    #: A batch starts once it is full, once no request has arrived for
+    #: BATCH_IDLE_S, or BATCH_MAX_WAIT_S after the first one queued. A
+    #: benchmark refills a finished batch within milliseconds per question, so
+    #: neither wait is noticeable next to a reply that takes seconds.
+    BATCH_IDLE_S = 0.02
+    BATCH_MAX_WAIT_S = 0.25
+
     def __init__(self, config: BackendConfig) -> None:
         super().__init__(config)
         self.model: Any = None
         self.tokenizer: Any = None
         self._device: str = "cpu"
         self._dtype_name: str = "unknown"
+        # Greedy micro-batching; see generate().
+        self._queue: collections.deque[_Request] = collections.deque()
+        self._arrival: asyncio.Event | None = None
+        self._drainer: asyncio.Task[None] | None = None
+        self._running: list[_Batch] = []
+        # Lowered after an out-of-memory error, for the rest of this load.
+        self._batch_cap: int | None = None
 
     # -- hardware resolution ------------------------------------------------
 
@@ -123,6 +231,7 @@ class TransformersBackend(Backend):
         self._device = self._resolve_device(cfg.device)
         dtype = self._resolve_dtype(cfg.dtype, self._device)
         self._dtype_name = str(dtype).replace("torch.", "")
+        self._batch_cap = None
 
         logger.info("loading %s on %s (%s)", cfg.model, self._device, self._dtype_name)
 
@@ -222,6 +331,29 @@ class TransformersBackend(Backend):
         return None
 
     async def aclose(self) -> None:
+        # Callers still waiting on a batch get an answer rather than a hang,
+        # and the decoding thread stops before the model is released.
+        running, self._running = self._running, []
+        for batch in running:
+            batch.halt.set()
+        queued = list(self._queue)
+        self._queue.clear()
+        self._fail(
+            queued + [request for batch in running for request in batch.requests],
+            "The backend was closed before this request finished.",
+        )
+        drainer, self._drainer = self._drainer, None
+        if (
+            drainer is not None
+            and not drainer.done()
+            and drainer.get_loop() is asyncio.get_running_loop()
+        ):
+            drainer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await drainer
+        for batch in running:
+            await asyncio.to_thread(batch.finished.wait, 10.0)
+
         self.model = None
         self.tokenizer = None
         self._loaded = False
@@ -257,6 +389,7 @@ class TransformersBackend(Backend):
             extra={
                 "parameters": params,
                 "adapter": self.config.adapter_path,
+                "max_batch_size": self._cap(),
             },
         )
 
@@ -310,21 +443,14 @@ class TransformersBackend(Backend):
         # Some templates pre-open the thinking block in the prompt, so the
         # output starts mid-thought and only "</think>" ever appears.
         splitter = ReasoningSplitter(start_in_reasoning=prompt.rstrip().endswith("<think>"))
+        eos = self._eos_ids()
 
         def produce():
             import threading
 
             encoded = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
             prompt_tokens = int(encoded["input_ids"].shape[-1])
-
-            budget = self.config.max_context_length - prompt_tokens
-            if budget <= 0:
-                raise BackendError(
-                    f"Prompt is {prompt_tokens} tokens but the context window is "
-                    f"{self.config.max_context_length}.",
-                    hint="Lower agent.max_history_tokens or raise backend.max_context_length.",
-                )
-            max_new = min(params.max_tokens, budget)
+            max_new = min(params.max_tokens, self._budget(prompt_tokens))
 
             device = getattr(model, "device", self._device)
             encoded = {k: v.to(device) for k, v in encoded.items()}
@@ -371,7 +497,10 @@ class TransformersBackend(Backend):
                 "streamer": streamer,
                 "max_new_tokens": max_new,
                 "pad_token_id": tokenizer.pad_token_id,
-                "eos_token_id": tokenizer.eos_token_id,
+                "eos_token_id": eos,
+                # Passed for greedy decoding too: otherwise the checkpoint's own
+                # default applies (Qwen2.5-Instruct ships 1.1), not the one asked for.
+                "repetition_penalty": params.repetition_penalty,
                 "stopping_criteria": StoppingCriteriaList([HaltWhenAsked()]),
             }
             if params.temperature > 0:
@@ -379,7 +508,6 @@ class TransformersBackend(Backend):
                     do_sample=True,
                     temperature=params.temperature,
                     top_p=params.top_p,
-                    repetition_penalty=params.repetition_penalty,
                 )
                 if params.top_k > 0:
                     kwargs["top_k"] = params.top_k
@@ -421,9 +549,7 @@ class TransformersBackend(Backend):
 
             # Cut off only if the budget ran out on a token other than
             # end-of-sequence: a model can finish exactly on its last allowed one.
-            eos = tokenizer.eos_token_id
-            eos_ids = set(eos) if isinstance(eos, (list, tuple)) else {eos}
-            truncated = streamer.generated >= max_new and streamer.last_token not in eos_ids
+            truncated = streamer.generated >= max_new and streamer.last_token not in (eos or ())
             reason = "length" if truncated and not tracker.stopped else "stop"
             yield StreamChunk(
                 finish_reason=reason,
@@ -433,3 +559,271 @@ class TransformersBackend(Backend):
         async with contextlib.aclosing(iterate_in_thread(produce)) as chunks:
             async for chunk in chunks:
                 yield chunk
+
+    def _budget(self, prompt_tokens: int) -> int:
+        """Tokens left for the reply once the prompt is in the context window."""
+        budget = self.config.max_context_length - prompt_tokens
+        if budget <= 0:
+            raise BackendError(
+                f"Prompt is {prompt_tokens} tokens but the context window is "
+                f"{self.config.max_context_length}.",
+                hint="Lower agent.max_history_tokens or raise backend.max_context_length.",
+            )
+        return budget
+
+    def _eos_ids(self) -> list[int] | None:
+        """Every token that ends a reply: the tokenizer's, plus the checkpoint's.
+
+        Instruct checkpoints often list several in generation_config.json
+        (Qwen2.5: `<|im_end|>` and `<|endoftext|>`). Passing only the
+        tokenizer's would replace that list, so a reply could run on past an
+        end-of-text the model emitted.
+        """
+        configured = getattr(getattr(self.model, "generation_config", None), "eos_token_id", None)
+        found: list[int] = []
+        for value in (self.tokenizer.eos_token_id, configured):
+            for token in value if isinstance(value, (list, tuple)) else [value]:
+                if isinstance(token, int) and token not in found:
+                    found.append(token)
+        return found or None
+
+    # -- greedy micro-batching ------------------------------------------------
+
+    async def generate(
+        self, messages: Sequence[Message], params: GenerationParams
+    ) -> ChatResult:
+        """Like `stream()`, but greedy requests made together share one batch.
+
+        With `backend.max_batch_size` above 1, greedy requests (temperature 0)
+        that arrive within milliseconds of each other are decoded by a single
+        `model.generate` call, up to that many at a time. A benchmark asks
+        exactly that way, and the batch multiplies its throughput because each
+        decoding step reads the weights once for every row at once. Sampled
+        requests, and all requests when batching is off, stream one at a time.
+        """
+        if self.config.max_batch_size <= 1 or params.temperature > 0:
+            return await super().generate(messages, params)
+        if not self._loaded:
+            await self.load()
+        request = self._prepare(messages, params)
+        self._queue.append(request)
+        loop = asyncio.get_running_loop()
+        drainer = self._drainer
+        if drainer is None or drainer.done() or drainer.get_loop() is not loop:
+            self._arrival = asyncio.Event()
+            self._drainer = loop.create_task(self._drain())
+        assert self._arrival is not None
+        self._arrival.set()
+        return await request.future
+
+    def _prepare(self, messages: Sequence[Message], params: GenerationParams) -> _Request:
+        prompt = self._render_prompt(messages, thinking=params.thinking)
+        ids = list(self.tokenizer(prompt, add_special_tokens=False)["input_ids"])
+        return _Request(
+            ids=ids,
+            max_new=min(params.max_tokens, self._budget(len(ids))),
+            repetition_penalty=params.repetition_penalty,
+            stop=list(params.stop),
+            starts_in_reasoning=prompt.rstrip().endswith("<think>"),
+            future=asyncio.get_running_loop().create_future(),
+            started=time.perf_counter(),
+        )
+
+    def _cap(self) -> int:
+        """Rows per batch: the configured maximum, or less after running out of memory."""
+        return min(self.config.max_batch_size, self._batch_cap or self.config.max_batch_size)
+
+    async def _drain(self) -> None:
+        """Decode queued requests a batch at a time until none are left."""
+        try:
+            while self._queue:
+                await self._gather()
+                batch = self._take_batch()
+                if batch:
+                    await self._decode(batch)
+        except Exception as exc:  # a bug here must not leave callers waiting forever
+            logger.exception("the batch scheduler failed")
+            queued = list(self._queue)
+            self._queue.clear()
+            self._fail(queued, "The batch scheduler failed", cause=exc)
+
+    async def _gather(self) -> None:
+        """Wait for a full batch, a lull between arrivals, or BATCH_MAX_WAIT_S."""
+        assert self._arrival is not None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.BATCH_MAX_WAIT_S
+        while len(self._queue) < self._cap():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            self._arrival.clear()
+            try:
+                await asyncio.wait_for(self._arrival.wait(), min(self.BATCH_IDLE_S, remaining))
+            except asyncio.TimeoutError:
+                return
+
+    def _take_batch(self) -> list[_Request]:
+        loop = asyncio.get_running_loop()
+        batch: list[_Request] = []
+        while self._queue and len(batch) < self._cap():
+            request = self._queue.popleft()
+            # Skip callers that gave up while queued, and any a closed event loop left behind.
+            if not request.future.done() and request.future.get_loop() is loop:
+                batch.append(request)
+        return batch
+
+    async def _decode(self, requests: list[_Request]) -> None:
+        """Run one batch on a worker thread and hand each caller its own result."""
+        batch = _Batch(requests)
+        for index, request in enumerate(requests):
+            request.future.add_done_callback(functools.partial(batch.settled, index))
+        self._running.append(batch)
+        try:
+            results = await asyncio.to_thread(self._run_batch, batch)
+        except asyncio.CancelledError:
+            batch.halt.set()
+            for request in requests:
+                request.future.cancel()
+            raise
+        except _OutOfMemory:
+            if len(requests) > 1:
+                self._batch_cap = max(1, len(requests) // 2)
+                logger.warning(
+                    "out of GPU memory decoding %d requests together; retrying %d at a time",
+                    len(requests),
+                    self._batch_cap,
+                )
+                self._queue.extendleft(reversed(requests))
+                return
+            self._fail(
+                requests,
+                "Out of GPU memory while answering a single request.",
+                hint="Lower --max-tokens or backend.max_context_length, close other GPU "
+                "programs, or use a smaller model.",
+            )
+            return
+        except Exception as exc:
+            self._fail(requests, "Batched generation failed", cause=exc)
+            return
+        finally:
+            if batch in self._running:
+                self._running.remove(batch)
+        for request, result in zip(requests, results, strict=True):
+            if not request.future.done():
+                request.future.set_result(result)
+
+    @staticmethod
+    def _fail(
+        requests: list[_Request],
+        message: str,
+        *,
+        cause: BaseException | None = None,
+        hint: str | None = None,
+    ) -> None:
+        """Give each caller still waiting its own error (one raised object per caller)."""
+        if cause is not None:
+            message = f"{message}: {type(cause).__name__}: {cause}"
+        for request in requests:
+            if request.future.done():
+                continue
+            error = BackendError(message, hint=hint)
+            error.__cause__ = cause
+            with contextlib.suppress(RuntimeError):  # its event loop may already be closed
+                request.future.set_exception(error)
+
+    def _run_batch(self, batch: _Batch) -> list[ChatResult]:
+        """Decode a batch with one `model.generate` call (on a worker thread).
+
+        Prompts are padded on the left, so every row's next token lands in the
+        same, last column. The attention mask hides the padding, and
+        transformers derives each row's positions from that mask, so each row
+        is decoded as it would be alone, up to floating-point rounding.
+        """
+        import torch
+        from transformers import LogitsProcessorList, StoppingCriteria, StoppingCriteriaList
+
+        requests = batch.requests
+        try:
+            model, tokenizer = self.model, self.tokenizer
+            pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+            width = max(len(r.ids) for r in requests)
+            ids = torch.full((len(requests), width), pad, dtype=torch.long)
+            mask = torch.zeros((len(requests), width), dtype=torch.long)
+            for row, request in enumerate(requests):
+                ids[row, width - len(request.ids) :] = torch.tensor(request.ids, dtype=torch.long)
+                mask[row, width - len(request.ids) :] = 1
+            device = getattr(model, "device", self._device)
+            ids, mask = ids.to(device), mask.to(device)
+            budgets = torch.tensor([r.max_new for r in requests], device=device)
+
+            class StopRows(StoppingCriteria):
+                """Finish rows that used their own budget or lost their caller."""
+
+                def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> Any:
+                    done = budgets <= input_ids.shape[1] - width
+                    if batch.halt.is_set():
+                        return torch.ones_like(done)
+                    if any(batch.dropped):
+                        done |= torch.tensor(batch.dropped, device=done.device)
+                    return done
+
+            processors = LogitsProcessorList()
+            penalties = [r.repetition_penalty for r in requests]
+            if any(p != 1.0 for p in penalties):
+                fillers = [r.ids[0] for r in requests]
+                processors.append(_row_repetition_penalty(penalties, mask == 0, fillers))
+
+            eos = self._eos_ids()
+            out_of_memory = False
+            try:
+                output = model.generate(
+                    input_ids=ids,
+                    attention_mask=mask,
+                    max_new_tokens=max(r.max_new for r in requests),
+                    do_sample=False,
+                    repetition_penalty=1.0,  # applied per row by `processors` instead
+                    pad_token_id=pad,
+                    eos_token_id=eos,
+                    logits_processor=processors,
+                    stopping_criteria=StoppingCriteriaList([StopRows()]),
+                )
+            except torch.cuda.OutOfMemoryError:
+                out_of_memory = True
+            if out_of_memory:
+                # Outside the except block, whose traceback would keep the
+                # failed attempt's tensors, and so their memory, alive.
+                torch.cuda.empty_cache()
+                raise _OutOfMemory
+            rows = output[:, width:].tolist()
+            return [
+                self._result(r, row, eos, tokenizer)
+                for r, row in zip(requests, rows, strict=True)
+            ]
+        finally:
+            # Only now: aclose() waits for this before it releases the model
+            # and the tokenizer that _result() decodes with.
+            batch.finished.set()
+
+    def _result(
+        self, request: _Request, row: list[int], eos: list[int] | None, tokenizer: Any
+    ) -> ChatResult:
+        """Finish one row the way the streaming path finishes a reply."""
+        tokens = row[: request.max_new]
+        ends = set(eos or ())
+        end = next((i for i, token in enumerate(tokens) if token in ends), None)
+        if end is not None:
+            # A finished row is padded until the batch ends; the end token
+            # itself counts as generated, as it does when streaming.
+            tokens = tokens[: end + 1]
+        splitter = ReasoningSplitter(start_in_reasoning=request.starts_in_reasoning)
+        thought, answer = splitter.push(tokenizer.decode(tokens, skip_special_tokens=True))
+        thought_tail, answer_tail = splitter.flush()
+        answer, stopped = self.apply_stop_sequences(answer + answer_tail, request.stop)
+        truncated = len(tokens) >= request.max_new and end is None
+        return ChatResult(
+            model=self.config.model,
+            message=Message.assistant(answer, reasoning=(thought + thought_tail) or None),
+            finish_reason="length" if truncated and not stopped else "stop",
+            usage=Usage(prompt_tokens=len(request.ids), completion_tokens=len(tokens)),
+            latency_ms=(time.perf_counter() - request.started) * 1000,
+        )

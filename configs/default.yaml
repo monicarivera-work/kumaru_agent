@@ -42,6 +42,15 @@ backend:
   trust_remote_code: false
   attn_implementation: null   # e.g. flash_attention_2 when installed
 
+  # -- transformers only --
+  # Greedy requests (temperature 0) that arrive together are decoded as one
+  # batch of up to this many; 1 = one at a time. Each decoding step reads the
+  # weights once for the whole batch, so a benchmark of a small model runs
+  # ~5x faster at 8. Halves itself after running out of GPU memory. In bfloat16
+  # a batched answer can differ from a one-at-a-time one where two tokens are
+  # near-tied; float32 matches exactly. Sampled requests never batch.
+  max_batch_size: 1
+
   # -- openai_compat; llamacpp_server uses base_url to attach to a server you started --
   base_url: null              # http://127.0.0.1:8000/v1 for vLLM, :11434/v1 for Ollama
   api_key: null

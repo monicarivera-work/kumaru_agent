@@ -57,6 +57,7 @@ One page per file. Each page answers the same seven questions: what it does, why
 | `train/__init__.py` | [page](src/kumaru/train/__init__.md) | Deciding which training path you need |
 | `train/config.py` | [page](src/kumaru/train/config.md) | **Every training YAML field, explained** |
 | `train/data.py` | [page](src/kumaru/train/data.md) | Dataset format, loss masking, token packing |
+| `train/distill.py` | [page](src/kumaru/train/distill.md) | **Distilling a large model into a small one**: building and auditing the data |
 | `train/finetune_lora.py` | [page](src/kumaru/train/finetune_lora.md) | Running or debugging a LoRA fine-tune |
 | `train/model_nano.py` | [page](src/kumaru/train/model_nano.md) | **What a transformer actually is**, component by component |
 | `train/pretrain_nano.py` | [page](src/kumaru/train/pretrain_nano.md) | The training loop; scaling to multi-GPU |
@@ -108,6 +109,7 @@ Results and method: [docs/BENCHMARKS.md](../BENCHMARKS.md).
 | `configs/low-vram.yaml` | [page](configs/low-vram.yaml.md) | 8–12 GB GPU |
 | `configs/cpu-only.yaml` | [page](configs/cpu-only.yaml.md) | No GPU |
 | `configs/vllm.yaml` | [page](configs/vllm.yaml.md) | Production throughput |
+| `configs/student.yaml` | [page](configs/student.yaml.md) | Benchmarking the distillation student, Qwen2.5-1.5B, in batches |
 | `configs/test.yaml` | [page](configs/test.yaml.md) | No model, for tests |
 
 ## Training recipes and data
@@ -117,6 +119,9 @@ Results and method: [docs/BENCHMARKS.md](../BENCHMARKS.md).
 | `configs/train/lora-qwen.yaml` | [page](configs/lora-qwen.yaml.md) | QLoRA on 7B, 24 GB GPU |
 | `configs/train/lora-small.yaml` | [page](configs/lora-small.yaml.md) | Five-minute pipeline smoke test |
 | `configs/train/pretrain-nano.yaml` | [page](configs/pretrain-nano.yaml.md) | From-scratch transformer |
+| `configs/train/distill-gsm8k.yaml` | [page](configs/distill-gsm8k.yaml.md) | **Distillation**: Qwen2.5-1.5B learns from the teacher's verified answers |
+| `configs/train/distill-gsm8k-gold.yaml` | [page](configs/distill-gsm8k-gold.yaml.md) | Distillation's control arm: the same questions, human-written solutions |
+| `configs/train/distill-gsm8k-0.5b.yaml` | [page](configs/distill-gsm8k-0.5b.yaml.md) | Distillation pilot on Qwen2.5-0.5B: measures time and memory first |
 | `data/samples/chat_train.jsonl` | [page](configs/chat_train.jsonl.md) | **The SFT data format**, and how to build your own |
 | `data/samples/corpus.txt` | [page](configs/corpus.txt.md) | Pretraining corpus format |
 
