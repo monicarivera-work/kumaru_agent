@@ -58,6 +58,7 @@ A long budget costs nothing on questions the model answers briefly; generation s
 | `Benchmark.answer_tokens` | `ClassVar[int] = 8192` | Default answer budget, with thinking off. |
 | `Benchmark.needs_code_execution` | `ClassVar[bool] = False` | True: the runner refuses the benchmark without `--allow-code-exec`. |
 | `Benchmark.blocking_grader` | `ClassVar[bool] = False` | True: `grade` runs via `asyncio.to_thread`, so subprocess graders don't stall the event loop. |
+| `Benchmark.training_data` | `ClassVar[bool] = False` | True only for questions from a dataset's *training* split (`gsm8k_train`), whose graded answers may become training data. `kumaru distill build` refuses runs of every other benchmark: training on an evaluation set inflates the score it measures. A split's *name* does not decide it; IFEval's only split is called `train`, yet IFEval is an evaluation set. |
 | `Benchmark.preflight` | `preflight(self) -> None` | Raise early if a dependency or data file is missing. The default does nothing. |
 | `Benchmark.load` | `load(self) -> list[BenchItem]` (abstract) | Every item of the evaluation split, in a stable order. |
 | `Benchmark.messages` | `messages(self, item: BenchItem) -> list[Message]` | The conversation for one item. Override for few-shot or multi-turn formats. |

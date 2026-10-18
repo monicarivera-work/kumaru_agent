@@ -1,0 +1,57 @@
+# Distillation, control arm: the same student, the same questions and the
+# same training recipe as distill-gsm8k.yaml, but the answers are GSM8K's own
+# human-written solutions. If the teacher arm beats this one, the gain came
+# from the teacher; if not, it came from extra GSM8K-style practice.
+#
+#   kumaru distill gold -o runs/distill/data-gold --match runs/distill/data-teacher
+#   kumaru train configs/train/distill-gsm8k-gold.yaml
+#   kumaru bench run gsm8k -c student --full --max-tokens 1024 --adapter runs/distill/qwen1.5b-gold/adapter --label student-gold -o runs/distill/eval-gold
+#   kumaru bench compare runs/distill/eval-gold runs/distill/eval-teacher
+#
+# Identical to distill-gsm8k.yaml apart from the data files, output_dir and
+# run_name; a test enforces it. Change both files together. It takes the same
+# number of steps, but GSM8K's solutions are about a quarter the length of the
+# teacher's answers, so it needs about half the time and at most ~9 GB of VRAM.
+
+task: lora
+base_model: Qwen/Qwen2.5-1.5B-Instruct
+output_dir: runs/distill/qwen1.5b-gold
+run_name: distill-gsm8k-gold
+
+# 1.5B parameters in bf16 are ~3 GB: no need to quantize the frozen base.
+load_in_4bit: false
+
+data:
+  train_file: runs/distill/data-gold/train.jsonl
+  eval_file: runs/distill/data-gold/val.jsonl   # held-out questions, not just held-out rows
+  max_seq_length: 1536     # prompt + chat template + an answer of up to 1,024 tokens
+  train_on_completions_only: true
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  bias: none
+
+optim:
+  epochs: 2                # each question is seen twice; more mostly memorizes
+  per_device_batch_size: 4
+  gradient_accumulation_steps: 8    # effective batch = 4 x 8 = 32
+  learning_rate: 1.0e-4    # the low end for LoRA: the student must keep what it knows
+  lr_scheduler: cosine
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  gradient_checkpointing: true
+  optimizer: adamw_torch
+  bf16: true
+  seed: 42
+
+logging_steps: 10
+eval_steps: 50
+# Equal to eval_steps: the adapter kept at the end is the checkpoint with the
+# lowest eval loss, and the trainer can only return to evaluations it saved.
+save_steps: 50
+save_total_limit: 3
+report_to: []              # ["tensorboard"] for curves: tensorboard --logdir runs/

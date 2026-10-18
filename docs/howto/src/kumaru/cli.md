@@ -1,6 +1,6 @@
 # `src\kumaru\cli.py`
 
-> The `kumaru` binary. Seven Typer commands turn flags into config overrides and hand off to the server, the agent, the trainer, the eval harness or the benchmark runner. Every deliberate failure prints as `error:` plus `hint:` and exits 1.
+> The `kumaru` binary. Its Typer commands turn flags into config overrides and hand off to the server, the agent, the trainer, the eval harness, the benchmark runner or the distillation data builder. Every deliberate failure prints as `error:` plus `hint:` and exits 1.
 
 **Read this when:**
 - you run or script `kumaru`;
@@ -12,7 +12,7 @@
 
 ## What it does
 
-- **Commands.** `app` (a `typer.Typer`) has six commands: `serve`, `chat`, `info`, `config`, `train` and `eval`. The `bench` sub-app adds `list`, `run`, `report` and `compare`.
+- **Commands.** `app` (a `typer.Typer`) has six commands: `serve`, `chat`, `info`, `config`, `train` and `eval`. The `bench` sub-app adds `list`, `run`, `report` and `compare`; the `distill` sub-app adds `build` and `gold`.
 - **Config loading.** Every command that needs a configuration builds it the same way: `_load(config, **flags)` calls `load_config(config, overrides=_build_overrides(**flags))`. `chat`'s generation flags are the exception: they travel with each message instead (invariant 4).
 - **The REPL.** `chat` runs `_chat_loop`. It streams reasoning dimmed under `thinking…`, then the answer, then a token count. Only the answer goes back into the history.
 - **The entry point.** `main()` is the installed console script (`pyproject.toml`: `kumaru = "kumaru.cli:main"`).
@@ -22,7 +22,7 @@
 ## Why it exists
 
 - **One flag vocabulary over the config model the server also uses.** A flag is just the top config layer. A one-off experiment on the command line is therefore the same thing as a YAML edit, and `kumaru config` can show the result.
-- **Heavy imports live in command bodies.** `import kumaru.cli` takes about 0.6 s and does not import torch. That keeps `--help`, `config` and `bench list|report|compare` fast. Only commands that need the model stack pay the import cost: `serve`, `chat`, `train`, `eval`, `bench run`, and `info`, which probes torch.
+- **Heavy imports live in command bodies.** `import kumaru.cli` takes about 0.6 s and does not import torch. That keeps `--help`, `config`, `bench list|report|compare` and `distill` fast; `distill` never imports torch, and loads the `datasets` library only to read GSM8K. Only commands that need the model stack pay the import cost: `serve`, `chat`, `train`, `eval`, `bench run`, and `info`, which probes torch.
 - **`main()` exists because `app()` handles only Click's own exceptions** (usage errors, `Abort`, `Exit`). Typer's `__call__` re-raises everything else. Without `main()`, a deliberate `ConfigError` carrying a hint would print as a traceback.
 - **UTF-8 is forced first.** Windows consoles default to a legacy code page (cp1252 or cp437). The output uses `›`, `…`, `·` and box drawing, which would otherwise come out as replacement glyphs.
 
@@ -80,6 +80,7 @@ The signatures show the CLI defaults. In Python, the real defaults are `typer.Op
 |---|---|---|
 | `app` | `typer.Typer(name="kumaru", help="Local-first, scalable LLM agent.", no_args_is_help=True, add_completion=False)` | The root command. It has no `--version` and no shell-completion options. |
 | `bench_app` | `typer.Typer(help="Score models on public benchmarks; compare runs with significance tests.", no_args_is_help=True)` | Mounted as `kumaru bench` by `app.add_typer(bench_app, name="bench")`. |
+| `distill_app` | `typer.Typer(help="Build training data from a teacher model's graded answers (knowledge distillation).", no_args_is_help=True)` | Mounted as `kumaru distill`. |
 | `console` | `Console()` | Module-level Rich console on stdout. All command output goes here, including the `error:` and `hint:` lines. Log records go to stderr. |
 | `CONTEXT_HELP` | `str` | The help text shared by every `--context`. |
 | `serve` | `serve(config: str = None, backend: str = None, model: str = None, device: str = None, adapter: str = None, context: int = None, host: str = None, port: int = None, log_level: str = None) -> None` | `kumaru serve`: prints the banner, then calls `kumaru.server.app.run(cfg)`, which blocks. |
@@ -92,6 +93,9 @@ The signatures show the CLI defaults. In Python, the real defaults are `typer.Op
 | `bench_run` | `bench_run(benchmarks: list[str], config: str = None, backend: str = None, model: str = None, adapter: str = None, context: int = None, limit: int = 100, full: bool = False, seed: int = 1234, think: bool = None, thinking_budget: int = None, max_tokens: int = None, temperature: float = None, concurrency: int = None, label: str = None, out: str = None, allow_code_exec: bool = False, use_agent_prompt: bool = False) -> None` | `kumaru bench run`: builds `BenchSettings` (`limit=None` when `--full` is given), then calls `run_benchmarks(cfg, benchmarks, settings, profile=config, console=console)`. |
 | `bench_compare` | `bench_compare(baseline: str, candidate: str, examples: int = 0) -> None` | `kumaru bench compare A B`: `render_comparisons(...)`, plus `render_flips(...)` when `-e` is above 0. |
 | `bench_report` | `bench_report(run: str) -> None` | `kumaru bench report RUN`: `render_summaries(console, load_summaries(Path(run)), details=True)`. |
+| `distill_build` | `distill_build(runs: list[str], out: str, max_tokens: int = 1024, per_question: int = 4, val_fraction: float = 0.05, seed: int = 42, check_arithmetic: bool = True, eval_set: list[str] = ["gsm8k"], decontaminate: bool = True, allow_thinking: bool = False, force: bool = False) -> None` | `kumaru distill build RUNS... -o DIR`: `render(console, build_from_runs(runs, out, DistillSettings(...), force=force), Path(out))`. |
+| `distill_gold` | `distill_gold(out: str, match: str = None, val_fraction: float = 0.05, seed: int = 42, check_arithmetic: bool = True, eval_set: list[str] = ["gsm8k"], decontaminate: bool = True, force: bool = False) -> None` | `kumaru distill gold -o DIR`: the same with `build_gold(out, settings, match=match, force=force)`. |
+| `DISTILL_OUT_HELP`, `VAL_FRACTION_HELP`, `SPLIT_SEED_HELP`, `ARITHMETIC_HELP`, `EVAL_SET_HELP`, `DECONTAMINATE_HELP`, `FORCE_HELP` | `str` | Help texts shared by `distill build` and `distill gold`, so the two commands describe a shared flag identically. |
 | `main` | `main() -> None` | Console-script entry point. Calls `ensure_utf8_streams()`, then `app()`; a `KumaruError` prints `error:`/`hint:` and raises `SystemExit(1)`. Its `KeyboardInterrupt` branch (`interrupted`, exit 130) does not run in practice; see [Exit codes](#errors-and-exit-codes). |
 | `_build_overrides` | `_build_overrides(**kwargs: Any) -> dict[str, Any]` | Private, and the one place flags become config paths. Drops `None` values and unknown keys. `tests\test_cli.py` tests it directly. |
 | `_load` | `_load(config: str \| None, **flags: Any)` | Private. Returns the `KumaruConfig` from `load_config(config, overrides=_build_overrides(**flags))`. |
@@ -112,6 +116,7 @@ The examples are PowerShell, run from the repo root with the venv active; otherw
 | `kumaru train CONFIG` | Fine-tune (LoRA) or pretrain a model. See docs/TRAINING.md. | Yes. |
 | `kumaru eval` | Measure latency, throughput, and answer quality. | Yes. |
 | `kumaru bench list\|run\|report\|compare` | Score models on public benchmarks; compare runs with significance tests. | `run` only. |
+| `kumaru distill build\|gold` | Build training data from a teacher model's graded answers (knowledge distillation). | No. It reads GSM8K from the Hugging Face cache, downloading it on first use. |
 
 ### Options
 
@@ -287,7 +292,7 @@ kumaru eval -c qwen36 -s my_cases.jsonl
 ### Benchmarks: `kumaru bench`
 
 - **Subcommands:**
-  - `bench list` prints the benchmarks: `golden`, `gsm8k`, `humaneval`, `ifeval` and `mmlu_pro`. Any golden-set `.jsonl` file also works as a benchmark.
+  - `bench list` prints the benchmarks: `golden`, `gsm8k`, `gsm8k_train`, `humaneval`, `ifeval` and `mmlu_pro`. Any golden-set `.jsonl` file also works as a benchmark. `gsm8k_train` is GSM8K's training split: teacher data for `kumaru distill`, not a score.
   - `bench report RUN` shows one run in detail.
   - `bench compare BASELINE CANDIDATE [-e N]` answers "did B really beat A?" with paired differences, confidence intervals and p-values.
 - **Records.** `bench run` saves every answer.
@@ -307,7 +312,7 @@ kumaru eval -c qwen36 -s my_cases.jsonl
 | `--thinking-budget` | none (`x>=0`) | "Max thinking tokens per question." Also a per-request override. |
 | `--max-tokens` | `8192`; more with thinking (`1<=x<=131072`) | "Output cap per question (default: 8192; thinking adds --thinking-budget, or uses the profile's max_tokens without one)." |
 | `-t, --temperature` | profile (`0.0<=x<=2.0`) | "0 = greedy (default: the profile's preset)." Also a per-request override. |
-| `-j, --concurrency` | backend (`x>=1`) | "Questions in flight (default: what the backend can batch)." That is 1 except on `llamacpp_server`. |
+| `-j, --concurrency` | backend (`x>=1`) | "Questions in flight (default: what the backend can batch)." That is 1, except on `llamacpp_server` (its slots) and on `transformers` at temperature 0 (`backend.max_batch_size`). |
 | `--label` | `<profile or model>-<thinking mode>` | "Run name (default: <profile or model>-<thinking mode>, e.g. qwen36-think4096)." The mode is `think`, `think<budget>`, `nothink` or `default`. Without a profile, the model's file or repo name is used: `-m D:\kumaru\models\Qwen3-8B-Q4_K_M.gguf --no-think` gives `Qwen3-8B-Q4_K_M-nothink`. |
 | `-o, --out` | `runs\bench\<YYYYMMDD-HHMMSS>-<label>` | "This run's own folder (default runs/bench/<timestamp>-<label>). Point at an earlier run to resume it." |
 | `--allow-code-exec` | off | "Allow benchmarks that execute model-written code (humaneval)." |
@@ -333,6 +338,18 @@ kumaru bench run gsm8k ifeval -c qwen36 --think --thinking-budget 4096 -n 50 -o 
   - A run whose fingerprint differs (model, decoding parameters, seed or prompt mode) is refused before anything is written.
   - On Ctrl+C the runner prints `Stopped. Finished answers are saved; resume with --out <dir>`.
 - **`humaneval`** refuses to run without `--allow-code-exec`.
+
+### Distillation data: `kumaru distill`
+
+```powershell
+kumaru distill build runs\distill\teacher-qwen36 -o runs\distill\data-teacher
+kumaru distill gold -o runs\distill\data-gold --match runs\distill\data-teacher
+```
+
+- **`build RUNS...`** turns teacher runs of `kumaru bench run gsm8k_train` into `train.jsonl`, `val.jsonl` and `manifest.json`. It keeps only answers that are correct, complete and clean, then prints what each check dropped.
+- **`gold`** builds the control arm: GSM8K's human-written solutions to the same questions.
+- **Both refuse evaluation data.** A run of `gsm8k` (the test split) or of a golden set is refused whole, and near-copies of test questions are dropped. `--no-decontaminate` is for smoke tests only.
+- Every flag, the report and the whole experiment: `docs\howto\src\kumaru\train\distill.md`. The training recipes: `docs\howto\configs\distill-gsm8k.yaml.md`.
 
 ### Errors and exit codes
 
@@ -389,7 +406,7 @@ def serve(
 
 ### Add a command
 
-- **Registration.** Decorate it with `@app.command()` or `@bench_app.command("<name>")`. Accept `-c/--config` plus the overrides it needs, and build the config with `_load`.
+- **Registration.** Decorate it with `@app.command()`, `@bench_app.command("<name>")` or `@distill_app.command("<name>")`. Accept `-c/--config` plus the overrides it needs, and build the config with `_load`.
 - **Imports.** Import the subsystem inside the body. Check with `python -c "import sys, kumaru.cli; print('torch' in sys.modules)"`, which must print `False`.
 - **Errors.** For anything the user can fix, raise a `KumaruError` subclass with a `hint=`, and `main()` formats it. Don't print and call `sys.exit` yourself.
 - **Async work.** Run it with `asyncio.run(...)` inside the body, as `chat`, `eval` and `bench run` do. Close backends in `finally:` with `await backend.aclose()`.
@@ -416,6 +433,8 @@ def serve(
 | `error: <dir> holds results from different settings (model, decoding parameters, seed or prompt mode).` | `--out` points at a run made with other settings, and resuming would mix them. | Omit `--out`, or choose a new directory. |
 | A bench run is not in `runs\bench\<label>`. | The default folder is `runs\bench\<YYYYMMDD-HHMMSS>-<label>`. | Use the `results:` or `saved to` path that the run prints. |
 | `error: No benchmark results in <dir>`. | `bench report` was pointed at a folder that `bench run` didn't create. | Point it at a run folder under `runs\bench\`. |
+| `error: <dir> holds answers to gsm8k, an evaluation set: training on them would inflate the score it measures.` | `distill build` was given a run of a test split or a golden set. | Run the teacher on `gsm8k_train` and pass that run. See `docs\howto\src\kumaru\train\distill.md`. |
+| `error: <dir> already holds a dataset (...)`. | `distill` would overwrite an earlier dataset. | Choose another `-o`, or pass `--force`. |
 | `kumaru eval` exits 0 although cases FAIL. | `eval` reports; it does not gate. | Gate on the JSON written by `-o`, or use `kumaru bench` for statistics. |
 | The serve banner shows `http://0.0.0.0:...`, which the browser can't open. | The banner prints the bind address. | Browse to `http://127.0.0.1:<port>` or to the machine's address. |
 | `error: Invalid configuration: ... telemetry.log_level ...` from `serve --log-level verbose`, exit 1. | The level is validated with the rest of the config. | Use `debug`, `info`, `warning`, `error` or `critical`, in any case; `warn` and `fatal` also work. |
@@ -436,4 +455,5 @@ def serve(
 - `src\kumaru\train\runner.py`: `run_training`, called by `train` (`docs\TRAINING.md`).
 - `src\kumaru\eval\harness.py`: `run_eval`, called by `eval` (`docs\howto\src\kumaru\eval\harness.md`).
 - `src\kumaru\eval\benchmarks\runner.py`: everything behind `bench` (`docs\howto\src\kumaru\eval\benchmarks\runner.md`, `docs\BENCHMARKS.md`).
+- `src\kumaru\train\distill.py`: everything behind `distill` (`docs\howto\src\kumaru\train\distill.md`).
 - `tests\test_cli.py`: CliRunner tests and the `main()` error-format test.

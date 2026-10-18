@@ -96,7 +96,8 @@ class OptimConfig(_Base):
     # higher LR than full fine-tuning, which wants 1e-5 to 5e-5).
     learning_rate: float = 2e-4
     lr_scheduler: Literal["cosine", "linear", "constant"] = "cosine"
-    warmup_ratio: float = 0.03
+    # Share of the optimizer steps over which the learning rate ramps up from 0.
+    warmup_ratio: float = Field(default=0.03, ge=0.0, lt=1.0)
     weight_decay: float = 0.0
     max_grad_norm: float = 1.0
 

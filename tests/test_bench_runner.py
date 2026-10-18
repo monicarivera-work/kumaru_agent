@@ -421,6 +421,16 @@ def test_default_concurrency_follows_llama_server_slots_and_shared_context() -> 
     assert default_concurrency(*setup(unified=True), 200_000) == 1  # never below one
 
 
+def test_default_concurrency_fills_a_transformers_batch_only_for_greedy_runs() -> None:
+    cfg = SimpleNamespace(backend=SimpleNamespace(max_batch_size=16))
+    backend = SimpleNamespace(name="transformers")
+    greedy, sampled = GenerationParams(temperature=0.0), GenerationParams(temperature=0.7)
+
+    assert default_concurrency(cfg, backend, 100, params=greedy) == 16
+    assert default_concurrency(cfg, backend, 100, params=sampled) == 1  # sampling never batches
+    assert default_concurrency(cfg, backend, 100) == 1
+
+
 def test_redact_hides_credentials_but_never_counts() -> None:
     config = {
         "backend": {"api_key": "sk-1", "max_tokens": 32, "tokenizer": "Qwen/Qwen3",

@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from kumaru.core.errors import ConfigError
+from kumaru.core.registry import BENCHMARKS
 from kumaru.core.types import Role
+from kumaru.eval.benchmarks import gsm8k
 from kumaru.eval.benchmarks.base import BenchItem, select_items
 from kumaru.eval.benchmarks.golden import DEFAULT_PATH, GRADERS, GoldenSet, grade_answer
 from kumaru.eval.benchmarks.gsm8k import GSM8K, gold_answer
@@ -236,6 +238,23 @@ class TestGsm8kAndMmluPro:
         item = BenchItem(id="gsm8k/0", prompt="p", answer="1234")
         grade = GSM8K().grade(item, "So...\nAnswer: 1,234")
         assert (grade.correct, grade.detail["method"]) == (True, "answer_tag")
+
+    def test_gsm8k_train_asks_the_training_split_under_its_own_ids(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        asked = []
+
+        def rows(path: str, name: str | None, split: str) -> list[dict]:
+            asked.append((path, name, split))
+            return [{"question": " Sam has 3 pens and buys 4. ", "answer": "3 + 4 = 7\n#### 7"}]
+
+        monkeypatch.setattr(gsm8k, "load_hf_rows", rows)
+        [item] = BENCHMARKS.get("gsm8k-train")().load()
+
+        assert asked == [("openai/gsm8k", "main", "train")]
+        # Its own ids, so teacher data can never pass for a test-set run.
+        assert (item.id, item.answer) == ("gsm8k_train/0", "7")
+        assert item.prompt == gsm8k.PROMPT.format(question="Sam has 3 pens and buys 4.")
 
     @pytest.mark.parametrize(
         ("options", "index", "expected"),

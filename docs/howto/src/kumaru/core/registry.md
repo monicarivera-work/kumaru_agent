@@ -19,7 +19,7 @@ This file defines the generic `Registry` class and three global registries.
 |---|---|---|---|
 | `BACKENDS` | `backend` | `kumaru.backends` | `echo`, `transformers` (`hf`), `llamacpp` (`gguf`), `openai_compat` (`ollama`, `vllm`, `remote`), `llamacpp_server` (`llama-server`, `llama_server`) — all lazy |
 | `TOOLS` | `tool` | `kumaru.tools` | `current_time`, registered by decorator when `kumaru.agent.tools` is imported |
-| `BENCHMARKS` | `benchmark` | `kumaru.benchmarks` | `gsm8k`, `mmlu_pro` (`mmlu-pro`), `ifeval`, `humaneval`, `golden` — all lazy |
+| `BENCHMARKS` | `benchmark` | `kumaru.benchmarks` | `gsm8k`, `gsm8k_train` (`gsm8k-train`), `mmlu_pro` (`mmlu-pro`), `ifeval`, `humaneval`, `golden` — all lazy |
 
 v0.2 adds the `llamacpp_server` backend and the whole `BENCHMARKS` registry, which `kumaru bench` uses.
 
@@ -104,7 +104,7 @@ print(BACKENDS.names())
 ```python
 from kumaru.core.registry import BENCHMARKS
 
-print(BENCHMARKS.names())              # ['golden', 'gsm8k', 'humaneval', 'ifeval', 'mmlu_pro']
+print(BENCHMARKS.names())              # ['golden', 'gsm8k', 'gsm8k_train', 'humaneval', 'ifeval', 'mmlu_pro']
 print("mmlu-pro" in BENCHMARKS)        # True: alias, no import
 ```
 

@@ -1,21 +1,22 @@
 # `src\kumaru\eval\benchmarks\gsm8k.py`
 
-> GSM8K: 1,319 grade-school maths word problems, asked zero-shot with "think step by step", graded by comparing the final number with the gold answer.
+> GSM8K: 1,319 grade-school maths word problems, asked zero-shot with "think step by step", graded by comparing the final number with the gold answer. `gsm8k_train` asks the 7,473 training problems the same way, to collect a teacher's answers for distillation.
 
-**Read this when:** you run `gsm8k`, a GSM8K score looks wrong, or you want a fast check that a model can chain several arithmetic steps.
+**Read this when:** you run `gsm8k` or `gsm8k_train`, a GSM8K score looks wrong, or you want a fast check that a model can chain several arithmetic steps.
 
 ---
 
 ## What it does
 
-- **`GSM8K.load()`** reads `openai/gsm8k`, config `main`, split `test` (1,319 problems) through `load_hf_rows` (see [`base.md`](base.md)). Each problem becomes a `BenchItem`:
-  - `id` = `gsm8k/<index>`, the 0-based position in the test split, e.g. `gsm8k/409`.
+- **`GSM8K.load()`** reads `openai/gsm8k`, config `main`, split `split` (`test`: 1,319 problems) through `load_hf_rows` (see [`base.md`](base.md)), then hands the rows to `items()`. Each problem becomes a `BenchItem`:
+  - `id` = `<name>/<index>`, the 0-based position in the split, e.g. `gsm8k/409`.
   - `prompt` = `PROMPT` with the question (stripped) filled in.
   - `answer` = `gold_answer(row["answer"])`: the text after the last `####`, stripped, commas removed. It is a string such as `"168000"`.
   - No `group`, so `-n` draws a plain seeded sample of the 1,319 (`select_items`).
 - **`GSM8K.grade()`** runs `extract_final_number(output)`, then `numbers_equal(value, item.answer)`. The comparison is exact after removing `,` and `$`; only an absolute 1e-9 absorbs float noise. It records the extracted number text and `detail.method`.
   - Exact matters on large answers. An earlier relative tolerance of 1e-6 graded 1,450,001 correct for `gsm8k/611` (gold 1,450,000), and 2,880,001 for `gsm8k/796`. [`scripts\check_graders.py`](../../../../scripts/check_graders.py.md) caught both.
 - Nothing else: no `preflight`, no `generation_overrides`, no `aggregate`. The only score is accuracy.
+- **`GSM8KTrain`** (`gsm8k_train`, alias `gsm8k-train`) is `GSM8K` with `split = "train"` (7,473 problems) and `training_data = True`. Same prompt, same grader; ids are `gsm8k_train/<index>`, so they never collide with test ids. It is not a score to report: it is how [`kumaru distill build`](../../train/distill.md) collects a teacher's graded answers, and `training_data` is what lets `distill` accept them.
 
 The exact prompt (part of the measurement; see [How to extend it](#how-to-extend-it)):
 
@@ -56,7 +57,10 @@ question -> PROMPT -> model reasons -> last line "Answer: 42" -> extract_final_n
 | Name | Signature | What it's for |
 |---|---|---|
 | `GSM8K` | `GSM8K()` | The benchmark, registered lazily as `gsm8k`. `name = "gsm8k"`. `description = "Grade-school math word problems: multi-step arithmetic reasoning."` `source = "openai/gsm8k (main/test, 1,319 problems) - Cobbe et al. 2021"`. |
-| `GSM8K.load` | `load(self) -> list[BenchItem]` | All 1,319 test items, in dataset order. Needs `datasets` (the `bench` extra) and, the first time, the internet. |
+| `GSM8K.load` | `load(self) -> list[BenchItem]` | All items of `split`, in dataset order. Needs `datasets` (the `bench` extra) and, the first time, the internet. |
+| `GSM8K.items` | `items(self, rows: list[dict[str, Any]]) -> list[BenchItem]` | Dataset rows (`question`, `answer`) as questions: the prompts and ids `load` produces. `kumaru distill gold` reuses it, so its rows match what the benchmark asks. |
+| `GSM8K.split` | `ClassVar[str]`, `"test"` | The dataset split `load` reads. |
+| `GSM8KTrain` | `GSM8KTrain()` | Registered lazily as `gsm8k_train` (alias `gsm8k-train`). `split = "train"`, `training_data = True`. `description = "GSM8K's 7,473 training problems: teacher data for distillation, not a score."` |
 | `GSM8K.grade` | `grade(self, item: BenchItem, output: str) -> Grade` | Numeric comparison. `extracted` is the number as written (e.g. `"1,234"`); `detail = {"method": ...}`. |
 | `gold_answer` | `gold_answer(solution: str) -> str` | GSM8K's solution text -> the gold number: the part after the last `####`, with commas removed. |
 | `PROMPT` | `str` with one `{question}` field | The user message template. |
@@ -70,6 +74,12 @@ kumaru bench run gsm8k -c qwen36                                  # 100 seeded p
 kumaru bench run gsm8k -c qwen36 --full                           # all 1,319
 kumaru bench run gsm8k -c qwen36 --think --thinking-budget 8192   # budget per question: 8,192 + 8,192
 kumaru bench report runs\bench\<run>\gsm8k
+```
+
+Teacher answers for distillation (all 7,473 training problems; not a score; see [`distill.md`](../../train/distill.md)):
+
+```powershell
+kumaru bench run gsm8k_train -c qwen36 --no-think --full --max-tokens 1024 -o runs\distill\teacher-qwen36
 ```
 
 A real report line (Qwen2.5-7B, illustrative only; results are in [`docs\BENCHMARKS.md`](../../../../../BENCHMARKS.md)):
@@ -113,7 +123,7 @@ Then read `output` for the ids that matter. The table above tells you which of t
 - **Few-shot prompting:** override `messages(item)` to put worked examples before the question as earlier user/assistant turns. Give it a new `name`: it is a different benchmark.
 - **Answers that aren't plain numbers** (fractions, expressions) need a new grader, not a looser `extract_final_number`. GSM8K's answers are integers, and its extractor is pinned by tests.
 
-Pinned behaviour: `tests\test_bench_graders.py::TestGsm8kAndMmluPro` (`test_gsm8k_gold_answer_is_the_number_after_the_marker`, `test_gsm8k_grade_accepts_formatted_numbers`) and the number-extraction and matching cases in `tests\test_bench_extract.py`, including `test_numbers_equal_is_exact_near_large_values_unless_asked`.
+Pinned behaviour: `tests\test_bench_graders.py::TestGsm8kAndMmluPro` (`test_gsm8k_gold_answer_is_the_number_after_the_marker`, `test_gsm8k_grade_accepts_formatted_numbers`, `test_gsm8k_train_asks_the_training_split_under_its_own_ids`), `tests\test_distill.py::test_only_training_splits_declare_themselves_training_data`, and the number-extraction and matching cases in `tests\test_bench_extract.py`, including `test_numbers_equal_is_exact_near_large_values_unless_asked`.
 
 ## Failure modes
 
@@ -132,6 +142,7 @@ Pinned behaviour: `tests\test_bench_graders.py::TestGsm8kAndMmluPro` (`test_gsm8
 - `src\kumaru\eval\benchmarks\extract.py` — `extract_final_number`, `numbers_equal` ([`extract.md`](extract.md)).
 - `src\kumaru\eval\benchmarks\base.py` — `Benchmark`, `load_hf_rows`, `select_items`, the 8,192 default ([`base.md`](base.md)).
 - `src\kumaru\eval\benchmarks\runner.py` — budgets, records, report and compare ([`runner.md`](runner.md)).
-- `src\kumaru\core\registry.py` — `BENCHMARKS.register_lazy("gsm8k", ...)`.
+- `src\kumaru\core\registry.py` — `BENCHMARKS.register_lazy("gsm8k", ...)` and `("gsm8k_train", ...)`.
+- `src\kumaru\train\distill.py` — turns a `gsm8k_train` run into training data ([`distill.md`](../../train/distill.md)).
 - `tests\test_bench_graders.py`, `tests\test_bench_extract.py` — pinned grading behaviour.
 - [`docs\BENCHMARKS.md`](../../../../../BENCHMARKS.md) — results and grader validation.

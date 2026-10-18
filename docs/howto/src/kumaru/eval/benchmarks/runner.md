@@ -138,7 +138,8 @@ Every benchmark's default answer budget is `Benchmark.answer_tokens = 8192`. The
 
 Without `-j`:
 
-- **Any backend except `llamacpp_server`:** 1. The others serve one request at a time, so sending more only queues them, and a queued request can hit the read timeout.
+- **`transformers`:** for a greedy run (temperature 0), `backend.max_batch_size`, so that a batch fills. Otherwise 1: the backend batches only greedy requests ([`transformers_backend.md`](../../backends/transformers_backend.md)).
+- **Any other backend except `llamacpp_server`:** 1. These serve one request at a time, so sending more only queues them, and a queued request can hit the read timeout.
 - **`llamacpp_server`:** `slots` is the server's reported `total_slots`, or `llama_server.parallel` (default 4).
   - With `kv_unified: false`, the result is `slots`.
   - With `kv_unified: true` (the default), all slots share one context window. The result is then `max(1, min(slots, context_length // worst_case))`, where `worst_case` is the largest prompt + answer budget among the questions still to ask, + 256 (`PROMPT_MARGIN_TOKENS`).
@@ -156,7 +157,7 @@ The progress line shows the value in use: `acc 92.0%  j=3`.
 
   A mismatch refuses the run: `<run>\<bench> holds results from different settings (model, decoding parameters, seed or prompt mode).`
 
-  `-n`, `-j`, `--context`, `--label` and the dataset contents are **not** in the fingerprint.
+  `-n`, `-j`, `--context`, `--label`, `backend.max_batch_size` and the dataset contents are **not** in the fingerprint. A bf16 run with batching and one without can therefore share a directory, although a few greedy answers may differ through rounding ([`transformers_backend.md`](../../backends/transformers_backend.md)).
 - **Settings, not code.** The fingerprint does not cover Kumaru's code. After changing a grader, a resume keeps every saved verdict from the old grader. After changing a prompt template, every key changes, so a resume re-asks every question into the old directory. In both cases start a new run directory instead of resuming an old one.
 - **Record key** (per question). It hashes the fingerprint, the benchmark's messages, that question's `max_tokens` and its seed. A saved record is reused only if `error is None` and the key matches. Otherwise the question is asked again, and the new line is appended. `read_records` keeps the **last** record per id.
   - With `--use-agent-prompt`, the key hashes the bare question, **before** `ChatAgent.prepare` adds the agent prompt. That prompt states today's date, so hashing it would make a run resumed the next day ask every question again. The settings that shape the prompt are in the fingerprint instead.
@@ -218,7 +219,7 @@ Runs made before this fix (e.g. `runs\bench\20261010-104148-qwen25-7b-gguf-defau
 | `list_benchmarks` | `list_benchmarks() -> list[dict[str, Any]]` | Rows for `bench list`: name, description, source, code_exec. |
 | `default_label` | `default_label(model_id: str, profile: str \| None, params: GenerationParams) -> str` | See above. |
 | `model_name` | `model_name(model_id: str) -> str` | The file or repo name in a model path or id (the table above). Used by `default_label` when no profile is given. |
-| `default_concurrency` | `default_concurrency(cfg, backend, per_request_tokens: int) -> int` | See above. |
+| `default_concurrency` | `default_concurrency(cfg, backend, per_request_tokens: int, params: GenerationParams \| None = None) -> int` | See above. `params` decides whether a `transformers` run is greedy. |
 | `safe_name` | `safe_name(text: str) -> str` | Runs of characters outside `[A-Za-z0-9._-]` become `-`; leading and trailing `-`/`.` are stripped; empty becomes `run`. |
 | `item_seed` | `item_seed(seed: int, item_id: str) -> int` | `crc32(f"{seed}:{item_id}") & 0x7FFFFFFF`. Pinned by a test: old runs pair on it. |
 | `record_key` | `record_key(fingerprint: str, messages: Sequence[Message], params: GenerationParams) -> str` | The 16-hex-character resume key. |

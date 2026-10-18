@@ -63,7 +63,7 @@ Full walkthrough with troubleshooting: [`docs/QUICKSTART.md`](docs/QUICKSTART.md
 
 ---
 
-## The seven commands
+## The commands
 
 | Command | What it does |
 |---|---|
@@ -74,6 +74,7 @@ Full walkthrough with troubleshooting: [`docs/QUICKSTART.md`](docs/QUICKSTART.md
 | `kumaru train` | LoRA fine-tune or from-scratch pretrain |
 | `kumaru eval` | Latency, throughput, and quality regression checks |
 | `kumaru bench` | Public benchmarks with error bars; compares two runs with significance tests |
+| `kumaru distill` | Turns a large model's graded answers into training data for a small, fast one ([how](docs/TRAINING.md#part-3--distillation)) |
 
 ---
 
@@ -154,7 +155,7 @@ data/          sample training data and the golden benchmark questions
 scripts/       setup.ps1 (install), verify.ps1 (layered self-check),
                get-llama-server.ps1 (inference engine), check_graders.py (grader proof)
 docs/howto/    a page for every source file
-tests/         pytest suite (432 tests), runs with no GPU in under a minute
+tests/         pytest suite (517 tests), runs with no GPU in under a minute
 ```
 
 ## Requirements
