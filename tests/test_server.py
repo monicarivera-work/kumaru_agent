@@ -84,6 +84,31 @@ def test_empty_messages_returns_400(test_client: TestClient) -> None:
     assert response.json()["error"]["type"] == "RequestError"
 
 
+def test_every_client_system_message_reaches_the_model(
+    test_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert test_client.post("/v1/chat/completions", json=chat_payload()).status_code == 200  # loaded
+    backend = test_client.app.state.kumaru.backend
+    prompts: list[list] = []
+    stream = backend.stream
+
+    def spy(messages, params):
+        prompts.append(list(messages))
+        return stream(messages, params)
+
+    monkeypatch.setattr(backend, "stream", spy)
+    messages = [
+        {"role": "system", "content": "Be terse."},
+        {"role": "user", "content": "hello"},
+        {"role": "system", "content": "Use metric units."},
+    ]
+    response = test_client.post("/v1/chat/completions", json={**chat_payload(), "messages": messages})
+    assert response.status_code == 200
+    [prompt] = prompts
+    assert [m.role.value for m in prompt] == ["system", "user"]
+    assert prompt[0].content.endswith("\n\nBe terse.\n\nUse metric units.")  # after Kumaru's own
+
+
 def test_api_key_required_for_chat_completion() -> None:
     cfg = KumaruConfig(
         backend=BackendConfig(name="echo", model="echo", extra={"delay_s": 0}),
@@ -144,6 +169,29 @@ def test_thinking_budget_reaches_the_backend(test_client: TestClient) -> None:
     body = {**chat_payload(), "thinking": True, "thinking_budget": 2}
     message = test_client.post("/v1/chat/completions", json=body).json()["choices"][0]["message"]
     assert message["reasoning_content"] == "The user asked: "  # two 8-character pieces
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_thought_that_fills_max_tokens_ends_with_length_and_no_answer(
+    test_client: TestClient, stream: bool
+) -> None:
+    body = {**chat_payload(stream=stream), "thinking": True, "max_tokens": 5}
+    if stream:
+        payloads = sse_payloads(test_client, body)
+        deltas = [payload["choices"][0]["delta"] for payload in payloads[1:-1]]
+        assert all(set(delta) == {"reasoning_content"} for delta in deltas)
+        reasoning = "".join(delta["reasoning_content"] for delta in deltas)
+        finish = payloads[-1]["choices"][0]["finish_reason"]
+        completion_tokens = payloads[-1]["kumaru"]["completion_tokens"]
+    else:
+        reply = test_client.post("/v1/chat/completions", json=body).json()
+        message = reply["choices"][0]["message"]
+        assert not message["content"]
+        reasoning = message["reasoning_content"]
+        finish = reply["choices"][0]["finish_reason"]
+        completion_tokens = reply["usage"]["completion_tokens"]
+    assert reasoning == ECHO_THOUGHT[:40]  # five 8-character pieces, then the cap
+    assert (finish, completion_tokens) == ("length", 5)
 
 
 @pytest.mark.parametrize(

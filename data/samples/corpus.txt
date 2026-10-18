@@ -3,9 +3,11 @@ DEMONSTRATION CORPUS
 This file exists so that `kumaru train configs/train/pretrain-nano.yaml` runs end
 to end immediately, on any machine, with no download. It is far too small to
 produce a useful model — a few kilobytes against the hundreds of gigabytes real
-pretraining requires. Point `data.text_file` at your own corpus when you want to
-train something real. Any UTF-8 text file works, at any size, because the packing
-step writes a memory-mapped token array rather than loading everything into RAM.
+pretraining requires. Point `data.text_file` at your own corpus, with a new
+`output_dir`, when you want to train something real. Any UTF-8 text file works,
+at any size: packing tokenizes it one chunk at a time and streams the token ids
+straight to disk (4 bytes per token), so memory use stays flat however large the
+corpus is, and training then reads those tokens as a memory map.
 
 Watch what happens when you train on this file. The loss will fall quickly and
 then keep falling, far below what the data supports. That is memorization, and

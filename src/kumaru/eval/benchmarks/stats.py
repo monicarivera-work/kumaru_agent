@@ -72,6 +72,8 @@ def paired_bootstrap_ci(
 
     Resampling whole questions (not the two systems separately) keeps the
     pairing, so the interval reflects only uncertainty about the *difference*.
+    Both paths draw exactly `resamples` resamples; without numpy that is pure
+    Python and slow (about 9 s for 10,000 resamples of 12,000 questions).
     """
     if len(a) != len(b):
         raise ValueError("paired samples must have equal length")
@@ -85,7 +87,7 @@ def paired_bootstrap_ci(
 
     try:
         import numpy as np
-    except ImportError:  # pragma: no cover - numpy ships with the torch extra
+    except ImportError:  # pragma: no cover - the bench, dev and torch extras install numpy
         np = None  # type: ignore[assignment]
 
     if np is not None:
@@ -101,7 +103,6 @@ def paired_bootstrap_ci(
         return delta, float(low), float(high)
 
     rng_py = random.Random(seed)
-    resamples = min(resamples, 2_000)
     means = sorted(sum(rng_py.choices(diffs, k=n)) / n for _ in range(resamples))
     low = means[int(alpha * resamples)]
     high = means[min(resamples - 1, int(math.ceil((1 - alpha) * resamples)) - 1)]

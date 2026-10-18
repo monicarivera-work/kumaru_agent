@@ -22,6 +22,7 @@ Context: 2 message(s), ~218 prompt tokens, max_tokens=256, temperature=0.0.
 - `8f434346` is the first 8 hex digits of the SHA-256 of the last user message, so the same question always gets the same reply.
 - `Context:` reports how many messages the agent sent (here the system prompt plus the question), the backend's token estimate, and the `max_tokens` and `temperature` that reached the backend. That makes this profile a cheap check of parameter precedence: `kumaru chat -c test -t 0.3 --max-tokens 99 -q hi` reports `max_tokens=99, temperature=0.3`.
 - With thinking on (`--think`, the UI's **Think** button, or `"thinking": true` in a request), echo first streams a stand-in thought on the reasoning channel (`StreamChunk.reasoning`, SSE `reasoning_content`), then the answer. A thinking budget caps the thought at that many 8-character pieces.
+- `max_tokens` caps the thought and the answer together, counted in pieces (8 characters of thought, 6 of answer). When the cap cuts the reply short, the reply ends with `finish_reason` `length`; otherwise it ends with `stop`.
 
 Everything above the backend is real: the agent's prompt and history handling, the FastAPI routes, SSE framing, metrics and the UI. `scripts\verify.ps1` uses this profile for its "agent (echo backend)" and "server + SSE streaming" checks, and the closing hint of `scripts\setup.ps1` suggests `kumaru serve -c test` to verify the stack without a model download.
 
@@ -30,7 +31,7 @@ Everything above the backend is real: the agent's prompt and history handling, t
 | Use it for | Not for |
 |---|---|
 | Install smoke tests; checking that a machine can run the stack at all | Anything about answer quality, speed, memory or tokenization |
-| UI, route and SSE development | Model-specific behaviour: chat templates, a real engine's `<think>` handling, `finish_reason` `length` (echo always finishes with `stop`) |
+| UI, route and SSE development, including replies cut off by `max_tokens` (`finish_reason` `length`) | Model-specific behaviour: chat templates, a real engine's `<think>` handling |
 | Bisecting a failure between the application layer and the model layer | Measuring throughput: the timing is `delay_s`, not inference |
 | Dry-running another profile's sampling with `-b echo` (see below) | |
 
@@ -42,7 +43,7 @@ Everything above the backend is real: the agent's prompt and history handling, t
 | `backend.model` | `echo` | `Qwen/Qwen2.5-7B-Instruct` | A label; echo's `info()` reports `model_id` `echo` whatever this says. |
 | `backend.max_context_length` | `8192` | `8192` | Shown by `info()` (the CLI prints "8,192 token context") and used by the agent to size the history budget. Echo enforces no window. |
 | `backend.extra.delay_s` | `0.01` | `0.01` (echo's fallback in `EchoBackend.__init__`) | Sleep before every streamed piece. Non-zero so the stream really awaits between pieces, as a real engine does. See [Choosing `delay_s`](#choosing-delay_s). |
-| `generation.max_tokens` | `256` | `1024` | Only echoed back in the reply. Echo never truncates. |
+| `generation.max_tokens` | `256` | `1024` | Echoed back in the reply, and caps it. Ordinary questions fit (`hello` takes 18 pieces, 30 with thinking); only a question of more than about 1,300 characters reaches the cap. Lower it to test `finish_reason` `length`. |
 | `generation.temperature` | `0.0` | `0.7` | Only echoed back. Echo is deterministic at any temperature. |
 | `agent.max_history_tokens` | `2048` | `6144` | The agent's history budget: `min(2048, max(512, 8192 − min(256, 8192 // 2) − 128))` = 2,048 estimated tokens before older turns are trimmed. |
 | `server.port` | `8080` | `8080` | Same as the default; stated so the profile says where the UI is (`http://127.0.0.1:8080`). |
@@ -122,7 +123,8 @@ This prints `max_tokens=32768, temperature=1.0`, the Qwen3.6 thinking preset, wi
 
 1. `backend.extra.delay_s`: `0` in automated tests, `0.01` for smoke tests, `0.05` or more to watch the UI (table above).
 2. `server.port`, or `--port`, to run beside a model server; `verify.ps1` takes `-Port` (default 8099).
-3. Leave the rest alone: echo ignores sampling, and the values only show up in its reply text.
+3. `generation.max_tokens` only to test truncation: lower it, or pass `--max-tokens` or `"max_tokens"`, to get `finish_reason` `length`.
+4. Leave the rest alone: echo ignores the other sampling values, which only show up in its reply text.
 
 ## Failure modes
 
@@ -132,7 +134,7 @@ This prints `max_tokens=32768, temperature=1.0`, the Qwen3.6 thinking preset, wi
 | The UI shows each reply at once | `delay_s` is `0` or `0.01`; a whole reply takes under 0.3 s. | Set `KUMARU_BACKEND__EXTRA__DELAY_S` to `0.05` or more. |
 | `serve` fails to bind port 8080 | Another server already uses the port. | `--port 8081`, or stop the other server. |
 | An interleaving or cancellation test behaves as if the requests ran one after another | `delay_s: 0` never awaits, so nothing else runs until the reply completes. | Give that test a small non-zero delay. |
-| The UI's "No answer: the max-tokens cap ran out while the model was still thinking" note can't be reproduced | Echo always finishes with `stop`, never `length`. | Use a real model, or a test double that emits `finish_reason="length"`. |
+| The UI's "No answer: the max-tokens cap ran out while the model was still thinking" note can't be reproduced | The UI's smallest max-tokens step is 256, far above echo's thought (12 pieces for `hello`). | Keep **Use the model's tuned settings** checked, so the UI sends no `max_tokens`, start the server with `$env:KUMARU_GENERATION__MAX_TOKENS = '5'` (remove it afterwards), and click **Think**. Over the API, send `"thinking": true, "max_tokens": 5`. |
 | The thinking-budget slider changes nothing | The slider's smallest budget is 256; echo's thought for a short question is about a dozen pieces. | Use `--thinking-budget 2` or `"thinking_budget": 2`. |
 | `test` works but a model profile fails | The failure is in the model layer: dependencies, download, VRAM, engine. | Go to that backend's page, e.g. [llamacpp_server.md](../src/kumaru/backends/llamacpp_server.md). |
 

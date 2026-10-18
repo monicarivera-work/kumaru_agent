@@ -85,7 +85,7 @@ class Tool(ABC):
         """
         try:
             return await asyncio.wait_for(self.run(**kwargs), timeout=self.timeout_s)
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):  # two distinct classes before Python 3.11
             return f"ERROR: tool '{self.name}' timed out after {self.timeout_s}s."
         except ToolError as exc:
             return f"ERROR: {exc}"

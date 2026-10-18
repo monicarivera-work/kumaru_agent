@@ -23,7 +23,7 @@ A score on 100 questions is an estimate. Re-run on 100 other questions from the 
 
 - **Wilson, not "p ± 1.96·√(p(1−p)/n)".** The textbook interval assumes the estimate is roughly normal. That breaks near 0% and 100%, exactly where good models score: at 99/100 its upper bound passes 100%, and at 100/100 it has zero width. Wilson's interval stays in [0, 1], is asymmetric near the edges, and has close to the advertised 95% coverage even for small n.
 - **McNemar, because the runs are paired.** Both runs answered the same questions (same `-n`, `--seed`). Questions both got right, or both got wrong, say nothing about which model is better. Only the disagreements do: b = only A right, c = only B right. If there were no real difference, each disagreement would be a fair coin flip, so the p-value is a binomial tail. Pairing removes "this sample was easy" from the comparison. That makes it far more sensitive than comparing two independent CIs.
-- **Bootstrap for the size of the gain.** Resampling questions with replacement, keeping each question's A and B results together, shows how much B − A would move with a different sample of questions. It reports how big the gain is. McNemar reports whether there is one. With numpy, the code draws how many −1/0/+1 differences each resample contains (a multinomial). That is equivalent to drawing questions and about 1000× faster. Without numpy, it falls back to `random.choices` and caps at 2,000 resamples.
+- **Bootstrap for the size of the gain.** Resampling questions with replacement, keeping each question's A and B results together, shows how much B − A would move with a different sample of questions. It reports how big the gain is. McNemar reports whether there is one. With numpy, the code draws how many −1/0/+1 differences each resample contains (a multinomial). That is equivalent to drawing questions and about 1000× faster. Without numpy, it falls back to `random.choices` and still draws every requested resample. In pure Python that is slow: at the default 10,000 resamples, about 1 second for GSM8K's 1,319 questions and about 9 seconds for MMLU-Pro's 12,032.
 - **Holm, because you test five benchmarks at once.** At p < 0.05 per test, the chance that at least one of five benchmarks "wins" by luck is about 23%, not 5%. Holm multiplies the smallest p by m, the next by m − 1, and so on, keeping the order monotone. That keeps the family-wise false-alarm rate at 5%, and it is never less powerful than plain Bonferroni.
 
 ## Mental model: what the numbers mean in practice
@@ -65,7 +65,7 @@ So on 100 paired questions, a real gain shows up at about 8–14 points, dependi
 | `Z95` | `float = 1.959963984540054` | Two-sided 95% normal quantile. |
 | `wilson_interval` | `wilson_interval(successes: int, n: int, z: float = Z95) -> tuple[float, float]` | `(low, high)` as fractions. `n <= 0` returns `(0.0, 1.0)`. |
 | `mcnemar_exact` | `mcnemar_exact(b: int, c: int) -> float` | Two-sided exact p. `b + c == 0` returns `1.0`. Exact integer arithmetic, so it never underflows. |
-| `paired_bootstrap_ci` | `paired_bootstrap_ci(a: Sequence[float], b: Sequence[float], *, resamples: int = 10_000, seed: int = 0, confidence: float = 0.95) -> tuple[float, float, float]` | `(mean(b) - mean(a), low, high)`. Unequal lengths raise `ValueError`; empty input returns `(0.0, 0.0, 0.0)`. Deterministic for a given seed. |
+| `paired_bootstrap_ci` | `paired_bootstrap_ci(a: Sequence[float], b: Sequence[float], *, resamples: int = 10_000, seed: int = 0, confidence: float = 0.95) -> tuple[float, float, float]` | `(mean(b) - mean(a), low, high)`. Unequal lengths raise `ValueError`; empty input returns `(0.0, 0.0, 0.0)`. Draws exactly `resamples` resamples, with or without numpy. Deterministic for a given seed. |
 | `holm_adjust` | `holm_adjust(pvalues: Sequence[float]) -> list[float]` | Adjusted p-values in input order, monotone, capped at 1. |
 
 ## How to use it
@@ -102,7 +102,7 @@ paired_bootstrap_ci(a, b)         # (0.17, 0.07, 0.27)  -> +17 points, CI +7 to 
 
 - **Another metric to test** (a graded score, not right/wrong): `paired_bootstrap_ci` accepts any floats. McNemar is only for binary outcomes. Use a sign test or a permutation test, and add it here with a test.
 - **Different confidence level:** `wilson_interval(z=...)` and `paired_bootstrap_ci(confidence=...)` take it. The runner and table headers assume 95%.
-- **Keep it dependency-free:** the module must work without numpy. `tests\test_bench_stats.py::TestPairedBootstrap::test_pure_python_fallback_agrees_with_numpy` pins that the two paths agree.
+- **Keep it dependency-free:** the module must work without numpy. `tests\test_bench_stats.py::TestPairedBootstrap::test_pure_python_fallback_agrees_with_numpy` pins that the two paths agree, and `test_pure_python_fallback_draws_every_requested_resample` pins that the fallback honours `resamples` (it once capped every request at 2,000) and stays deterministic.
 
 ## Failure modes
 
@@ -113,7 +113,8 @@ paired_bootstrap_ci(a, b)         # (0.17, 0.07, 0.27)  -> +17 points, CI +7 to 
 | CI excludes 0 but verdict says no difference | Small discordant counts; the bootstrap is optimistic (example above). | Trust the exact p. |
 | A significant "A better" where B shows `cut off` > 0 | B's answers hit the token cap (8,192 by default, plus any thinking budget) and failed. The test is right about the scores, but the cause is the setting. | Re-run B in a new directory with a larger `--max-tokens` or `--thinking-budget` (a resume refuses changed budgets), then compare again. |
 | `ValueError: paired samples must have equal length` | Lists passed in different lengths. | Pair by question id first (as `compare_runs` does). |
-| Bootstrap CI differs slightly between machines | numpy is missing on one of them, so it falls back to 2,000 pure-Python resamples with a different random stream. | Install numpy (it comes with `datasets`). The test suite pins the two paths to within 4 points of each other at the CI edges; the delta itself is identical. |
+| Bootstrap CI differs slightly between machines | numpy is missing on one of them, so it falls back to pure-Python resampling: the same number of resamples, but a different random stream and percentile rule. | Install numpy (the `bench` and `dev` extras include it). The test suite pins the two paths to within 4 points of each other at the CI edges; the delta itself is identical. |
+| `bench compare` takes seconds per benchmark | numpy is missing, so the bootstrap runs in pure Python (about 9 seconds for 12,000 questions at 10,000 resamples). | Install numpy: `pip install -e ".[bench]"`. |
 
 ## Related files
 

@@ -6,7 +6,8 @@
 - you need to verify Kumaru without model weights;
 - you want to isolate app-layer failures from model failures;
 - you are writing tests for streaming behaviour;
-- you are testing the thinking path (SSE `reasoning_content`, the UI's thinking panel, `thinking_ms`, budgets) without a thinking model.
+- you are testing the thinking path (SSE `reasoning_content`, the UI's thinking panel, `thinking_ms`, budgets) without a thinking model;
+- you are testing what happens when `max_tokens` cuts a reply short (`finish_reason` `length`).
 
 ---
 
@@ -24,6 +25,8 @@ Since v0.2 it also emulates thinking. When `params.thinking` is truthy, it first
 ```text
 The user asked: hello. Echo cannot reason; this text only exercises the reasoning channel.
 ```
+
+Like a real model, it stops at `max_tokens`, which counts the thought and the reply together, and then reports `finish_reason` `length` instead of `stop`.
 
 ## Why it exists
 
@@ -54,8 +57,8 @@ All of it can be tested in milliseconds instead of loading the 17.73 GB Qwen3.6 
 3. Text is streamed in fixed-size pieces, and **one piece counts as one token**:
    - **Reasoning:** the thought, in 8-character pieces. It is emitted only when `params.thinking` is truthy; `None` means off, because echo's default is no thinking. `thinking_budget` truncates the thought to that many pieces, and `0` means no reasoning at all.
    - **Answer:** the reply, in 6-character pieces.
-   - **Usage:** `completion_tokens` = reasoning pieces + answer pieces. `prompt_tokens` = the base heuristic `count_tokens()`.
-4. Echo ignores `max_tokens` (it only prints it) and `stop`. A test that needs truncation or stop behaviour must use a different backend or a stub.
+   - **Usage:** `completion_tokens` = reasoning pieces + answer pieces actually emitted. `prompt_tokens` = the base heuristic `count_tokens()`.
+4. `max_tokens` caps reasoning and answer pieces together, as on a real model. `thinking_budget` is applied to the thought first; the cap then covers what is left. When the cap cuts the reply short, the final chunk says `finish_reason="length"`; otherwise it says `"stop"`, including when the reply fits exactly. A thought that uses up the whole cap leaves no answer at all, which is what the UI's "No answer: the max-tokens cap ran out while the model was still thinking" note is for. Echo still ignores `stop`: a test of stop sequences must use a different backend or a stub.
 5. `backend.extra.delay_s` (default `0.01`) is slept before *every* piece, reasoning and answer alike. Use `0` for tests and at least `0.05` to watch streaming by eye.
 
 ## Public API
@@ -67,9 +70,9 @@ All of it can be tested in milliseconds instead of loading the 17.73 GB Qwen3.6 
 | `EchoBackend.delay_s` | `delay_s: float = float(config.extra.get("delay_s", 0.01))` | Seconds slept before each streamed piece. Set in `__init__`; mutable on the instance. |
 | `EchoBackend._load` | `async def _load(self) -> None` | No-op load hook. |
 | `EchoBackend.info` | `def info(self) -> BackendInfo` | `model_id="echo"`, `device="cpu"`, `dtype="none"`, `context_length=backend.max_context_length`, `supports_streaming=True`, `extra={"purpose": "testing and install verification"}`. |
-| `EchoBackend.stream` | `async def stream(self, messages: Sequence[Message], params: GenerationParams) -> AsyncIterator[StreamChunk]` | Optional reasoning pieces, then answer pieces, then `StreamChunk(finish_reason="stop", usage=...)`. |
+| `EchoBackend.stream` | `async def stream(self, messages: Sequence[Message], params: GenerationParams) -> AsyncIterator[StreamChunk]` | Optional reasoning pieces, then answer pieces, at most `max_tokens` of them in total, then `StreamChunk(finish_reason="length" or "stop", usage=...)`. |
 
-Exact piece counts for `"hello"` with `GenerationParams()` defaults, measured: 18 answer pieces. With thinking on, 12 reasoning pieces + 18 = 30, and `completion_tokens` is 30.
+Exact piece counts for `"hello"` with `GenerationParams()` defaults, measured: 18 answer pieces. With thinking on, 12 reasoning pieces + 18 = 30, and `completion_tokens` is 30. With `max_tokens=17` the reply stops one piece short (`length`, 17); with `max_tokens=18` it fits exactly (`stop`, 18). With thinking on and `max_tokens=5`, the cap runs out mid-thought: 5 reasoning pieces (40 characters), no answer, `length`, 5.
 
 ## How to use it
 
@@ -168,7 +171,8 @@ Use echo as the template for other test-only backends:
 - leave `_load()` a no-op if there are no resources;
 - return accurate `BackendInfo`;
 - stream `StreamChunk(delta=...)`, and `StreamChunk(reasoning=...)` if you test thinking;
-- emit a final chunk with `finish_reason` and `Usage`.
+- stop at `params.max_tokens` pieces across both channels;
+- emit a final chunk with `finish_reason` (`length` if the cap cut the reply short, else `stop`) and `Usage`.
 
 ```python
 from kumaru.backends.base import Backend, chunks_from_text
@@ -187,17 +191,17 @@ class FixedBackend(Backend):
         return BackendInfo(name=self.name, model_id="fixed", device="cpu", dtype="none")
 
     async def stream(self, messages, params):
-        n = 0
-        if params.thinking:
-            n += 1
-            yield StreamChunk(reasoning="fixed thought")
-        for piece in chunks_from_text("fixed response", size=6):
-            n += 1
-            yield StreamChunk(delta=piece)
-        yield StreamChunk(finish_reason="stop", usage=Usage(prompt_tokens=0, completion_tokens=n))
+        pieces = [("reasoning", "fixed thought")] if params.thinking else []
+        pieces += [("delta", piece) for piece in chunks_from_text("fixed response", size=6)]
+        for channel, piece in pieces[: params.max_tokens]:  # max_tokens covers reasoning too
+            yield StreamChunk(**{channel: piece})
+        yield StreamChunk(
+            finish_reason="length" if len(pieces) > params.max_tokens else "stop",
+            usage=Usage(prompt_tokens=0, completion_tokens=min(len(pieces), params.max_tokens)),
+        )
 ```
 
-If a test needs `stop` or `max_tokens` semantics, base it on the `ReverseBackend` example in [`base.md`](base.md) instead.
+With thinking on and `max_tokens=2`, this yields the thought and `'fixed '`, then `length` with 2 completion tokens. If a test needs `stop` semantics too, base it on the `ReverseBackend` example in [`base.md`](base.md) instead.
 
 ## Failure modes
 
@@ -208,7 +212,8 @@ If a test needs `stop` or `max_tokens` semantics, base it on the `ReverseBackend
 | Timing assertions flaky on Windows | Sub-tick sleeps round up to the ~15.6 ms timer tick. | Assert on ordering and counts, not durations; use `delay_s: 0`. |
 | No reasoning / thinking panel in a test | `thinking` was `None` or `false`. Echo's default is off. | Send `"thinking": true`, `--think`, or `GenerationParams(thinking=True)`. |
 | `thinking_ms` is null and no thought appears despite `--think` | `thinking_budget` is `0`, which truncates the thought to zero pieces. | Use a budget ≥ 1, or none. |
-| Reply ignores `stop` or exceeds `max_tokens` | Echo does not implement either; it only prints `max_tokens`. | Expected. Use a stub backend for truncation tests. |
+| Reply ignores `stop` | Echo does not implement stop sequences. | Expected. Use a stub backend, such as the `ReverseBackend` example in [`base.md`](base.md), for stop tests. |
+| Reply ends mid-sentence with `finish_reason` `length`, or a thinking reply has no answer | `max_tokens` is smaller than the pieces echo needs (18 answer pieces for `hello`, 30 with thinking), and the cap counts the thought too. | Raise `max_tokens` (`configs\test.yaml` uses 256) or set a `thinking_budget` that leaves room for the answer; or keep the cap small on purpose to test truncation. |
 | Reply says `You said: (nothing)` | No user message, or empty user content. | Send `Message.user(...)` or CLI `-q "..."`. |
 | Token counts are approximate | Echo uses the base heuristic for prompts, and pieces for completions. | Use a tokenizer-backed backend for exact counts. |
 | `Unknown backend: 'echo'.` | Registry lazy registration is missing. | Restore `BACKENDS.register_lazy("echo", "kumaru.backends.echo:EchoBackend")`. |
@@ -222,4 +227,5 @@ If a test needs `stop` or `max_tokens` semantics, base it on the `ReverseBackend
 - `src\kumaru\core\types.py` — defines the message, params, chunk, usage and info models.
 - `configs\test.yaml` — ready-to-run echo profile; see [`test.yaml.md`](../../../configs/test.yaml.md).
 - `src\kumaru\cli.py` — `chat` and `serve` instantiate this backend through the registry.
-- `tests\test_backends.py` — echo determinism, thinking-channel and budget tests.
+- `tests\test_backends.py` — echo determinism, thinking-channel, budget and `max_tokens`-cap tests (`length` in both channels, and `stop` on an exact fit).
+- `tests\test_server.py` — `test_a_thought_that_fills_max_tokens_ends_with_length_and_no_answer` checks the same cap through the HTTP API, streaming and not.

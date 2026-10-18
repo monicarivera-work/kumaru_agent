@@ -15,9 +15,11 @@
 # matters here and barely matters at 7B.
 #
 # Chinchilla-optimal training wants roughly 20 tokens per parameter — about 2B
-# tokens (~8 GB of text) for this model. The sample corpus is ~1,650 tokens, so
+# tokens (~8 GB of text) for this model. The sample corpus is ~1,700 tokens, so
 # the model memorizes it instantly. Point `text_file` at a real corpus to train
-# properly.
+# properly, and give that run its own `output_dir`: the first run packs the
+# corpus into <output_dir>/tokens.bin, and later runs reuse that file without
+# re-reading `text_file`.
 #
 #   kumaru train configs/train/pretrain-nano.yaml --dry-run
 #   kumaru train configs/train/pretrain-nano.yaml
@@ -32,10 +34,11 @@ output_dir: runs/nano
 run_name: nano-101m
 
 data:
-  train_file: data/samples/corpus.txt   # ignored for pretrain; text_file is used
+  train_file: data/samples/corpus.txt   # read only when text_file is unset
   text_file: data/samples/corpus.txt    # any UTF-8 text file, any size
   tokenizer: Qwen/Qwen2.5-0.5B-Instruct # reuse a good BPE tokenizer (~152k vocab)
-  max_seq_length: 512
+  # No data.max_seq_length: that is a LoRA setting and pretraining ignores it.
+  # The packed window length is model.max_seq_length below.
 
 model:
   vocab_size: 0            # 0 = take it from the tokenizer
@@ -44,7 +47,8 @@ model:
   n_kv_heads: 4            # grouped-query attention: 2x smaller KV cache
   d_model: 512
   d_ff: 1408               # ~2.75 x d_model, the standard SwiGLU ratio
-  max_seq_length: 256      # small so the tiny demo corpus yields several windows
+  max_seq_length: 256      # packed window and context length; small so the tiny
+                           # demo corpus still yields several windows
   dropout: 0.0             # pretraining on a large corpus does not need dropout
   rope_theta: 10000.0
   tie_embeddings: true     # vocab is 152k; untied embeddings would dominate the model

@@ -45,7 +45,7 @@ pip install -e ".[dev]"
 
 macOS / Linux: `source .venv/bin/activate` instead.
 
-This installs FastAPI, Pydantic, Typer and httpx, plus pytest, ruff and mypy (the `dev` extra) so `scripts\verify.ps1` can run the tests. No PyTorch, no CUDA, nothing heavy. It took 95 seconds in a fresh virtual environment with an empty pip cache; re-runs are faster.
+This installs FastAPI, Pydantic, Typer and httpx, plus pytest, ruff, mypy and numpy (the `dev` extra) so `scripts\verify.ps1` can run the tests. No PyTorch, no CUDA, nothing heavy. It took 75 seconds in a fresh virtual environment with an empty pip cache; re-runs are faster.
 
 ---
 
@@ -136,7 +136,7 @@ Verify:
 kumaru info
 ```
 
-You want to see a `cuda:0` row naming your GPU. If it says `unavailable (CPU only)` while you do have an NVIDIA card, you installed the CPU wheel. Running the CUDA command again will not replace it, because pip sees torch is already installed. Uninstall it first: `pip uninstall -y torch`, then run the CUDA command above.
+You want to see a `cuda:0` row naming your GPU. If it says `unavailable (CPU only)` while you do have an NVIDIA card, you installed the CPU wheel. Running the CUDA command again will not replace it, because pip sees torch is already installed. Uninstall it first: `pip uninstall -y torch`, then run the CUDA command above. Or run `.\scripts\setup.ps1 -Gpu`, which replaces a CPU-only build itself.
 
 ---
 

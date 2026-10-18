@@ -55,7 +55,7 @@ A training config is the experiment record. Six months after an adapter is saved
 | `data.train_file` | string | required | SFT JSONL path; fallback corpus path for pretrain. | Use `data/samples/chat_train.jsonl` for examples. |
 | `data.eval_file` | string or null | null | Explicit SFT eval JSONL. | Prefer for stable eval; else use `eval_split`. |
 | `data.eval_split` | float `[0, 0.5)` | 0.05 | Deterministic held-out fraction. | Starter LoRA configs use 0.1. |
-| `data.max_seq_length` | int | 2048 | SFT token limit; overlong examples are dropped. | 2048 for 7B, 1024 for small. |
+| `data.max_seq_length` | int | 2048 | SFT token limit; overlong examples are dropped. LoRA only: `task: pretrain` never reads it. | 2048 for 7B, 1024 for small. |
 | `data.train_on_completions_only` | bool | true | Masks non-assistant labels to `-100`. | Keep true for SFT. |
 | `data.text_file` | string or null | null | Raw UTF-8 corpus for pretraining. | Set for `task: pretrain`. |
 | `data.tokenizer` | string | `Qwen/Qwen2.5-1.5B-Instruct` | Tokenizer for pretraining and vocab size. | Starter uses `Qwen/Qwen2.5-0.5B-Instruct`. |
@@ -65,7 +65,7 @@ A training config is the experiment record. Six months after an adapter is saved
 | `lora.target_modules` | list[string] | q/k/v/o + gate/up/down | Modules receiving adapters. | All seven for 7B; attention-only for smoke. |
 | `lora.bias` | `none`, `all`, `lora_only` | `none` | Bias training policy. | Keep `none` unless reproducing an experiment. |
 | `optim.epochs` | float | 3.0 | Dataset passes. | 2-4 for LoRA; sample pretraining overfits quickly. |
-| `optim.per_device_batch_size` | int | 1 | Micro-batch per GPU. | 1 for 7B/2k context; 2 for 0.5B; 16 for NanoLM. |
+| `optim.per_device_batch_size` | int | 1 | Micro-batch per GPU. | 1 for 7B/2k context; 2 for 0.5B; 4 for NanoLM. |
 | `optim.gradient_accumulation_steps` | int | 16 | Micro-batches per optimizer step. | Increase effective batch without much memory cost. |
 | `optim.learning_rate` | float | `2e-4` | Peak LR. | `2e-4` LoRA; `3e-4` NanoLM starter. |
 | `optim.lr_scheduler` | `cosine`, `linear`, `constant` | `cosine` | LR schedule. | Use cosine unless comparing schedules. |
@@ -83,7 +83,7 @@ A training config is the experiment record. Six months after an adapter is saved
 | `model.n_kv_heads` | int | 4 | Key/value heads for GQA. | Must divide `n_heads`; fewer saves KV memory. |
 | `model.d_model` | int | 512 | Residual width. | Main size knob with layers. |
 | `model.d_ff` | int | 1408 | SwiGLU hidden width. | About 2.67-2.75x `d_model`. |
-| `model.max_seq_length` | int | 512 | NanoLM context/window. | Match corpus packing. |
+| `model.max_seq_length` | int | 512 | NanoLM packed training window and maximum context; the only sequence length pretraining reads. | 256 in the starter; changing it needs no repack of `tokens.bin`. |
 | `model.dropout` | float | 0.0 | Transformer dropout. | 0 for large corpus; consider >0 for tiny runs. |
 | `model.rope_theta` | float | 10000.0 | RoPE base. | Keep default unless context-scaling experiments. |
 | `model.tie_embeddings` | bool | true | Share input/output embeddings. | Keep true with large vocabularies. |
@@ -138,11 +138,11 @@ Pretraining YAML matching the checked-in starter:
 ```yaml
 task: pretrain
 output_dir: runs/nano
+run_name: nano-101m
 data:
   train_file: data/samples/corpus.txt
   text_file: data/samples/corpus.txt
   tokenizer: Qwen/Qwen2.5-0.5B-Instruct
-  max_seq_length: 512
 model:
   vocab_size: 0
   n_layers: 8
@@ -150,13 +150,13 @@ model:
   n_kv_heads: 4
   d_model: 512
   d_ff: 1408
-  max_seq_length: 512
+  max_seq_length: 256
   dropout: 0.0
   rope_theta: 10000.0
   tie_embeddings: true
 optim:
   epochs: 3
-  per_device_batch_size: 16
+  per_device_batch_size: 4
   gradient_accumulation_steps: 4
   learning_rate: 3.0e-4
   lr_scheduler: cosine
@@ -166,7 +166,13 @@ optim:
   gradient_checkpointing: false
   optimizer: adamw_torch
   bf16: true
+  seed: 42
+logging_steps: 5
+save_steps: 500
+save_total_limit: 2
 ```
+
+The starter has no `data.max_seq_length`: pretraining cuts windows of `model.max_seq_length` and ignores the data field.
 
 ## Tuning / operational notes
 
@@ -181,7 +187,7 @@ If you hit OOM, change these in order:
 1. `optim.per_device_batch_size: 1`.
 2. `load_in_4bit: true` for 7B LoRA.
 3. `optim.gradient_checkpointing: true`.
-4. Reduce `data.max_seq_length` or `model.max_seq_length`.
+4. Reduce `data.max_seq_length` (LoRA) or `model.max_seq_length` (pretraining).
 5. Reduce `lora.r` or `model.d_model`/`model.n_layers`.
 
 ## How to extend it

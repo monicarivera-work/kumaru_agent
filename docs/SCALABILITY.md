@@ -421,7 +421,7 @@ The 70B row is why nobody pretrains a frontier model on their own hardware, and 
 | then | Streaming datasets | unbounded | `datasets.load_dataset(streaming=True)` |
 | cluster | Pre-tokenized shards | petabytes | One shard per rank, `webdataset`/`mosaic` |
 
-`pack_corpus_to_memmap()` writes a flat `uint32` array and `PackedTokenDataset` reads slices from it. The OS pages in only what you touch, so the same code trains on a 10 MB toy file or a 200 GB corpus — with no loading delay at startup and no change to the training loop.
+`pack_corpus_to_memmap()` writes a flat `uint32` array and `PackedTokenDataset` reads slices from it. The OS pages in only what you touch, so the same code trains on a 10 MB toy file or a 200 GB corpus — with no loading delay at startup and no change to the training loop. Packing streams too: each chunk of text is tokenized and appended to disk before the next is read, so packing memory stays flat (about 0.2 GB) however large the corpus is, and the packed file takes 4 bytes per token.
 
 One detail that matters: the array is `uint32`, not `uint16`. Modern vocabularies exceed 65,536 tokens (Qwen2.5 is ~152k). `uint16` would silently wrap token ids, and the only symptom would be a model that trains smoothly and produces nonsense.
 

@@ -29,14 +29,14 @@ Tool calling turns a chat model into an agent, but it also creates an unbounded 
 | `Tool.read_only` | `bool` | Indicates whether the tool mutates state and should require confirmation. |
 | `Tool.run` | `async run(**kwargs: Any) -> str` | Subclass implementation hook. |
 | `Tool.spec` | `spec() -> dict[str, Any]` | Returns an OpenAI-style function declaration. |
-| `Tool.safe_run` | `async safe_run(**kwargs: Any) -> str` | Runs with timeout and converts exceptions to `ERROR:` text. |
+| `Tool.safe_run` | `async safe_run(**kwargs: Any) -> str` | Runs with a `timeout_s` limit and returns every failure as text instead of raising: `ERROR: tool '<name>' timed out after <timeout_s>s.` (the hung call is cancelled), `ERROR: <message>` for a `ToolError` (its hint, if any, follows in parentheses), or `ERROR: tool '<name>' failed: <ExceptionType>: <message>` for anything else, which is also logged with its traceback. |
 | `CurrentTimeTool` | `class CurrentTimeTool(Tool)` | Built-in read-only example tool registered as `current_time`. |
 | `CurrentTimeTool.run` | `async run(**kwargs: Any) -> str` | Returns `datetime.now().strftime(format)`. |
 | `ToolBelt` | `class ToolBelt(names: list[str])` | Instantiates the enabled tools for one agent. |
 | `ToolBelt.__bool__` | `__bool__() -> bool` | True when any tools are enabled. |
 | `ToolBelt.specs` | `specs() -> list[dict[str, Any]]` | Returns OpenAI-style tool specs. |
 | `ToolBelt.descriptions` | `descriptions() -> list[str]` | Returns compact prompt descriptions. |
-| `ToolBelt.invoke` | `async invoke(name: str, arguments: dict[str, Any]) -> str` | Runs a named enabled tool safely, or returns an unknown-tool error. |
+| `ToolBelt.invoke` | `async invoke(name: str, arguments: dict[str, Any]) -> str` | Runs a named enabled tool through `safe_run()`, or returns `ERROR: unknown tool '<name>'. Available: <enabled names, or none>`. |
 
 ## How to use it
 
@@ -129,6 +129,7 @@ If the tool lives in another package, expose it via the `kumaru.tools` entry-poi
 |---|---|---|
 | `RegistryError` when constructing `ToolBelt` | Config names a tool that was not registered. | Import the module that registers it or fix `agent.enabled_tools`. |
 | Tool returns `ERROR: tool 'x' timed out...` | `run()` exceeded `timeout_s`. | Shorten the operation, raise the timeout carefully, or make it cancellable. |
+| Tool returns `ERROR: tool 'x' failed: TypeError: ... unexpected keyword argument ...` | The model sent an argument name that `run()` does not accept. | Take `**kwargs` and raise `ToolError` naming the expected arguments, so the model can retry correctly. |
 | Tool exception ends up in model text | `safe_run()` intentionally converts exceptions. | Raise `ToolError` for expected failures with actionable messages. |
 | Mutating tool ran without confirmation | Future loop ignored `Tool.read_only`. | Gate `read_only=False` tools before calling `invoke()`. |
 | Model loops forever asking for tools | Missing hard iteration cap in orchestration. | Enforce `config.agent.max_tool_iterations` in the tool loop. |
@@ -142,4 +143,5 @@ If the tool lives in another package, expose it via the `kumaru.tools` entry-poi
 - `src\kumaru\core\errors.py` — defines `ToolError`.
 - `src\kumaru\core\registry.py` — owns the `TOOLS` registry and entry-point discovery.
 - `src\kumaru\core\types.py` — already includes tool-related message fields for future use.
+- `tests\test_tools.py` — pins `safe_run()` and `invoke()`: a result, a timeout (the hung call is cancelled), `ToolError` text with its hint, other exceptions reported with their type, misnamed arguments, and an unknown tool.
 

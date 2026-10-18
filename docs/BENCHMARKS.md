@@ -148,6 +148,8 @@ The one IFEval disagreement is deliberate. For "the letter *x* should appear at 
 
 The GSM8K check caught a real bug. The first grader compared numbers with a relative tolerance of one part in a million, so on the two largest answers in the test set, 1,450,000 and 2,880,000 (`gsm8k/611` and `gsm8k/796`), the wrong answer "reference + 1" graded correct. GSM8K answers are exact, so numbers now have to match exactly. Formatting such as `$1,450,000.00` still never matters, and a 10⁻⁹ allowance absorbs floating-point noise such as 0.1 + 0.2. Re-grading every saved GSM8K and golden answer in the runs reported here with the exact rule changed no verdict, so the bug inflated no score in this document.
 
+Three golden format graders were later tightened, because each accepted a reply its prompt rules out: `banana-caps` took `BANANA.` although the prompt says "nothing else", `three-colors` took the same colour three times, and `json-ada` took a third key. Re-grading the 135 golden answers saved by the five runs reported here with the stricter patterns changed no verdict either.
+
 Reproduce the first, second and fourth rows with:
 
 ```powershell

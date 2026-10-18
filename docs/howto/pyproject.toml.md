@@ -11,7 +11,7 @@
 `pip install -e ".[dev]"`, which is what `scripts\setup.ps1` runs, reads this file and:
 
 1. installs the **base dependencies**: enough to chat through the server, the UI and the CLI;
-2. installs each **extra** named in the brackets (here `dev`: the test tools);
+2. installs each **extra** named in the brackets (here `dev`: the test tools and linters, plus numpy);
 3. links `src\kumaru` into the virtual environment **editable** (`-e`), so code edits take effect without reinstalling;
 4. creates `.venv\Scripts\kumaru.exe`, which runs `kumaru.cli:main`.
 
@@ -23,7 +23,7 @@ Every modern Python tool reads this one file (the standard is PEP 621), so it re
 
 The decision that matters is **a light base and heavy extras**:
 
-- **The base installs from prebuilt wheels.** Anyone can install it and reach a working UI without a GPU or a compiler. It took 95 seconds in a fresh virtual environment with an empty pip cache, including the test tools.
+- **The base installs from prebuilt wheels.** Anyone can install it and reach a working UI without a GPU or a compiler. `pip install -e ".[dev]"`, test tools and numpy included, took 75 seconds in a fresh virtual environment with an empty pip cache.
 - **PyTorch (about 2.5 GB) is opt-in.** The right wheel depends on your CUDA version, and pip cannot work that out. That is why `setup.ps1 -Gpu` installs it from PyTorch's own index first.
 - **The recommended model needs no extra at all.** The `qwen36` profile runs on `llama-server`, a separate binary that `scripts\get-llama-server.ps1` downloads, not a Python package. The `huggingface_hub` base dependency downloads its model file.
 
@@ -72,8 +72,8 @@ Extras add up, and `all` means every extra. Which ones you need depends on the b
 | `train` | `torch`, plus peft, datasets, tensorboard | Fine-tuning (LoRA) or pretraining | `.\scripts\setup.ps1 -Gpu` |
 | `quant` | bitsandbytes | 4-bit loading and QLoRA | `.\scripts\setup.ps1 -Gpu -Quant` |
 | `gguf` | llama-cpp-python | The in-process `llamacpp` backend (not `qwen36`) | `.\scripts\setup.ps1 -Gguf` |
-| `bench` | datasets, langdetect, nltk, regex | `kumaru bench` on the public benchmarks | `pip install -e ".[bench]"` |
-| `dev` | pytest, pytest-asyncio, ruff, mypy | Running the tests and the linters | `setup.ps1` always installs it |
+| `bench` | datasets, langdetect, nltk, numpy, regex | `kumaru bench` on the public benchmarks (numpy makes `bench compare`'s bootstrap about 1000× faster) | `pip install -e ".[bench]"` |
+| `dev` | pytest, pytest-asyncio, ruff, mypy, numpy | Running the tests and the linters (numpy lets the training-data and bootstrap tests run instead of skipping) | `setup.ps1` always installs it |
 | `all` | Every extra above | A workstation that does everything | `pip install -e ".[all]"`, after `setup.ps1 -Gpu` |
 
 Two cautions:
@@ -91,7 +91,7 @@ Two cautions:
 | `asyncio_mode = "auto"` | pytest-asyncio runs every `async def` test without a decorator |
 | `filterwarnings` | Hides third-party `DeprecationWarning` noise |
 
-A test that needs an extra calls `pytest.importorskip("numpy")` (or the extra's package), so a base install skips it instead of failing. On a base install the suite reports 322 passed and 8 skipped. [`tests/README.md`](tests/README.md) covers the suite.
+A test that needs an extra calls `pytest.importorskip("torch")` (or the extra's package), so a base install skips it instead of failing. numpy is the exception: `dev` installs it, so the tests that need only numpy (training-data prep, the bootstrap's fast path) run on every development install. On a base install (base plus `dev`, what `setup.ps1` installs) the suite passes with 8 tests skipped: four PyTorch tests, three IFEval tests that need NLTK and one that needs langdetect. [`tests/README.md`](tests/README.md) covers the suite.
 
 **ruff** (`[tool.ruff]`, `[tool.ruff.lint]`): the linter, and the one check every change must pass.
 
@@ -111,7 +111,7 @@ A test that needs an extra calls `pytest.importorskip("numpy")` (or the extra's 
 | `python_version = "3.10"` | Checks against the oldest Python Kumaru supports, so it flags standard-library features 3.10 lacks |
 | `ignore_missing_imports = true` | A package that isn't installed (torch on a base install) is typed `Any` instead of being an error |
 | `warn_unused_ignores = false` | The default, made explicit. A `# type: ignore` that one platform needs isn't reported as unused on another: `llamacpp_server.py` reads `Popen._handle`, which the type stubs declare only on Windows |
-| Override for `numpy.*` | Skips numpy's own type stubs, so numpy values are typed `Any`. numpy 2.5 and later write those stubs in Python 3.12 syntax, which a 3.10 check cannot parse. Without the override, any install with numpy (the torch extra) stops on `numpy\__init__.pyi` with "errors prevented further checking" before checking any Kumaru code |
+| Override for `numpy.*` | Skips numpy's own type stubs, so numpy values are typed `Any`. numpy 2.5 and later write those stubs in Python 3.12 syntax, which a 3.10 check cannot parse. Without the override, any install with numpy (the `dev`, `bench` and `torch` extras all include it) stops on `numpy\__init__.pyi` with "errors prevented further checking" before checking any Kumaru code |
 
 As of 0.2.0, `mypy src` reports 9 errors in 5 files, all in code from 0.1.0 (type annotations only, no runtime bugs). The first run builds `.mypy_cache\` and is slow with torch installed; later runs take about 5 seconds. Treat a *new* error as a signal.
 
@@ -153,7 +153,7 @@ Run these from the activated venv in the repo root.
 | A dependency you added, or a version bump, does not appear | Editable installs pick up code, not this file | Re-run `pip install -e ".[dev]"` (plus your extras) |
 | `[WinError 32] ... kumaru.exe ... used by another process` | `kumaru serve` is running | Stop it, then re-run |
 | `ModuleNotFoundError: No module named 'torch'` | A `transformers` profile (including `default`) on a base install | `.\scripts\setup.ps1 -Gpu`, or use `-c qwen36` |
-| `kumaru info` says `cuda: unavailable` on an NVIDIA machine | A CPU-only torch is installed, and pip will not replace it | `pip uninstall -y torch`, then `.\scripts\setup.ps1 -Gpu` |
+| `kumaru info` says `cuda: unavailable` on an NVIDIA machine | A CPU-only torch is installed, and a plain `pip install` will not replace it | `.\scripts\setup.ps1 -Gpu`, which replaces a CPU-only build |
 | `pip install -e ".[all]"` fails building `llama-cpp-python` | No C/C++ compiler | Leave out `gguf`: `pip install -e ".[train,quant,bench,dev]"` |
 | `pip install -e ".[quant]"` fails on `bitsandbytes` | No prebuilt wheel for your platform | Skip `quant`; set `load_in_4bit: false` and use bf16 |
 | `No module named pytest` when running the tests | Installed with plain `pip install -e .` | `pip install -e ".[dev]"` |
