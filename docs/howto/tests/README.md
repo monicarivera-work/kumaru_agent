@@ -1,6 +1,6 @@
 # `tests/`
 
-> The offline regression suite. 373 tests, no GPU, no downloads, under a minute.
+> The offline regression suite. 393 tests, no GPU, no downloads, under a minute.
 
 **Read this when:** you have changed something and want to know whether you broke it, or you are adding a feature and need to know where its test belongs.
 
@@ -40,6 +40,7 @@ The parts that genuinely need a GPU are covered by `scripts\verify.ps1 -Full`, w
 | `test_types.py` | The wire vocabulary changing shape; `merged()` mutating shared state; division-by-zero in throughput maths |
 | `test_backends.py` | `generate()` drifting from `stream()`; **stop sequences split across chunk boundaries being missed** |
 | `test_agent.py` | Prompt assembly losing the system message; memory policies overflowing the budget or dropping the system prompt |
+| `test_knowledge.py` | Coding guidance missing from the CLI, API or UI path, or duplicated; learned references losing their whitespace, overwriting a file or running code; invalid packs failing without the reason, or only after the model has loaded; references overflowing the context, being cut anywhere but at an exact prefix, or all being read whatever the budget |
 | `test_server.py` | API shape changing; SSE framing breaking; auth being bypassable; error responses losing their shape |
 | `test_train_data.py` | **Loss masking regressing** — the highest-consequence silent bug in the project; collator padding labels with a real token id |
 

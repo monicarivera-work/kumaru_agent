@@ -166,9 +166,10 @@ async def run_eval(config: KumaruConfig, *, suite: str = "smoke", output: str | 
     suite_name, cases = load_suite(suite)
 
     backend = BACKENDS.create(config.backend.name, config.backend)
+    # Before load: a bad knowledge pack or tool name fails with nothing to release.
+    agent = ChatAgent(backend, config)
     with console.status(f"[cyan]loading {config.backend.model}…", spinner="dots"):
         await backend.load()
-    agent = ChatAgent(backend, config)
 
     results: list[CaseResult] = []
     started = time.perf_counter()

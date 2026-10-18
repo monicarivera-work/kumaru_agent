@@ -114,9 +114,11 @@ class AppState:
                 cfg = self.config.backend
                 logger.info("initializing backend '%s' -> %s", cfg.name, cfg.model)
                 backend = BACKENDS.create(cfg.name, cfg)
+                # Before load: a bad knowledge pack must not leave a model holding memory.
+                agent = ChatAgent(backend, self.config)
                 await backend.load()
                 self.backend = backend
-                self.agent = ChatAgent(backend, self.config)
+                self.agent = agent
                 self.load_error = None
                 logger.info("server ready at http://%s:%d", self.config.server.host, self.config.server.port)
             except Exception as exc:  # noqa: BLE001 - reported via /healthz

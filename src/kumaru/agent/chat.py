@@ -37,6 +37,11 @@ class ChatAgent:
     """Turns a message list into a reply, using a backend and a memory policy."""
 
     def __init__(self, backend: Backend, config: KumaruConfig) -> None:
+        """Read config and local knowledge packs; never touch the backend.
+
+        Callers build the agent *before* `backend.load()`, so an unreadable or
+        invalid pack fails while there is still no model to release.
+        """
         self.backend = backend
         self.config = config
         self.memory = get_policy(config.agent.memory_policy)

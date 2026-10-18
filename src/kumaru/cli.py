@@ -155,9 +155,10 @@ async def _chat_loop(cfg: Any, single_prompt: str | None, overrides: dict[str, A
 
     with console.status(f"[cyan]loading {cfg.backend.model}…", spinner="dots"):
         backend = BACKENDS.create(cfg.backend.name, cfg.backend)
+        # Before load: a bad knowledge pack or tool name fails with nothing to release.
+        agent = ChatAgent(backend, cfg)
         await backend.load()
 
-    agent = ChatAgent(backend, cfg)
     info = backend.info()
     console.print(f"[dim]{info.model_id} on {info.device} ({info.dtype}), "
                   f"{info.context_length:,} token context[/]")
@@ -290,7 +291,7 @@ def learn(
     """Learn from local references without downloads, execution, or fine-tuning."""
     from pydantic import ValidationError
 
-    from kumaru.agent.knowledge import KnowledgePack, read_local_text, save_pack
+    from kumaru.agent.knowledge import KnowledgePack, describe_errors, read_local_text, save_pack
     from kumaru.core.errors import ConfigError
 
     try:
@@ -298,7 +299,11 @@ def learn(
             topic=topic, version=version, source=source.name, content=read_local_text(source)
         )
     except ValidationError as exc:
-        raise ConfigError("Topic, version and reference content must be nonempty and bounded") from exc
+        raise ConfigError(
+            f"Cannot create knowledge pack {output}: {describe_errors(exc)}",
+            hint="Topic, version and the --source text must be nonempty and within "
+            "their length limits.",
+        ) from exc
     save_pack(pack, output)
     console.print(f"Saved reference pack: {output}", markup=False)
     console.print("Add its absolute path to agent.knowledge_files and restart chat/server.")

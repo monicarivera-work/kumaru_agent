@@ -1,16 +1,19 @@
 """Offline tests for coding guidance and explicitly imported reference packs."""
 
+import io
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from rich.console import Console
 from typer.testing import CliRunner
 
 from kumaru.agent.chat import ChatAgent
 from kumaru.agent.knowledge import (
     EXPERTISE,
     MAX_FILE_BYTES,
+    REFERENCE_HEADER,
     KnowledgePack,
     load_pack,
     read_local_text,
@@ -19,11 +22,13 @@ from kumaru.agent.knowledge import (
 )
 from kumaru.agent.prompt import build_system_prompt
 from kumaru.backends.echo import EchoBackend
-from kumaru.cli import app
+from kumaru.cli import _chat_loop, app
 from kumaru.core.config import AgentConfig, BackendConfig, KumaruConfig, load_config
 from kumaru.core.errors import ConfigError, ContextLengthExceededError
 from kumaru.core.types import Message
-from kumaru.server.app import create_app
+from kumaru.eval.benchmarks.runner import BenchSettings, run_benchmarks
+from kumaru.eval.harness import run_eval
+from kumaru.server.app import AppState, create_app
 
 
 def pack(content: str = "Use checked arithmetic.") -> KnowledgePack:
@@ -55,12 +60,30 @@ def test_pack_roundtrip_and_no_overwrite(tmp_path: Path) -> None:
     assert load_pack(path).content == "Unicode: 日本語"
 
 
-@pytest.mark.parametrize("text", ["{}", "not JSON", '{"topic":"x","unexpected":true}'])
-def test_invalid_pack_is_rejected(tmp_path: Path, text: str) -> None:
+@pytest.mark.parametrize(
+    ("text", "detail"),
+    [
+        ("{}", "topic: Field required"),
+        ("not JSON", "Invalid JSON: expected"),
+        ('{"topic":"x","unexpected":"PRIVATE-VALUE"}', "unexpected: Extra inputs are not permitted"),
+        (
+            '{"topic":"x","version":"1","source":"s","content":" \\n "}',
+            "content: String should contain non-whitespace text",
+        ),
+        ('{"a":1,"b":2,"c":3,"d":4,"e":5,"f":6}', "; and 5 more"),
+    ],
+    ids=["missing", "syntax", "extra", "blank", "many"],
+)
+def test_invalid_pack_is_rejected_with_the_reason(tmp_path: Path, text: str, detail: str) -> None:
     path = tmp_path / "bad.json"
     path.write_text(text, encoding="utf-8")
-    with pytest.raises(ConfigError, match="Invalid knowledge"):
+    with pytest.raises(ConfigError, match="Invalid knowledge") as caught:
         load_pack(path)
+    # The CLI and the server show only the message and hint, and the server's
+    # /healthz is unauthenticated: name the problem, never echo a value.
+    assert detail in caught.value.message
+    assert "PRIVATE-VALUE" not in str(caught.value)
+    assert "kumaru learn" in (caught.value.hint or "")
 
 
 def test_read_is_bounded_and_utf8_only(tmp_path: Path) -> None:
@@ -90,6 +113,102 @@ def test_total_reference_budget_and_disabled_context() -> None:
     assert "version: 1.0" in context
     assert reference_context(packs, 0) == ""
     assert reference_context([], 1000) == ""
+
+
+def test_reference_budget_is_an_exact_prefix_at_every_limit() -> None:
+    packs = [pack("x" * 40), pack("  indented\n"), pack("z")]
+    label = "Topic: Example language; version: 1.0; source: official.txt\n"
+    whole = REFERENCE_HEADER + "\n\n".join(label + p.content for p in packs)
+    assert reference_context(packs, len(whole) + 10) == whole
+    for limit in range(1, len(whole) + 1):
+        assert reference_context(packs, limit) == whole[:limit]
+
+
+def test_reference_budget_stops_reading_packs_once_full() -> None:
+    # Runs on every request: the work must not grow with the size or number of packs.
+    class Unread:
+        def __getattr__(self, name: str) -> str:
+            raise AssertionError(f"read .{name} of a pack past the budget")
+
+    packs = [pack("x" * 5000), *[Unread()] * 1000]
+    assert len(reference_context(packs, 1000)) == 1000  # type: ignore[arg-type]
+
+
+def test_learned_content_keeps_its_whitespace_and_labels_are_trimmed(tmp_path: Path) -> None:
+    text = "\n    def area(r):\r\n        return 3.14159 * r * r\n\n"
+    source = tmp_path / "reference.py"
+    source.write_bytes(text.encode("utf-8"))
+    output = tmp_path / "knowledge.json"
+    result = CliRunner().invoke(
+        app,
+        ["learn", "  Python ", "--version", " 3.12\n", "--source", str(source),
+         "--output", str(output)],
+    )
+    assert result.exit_code == 0, result.output
+    learned = load_pack(output)
+    assert (learned.topic, learned.version, learned.source) == ("Python", "3.12", "reference.py")
+    assert learned.content == text
+    assert text in reference_context([learned], 24_000)
+    with pytest.raises(ValidationError, match="topic"):
+        KnowledgePack(topic=" \t", version="1.0", source="s", content="x")
+
+
+def test_learn_cli_says_why_a_reference_is_rejected(tmp_path: Path) -> None:
+    source = tmp_path / "reference.txt"
+    source.write_text(" \n\t\n", encoding="utf-8")
+    output = tmp_path / "knowledge.json"
+    result = CliRunner().invoke(
+        app,
+        ["learn", "Topic", "--version", "1.0", "--source", str(source), "--output", str(output)],
+    )
+    assert result.exit_code == 1
+    assert isinstance(result.exception, ConfigError)
+    assert "content: String should contain non-whitespace text" in result.exception.message
+    assert not output.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_bad_pack_fails_every_entry_point_before_the_model_loads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loads: list[str] = []
+
+    async def record_load(self: EchoBackend) -> None:
+        loads.append(self.name)
+
+    monkeypatch.setattr(EchoBackend, "_load", record_load)
+    bad = tmp_path / "pack.json"
+    bad.write_text('{"topic": "x"}', encoding="utf-8")
+    cfg = KumaruConfig(
+        backend=BackendConfig(name="echo", model="echo", extra={"delay_s": 0}),
+        agent=AgentConfig(knowledge_files=[str(bad)]),
+    )
+    golden = tmp_path / "golden.jsonl"
+    golden.write_text('{"id": "hello", "prompt": "hello", "answer": "hello"}\n', encoding="utf-8")
+    reason = "Invalid knowledge pack .*version: Field required"
+
+    with pytest.raises(ConfigError, match=reason):
+        await _chat_loop(cfg, "hello", {})
+    assert loads == [], "kumaru chat loaded the model first"
+    with pytest.raises(ConfigError, match=reason):
+        await run_eval(cfg)
+    assert loads == [], "kumaru eval loaded the model first"
+    with pytest.raises(ConfigError, match=reason):
+        await run_benchmarks(
+            cfg,
+            [str(golden)],
+            BenchSettings(out_dir=tmp_path / "bench"),
+            console=Console(file=io.StringIO()),
+            show_progress=False,
+        )
+    assert loads == [], "kumaru bench run loaded the model first"
+    assert not (tmp_path / "bench").exists()
+    state = AppState(cfg)
+    await state._load()
+    assert loads == [], "the server loaded the model first"
+    assert state.backend is None
+    assert not state.ready
+    assert "version: Field required" in (state.load_error or "")
 
 
 def test_learn_cli_creates_reference_without_running_code(tmp_path: Path) -> None:

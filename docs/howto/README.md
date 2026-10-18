@@ -39,6 +39,7 @@ One page per file. Each page answers the same seven questions: what it does, why
 | `agent/chat.py` | [page](src/kumaru/agent/chat.md) | Changing how a turn is orchestrated |
 | `agent/prompt.py` | [page](src/kumaru/agent/prompt.md) | Tuning answer quality, or injecting context |
 | `agent/memory.py` | [page](src/kumaru/agent/memory.md) | Conversations get truncated; adding summarization or RAG |
+| `agent/knowledge.py` | [page](src/kumaru/agent/knowledge.md) | Coding guidance; importing reference packs with `kumaru learn` |
 | `agent/tools.py` | [page](src/kumaru/agent/tools.md) | **Adding a capability the model can call** |
 
 ## Server — the HTTP surface

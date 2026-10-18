@@ -562,9 +562,10 @@ class BenchRunner:
 
         backend = BACKENDS.create(self.cfg.backend.name, self.cfg.backend)
         try:
+            # Like the questions, a bad knowledge pack should fail before the model loads.
+            agent = ChatAgent(backend, self.cfg)
             with self.console.status(f"[cyan]loading {self.cfg.backend.model}...", spinner="dots"):
                 await backend.load()
-            agent = ChatAgent(backend, self.cfg)
             base = agent.resolve_params(
                 thinking=self.settings.thinking,
                 thinking_budget=self.settings.thinking_budget,
