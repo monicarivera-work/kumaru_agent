@@ -18,6 +18,9 @@ Kumaru is a complete, running LLM system you own end to end:
 - **Train** — LoRA/QLoRA fine-tuning on a single consumer GPU, plus a from-scratch transformer trainer that scales to multi-GPU.
 - **Measure** — public benchmarks (`kumaru bench`) with confidence intervals and significance tests, plus a fast eval harness, so "is it better?" has a number attached.
 - **Extend** — a plugin registry for backends, tools and benchmarks; new capabilities are additive, never surgical.
+- **Code and learn** — opt-in `coder` guidance for cross-platform development, Playwright,
+  Windows CLI and APIs; `kumaru learn` imports reviewed local references for new languages
+  and platforms without changing model weights.
 
 Every source file has a companion how-to in [`docs/howto/`](docs/howto/) explaining what it does, why it exists, how to operate it, how to extend it, and how it fails.
 
@@ -75,6 +78,7 @@ Full walkthrough with troubleshooting: [`docs/QUICKSTART.md`](docs/QUICKSTART.md
 | `kumaru eval` | Latency, throughput, and quality regression checks |
 | `kumaru bench` | Public benchmarks with error bars; compares two runs with significance tests |
 | `kumaru distill` | Turns a large model's graded answers into training data for a small, fast one ([how](docs/TRAINING.md#part-3--distillation)) |
+| `kumaru learn` | Create a versioned local reference pack for a language or platform |
 
 ---
 
@@ -90,6 +94,64 @@ Full walkthrough with troubleshooting: [`docs/QUICKSTART.md`](docs/QUICKSTART.md
 | Just testing the code | `test` | `kumaru serve -c test` |
 
 Every profile is a commented YAML file in [`configs/`](configs/). They are meant to be read.
+
+### Coding assistant and on-demand learning
+
+```powershell
+kumaru chat -c coder
+kumaru serve -c coder           # the same guidance in the API and web UI
+```
+
+The `coder` profile uses the default Qwen2.5-7B transformers backend. It needs the
+PyTorch extra and appropriate hardware. With another hardware profile (for example
+`qwen36`), enable the same guidance without replacing its backend:
+
+```powershell
+$env:KUMARU_AGENT__EXPERTISE = '[coding, playwright, windows, apis]'
+kumaru serve -c qwen36
+```
+
+Guidance covers idiomatic code, testing, Playwright locators/fixtures/traces,
+Windows shell/version differences, remoting, and secure HTTP/HTTPS/API integration.
+It does **not** install browsers, grant shell/remote access, execute code, or make a
+model an expert in every technology. Kumaru remains chat-only; generated code and
+commands need review and execution in your own authorized environment.
+
+To add a new language or platform, save reviewed, version-specific documentation,
+examples and test results in a UTF-8 text file, then import it:
+
+```powershell
+kumaru learn Rust --version 2024 --source C:\references\rust.txt --output C:\references\rust.json
+$env:KUMARU_AGENT__KNOWLEDGE_FILES = '["C:/references/rust.json"]'
+kumaru chat -c coder
+```
+
+The output directory must already exist; existing files are never overwritten.
+Alternatively set `agent.knowledge_files` to absolute JSON paths in your YAML.
+Packs load at chat/server startup, so restart after changing them. They include
+topic, version, source filename and content. Record official source URLs and
+review dates inside your source text; no network retrieval happens automatically.
+References are labeled as untrusted data, not executable instructions; this is
+model guidance, not a guaranteed prompt-injection defense. Never import secrets
+or unreviewed material. With remote inference, references go to that backend
+along with the prompt.
+
+`agent.max_knowledge_chars` bounds **all** reference text together (default 6000;
+0 disables it). This is prompt context, not semantic retrieval: put the most
+relevant pack first, keep notes focused, and raise the budget only when your
+model context allows it. Over-budget engineering prompts fail rather than being
+sent to the model; reduce references or increase the context/history budget.
+
+For actual on-demand weight training, use the existing [LoRA workflow](docs/TRAINING.md):
+curate verified conversation examples, hold out independent coding tasks, validate
+with `kumaru train <recipe.yaml> --dry-run`, train explicitly, compare held-out
+results, and load the adapter with `--adapter` on the matching transformers base
+model. Do not train on unchecked model-generated answers or deploy an adapter
+without measuring regressions. `kumaru learn` does not perform fine-tuning.
+
+Windows guidance includes Windows 7 onward, but runtime support is separate:
+modern Python and Playwright do not support all post-Vista releases. Check the
+specific OS/tool versions; use a supported development host for legacy targets.
 
 ---
 
@@ -155,7 +217,7 @@ data/          sample training data and the golden benchmark questions
 scripts/       setup.ps1 (install), verify.ps1 (layered self-check),
                get-llama-server.ps1 (inference engine), check_graders.py (grader proof)
 docs/howto/    a page for every source file
-tests/         pytest suite (517 tests), runs with no GPU in under a minute
+tests/         pytest suite (537 tests), runs with no GPU in under a minute
 ```
 
 ## Requirements

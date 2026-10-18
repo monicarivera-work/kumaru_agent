@@ -170,6 +170,9 @@ class AgentConfig(_Base):
     # Reserved for the tool layer; empty means "pure chat", the only mode so far.
     enabled_tools: list[str] = Field(default_factory=list)
     max_tool_iterations: int = 4
+    expertise: list[Literal["coding", "playwright", "windows", "apis"]] = Field(default_factory=list)
+    knowledge_files: list[str] = Field(default_factory=list)
+    max_knowledge_chars: int = Field(default=6000, ge=0, le=24000)
 
 
 class ServerConfig(_Base):

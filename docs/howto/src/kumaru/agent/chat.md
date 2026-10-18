@@ -12,7 +12,7 @@
 
 1. **Resolve parameters.** `resolve_params(**overrides)` layers `config.generation`, then `config.thinking_mode` (only when thinking resolves on), then the per-call overrides.
 2. **Prepare the prompt.** `prepare(messages, extra_context=..., reserve_tokens=params.max_tokens)` does three things:
-   - builds the system prompt (`agent\prompt.py`);
+   - builds the system prompt (`agent\prompt.py`), including any reference packs (`agent\knowledge.py`);
    - forces exactly one system message, at index 0;
    - trims the history with the configured memory policy (`agent\memory.py`) to fit the budget.
 
@@ -20,14 +20,15 @@
 3. **Generate.** `backend.generate()` for `complete()`, `backend.stream()` for `stream()`.
 4. **Log.** It writes one INFO line on the `agent.chat` logger with token counts and timing.
 
-The agent stores no conversation. Its only state is four attributes, all set in `__init__`:
+The agent stores no conversation. Its only state is five attributes, all set in `__init__`:
 
 - `backend`;
 - `config`;
 - `memory`: `get_policy(config.agent.memory_policy)`;
-- `tools`: `ToolBelt(config.agent.enabled_tools)`.
+- `tools`: `ToolBelt(config.agent.enabled_tools)`;
+- `knowledge`: `[load_pack(Path(p)) for p in config.agent.knowledge_files]` (`agent\knowledge.py`).
 
-Every caller constructs it after `backend.load()`:
+`__init__` never touches the backend, so every caller constructs the agent *before* `backend.load()`. A bad knowledge pack or tool name then fails before the model takes any memory:
 
 | Caller | Uses | Per-call overrides passed |
 |---|---|---|
@@ -154,13 +155,13 @@ max_tokens = min(max_tokens, max(1, backend.context_length - count_tokens(prepar
 
 | Name | Signature | What it's for |
 |---|---|---|
-| `ChatAgent` | `ChatAgent(backend: Backend, config: KumaruConfig)` | Builds `memory = get_policy(config.agent.memory_policy)` (an unknown name logs a warning and falls back to `sliding_window`) and `tools = ToolBelt(config.agent.enabled_tools)` (an unknown tool name raises `RegistryError`). Does not load the backend. |
-| `ChatAgent.backend`, `.config`, `.memory`, `.tools` | attributes | The wrapped `Backend`, the `KumaruConfig`, the `MemoryPolicy` and the `ToolBelt`. |
-| `ChatAgent.prepare` | `prepare(messages: Sequence[Message], *, extra_context: str \| None = None, reserve_tokens: int \| None = None) -> list[Message]` | Pure. Returns `memory.apply(ensure_system_message(messages, build_system_prompt(...)), budget, backend.count_tokens)`. `extra_context` becomes the last system-prompt section ("Relevant context:"). `reserve_tokens` defaults to `config.generation.max_tokens`; at most half the window is reserved. |
+| `ChatAgent` | `ChatAgent(backend: Backend, config: KumaruConfig)` | Builds `memory = get_policy(config.agent.memory_policy)` (an unknown name logs a warning and falls back to `sliding_window`) and `tools = ToolBelt(config.agent.enabled_tools)` (an unknown tool name raises `RegistryError`), and reads every `config.agent.knowledge_files` pack (`ConfigError` for an unreadable or invalid one). Never touches the backend, so callers build it before `backend.load()`. |
+| `ChatAgent.backend`, `.config`, `.memory`, `.tools`, `.knowledge` | attributes | The wrapped `Backend`, the `KumaruConfig`, the `MemoryPolicy`, the `ToolBelt` and the list of `KnowledgePack`s. |
+| `ChatAgent.prepare` | `prepare(messages: Sequence[Message], *, extra_context: str \| None = None, reserve_tokens: int \| None = None) -> list[Message]` | Pure. Returns `memory.apply(ensure_system_message(messages, build_system_prompt(...)), budget, backend.count_tokens)`. The last system-prompt section, "Relevant context:", holds the reference packs cut to `agent.max_knowledge_chars` (`reference_context()`), then `extra_context`. With `agent.expertise` or packs configured, a prompt still over the budget after trimming raises `ContextLengthExceededError`. `reserve_tokens` defaults to `config.generation.max_tokens`; at most half the window is reserved. |
 | `ChatAgent.resolve_params` | `resolve_params(**overrides) -> GenerationParams` | Applies the precedence above. `overrides` are `GenerationParams` field names. `None` values are ignored. Values are not re-validated (`model_copy`). An unknown name is attached to the copy but never sent. |
 | `ChatAgent.complete` | `async complete(messages: Sequence[Message], *, extra_context: str \| None = None, **overrides) -> ChatResult` | Resolves, prepares, trims `max_tokens` to the room left in the window, and calls `backend.generate()`. Logs `completed: ...`. Errors propagate. |
 | `ChatAgent.stream` | `async stream(messages: Sequence[Message], *, extra_context: str \| None = None, **overrides) -> AsyncIterator[StreamChunk]` | Async generator. Resolves, prepares and trims `max_tokens` like `complete()`, then re-yields `backend.stream()` chunks unchanged. Logs `streamed: ...` on exhaustion. |
-| `ChatAgent.describe` | `describe() -> dict` | Keys: `backend` (`backend.info().model_dump()`), `memory_policy` (the resolved policy's name), `max_history_tokens`, `tools` (enabled tool names), `generation` (full dump) and `thinking_mode` (non-`None` fields only). Served as `agent` in `GET /v1/info` once the backend has loaded. |
+| `ChatAgent.describe` | `describe() -> dict` | Keys: `backend` (`backend.info().model_dump()`), `memory_policy` (the resolved policy's name), `max_history_tokens`, `tools` (enabled tool names), `expertise`, `knowledge_topics` (the packs' topics), `generation` (full dump) and `thinking_mode` (non-`None` fields only). Served as `agent` in `GET /v1/info` once the backend has loaded. |
 
 ## How to use it
 
@@ -302,14 +303,14 @@ async def complete_with_tools(self, messages, **overrides):
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `ContextLengthExceededError`. Non-streaming HTTP gets a 413; streaming gets an SSE error frame; the CLI prints `error:` and exits 1. | `agent.memory_policy: none` and the conversation exceeds the budget. | Use `sliding_window`, lower the resolved `max_tokens`, or raise `max_history_tokens` or `--context`. |
+| `ContextLengthExceededError`. Non-streaming HTTP gets a 413; streaming gets an SSE error frame; the CLI prints `error:` and exits 1. | `agent.memory_policy: none` and the conversation exceeds the budget. Or, with `agent.expertise` or packs configured, the prompt is still over it after trimming (`Engineering guidance, references and recent messages exceed the prompt budget.`). | Use `sliding_window`, lower the resolved `max_tokens`, or raise `max_history_tokens` or `--context`. For guidance and references, lower `agent.max_knowledge_chars` or shorten `agent.expertise` ([knowledge.md](knowledge.md)). |
 | Long chats forget their early messages. | The history budget is `min(max_history_tokens, window - min(max_tokens, window/2) - 128)`, and the memory policy drops what does not fit. With `--context 32768`, `qwen36` keeps about 16,000 tokens of history. | Keep the window larger (the default 131072 keeps 65,536 tokens), or raise `agent.max_history_tokens`. |
 | Thinking turns trim more history than non-thinking turns. | The budget reserves the resolved `max_tokens` (up to half the window), and `thinking_mode.max_tokens` is usually the larger value. | Expected. Lower `thinking_mode.max_tokens` (bounding thoughts with `thinking_budget`) if history matters more. |
 | The model thinks but uses the non-thinking preset, and its thoughts get cut off. | `thinking` resolved to `None` and the template thinks by default. `thinking_mode` applies only when thinking resolves to `True`. | Pin `generation.thinking` to `true` or `false` in the profile, or send `thinking` per request. |
 | On a long chat, a reply stops with `finish_reason: "length"` well below `max_tokens`. | `max_tokens` was trimmed to the room the prompt left in the window. | Start a new chat, or raise `--context`. |
 | An out-of-range value (for example `temperature=5`) reaches the backend from Python. | `merged()` uses `model_copy`, which does not validate. | Validate in the caller. HTTP requests are validated by `schemas.py`. |
 | A misspelled override (`temprature=0.1`) has no effect. | Unknown keys are attached to the copy, and no backend reads them. | Use exact `GenerationParams` field names. |
-| The server's `/healthz` returns 503 `Backend failed to load: Unknown tool: 'x'. (Available tools: ...)`, but only after the model has loaded. | `ChatAgent.__init__` builds the `ToolBelt`, and the server constructs the agent after `backend.load()`. | Fix the name in `agent.enabled_tools`. `kumaru info` lists the tools. |
+| `Unknown tool: 'x'. (Available tools: ...)` or `Invalid knowledge pack <path>: ...`, before any model loads. The CLI prints `error:` and exits 1. The server's `/healthz` returns 503 with the message as `detail`, and chat requests get 503 `Backend failed to load: ...`. | `ChatAgent.__init__` builds the `ToolBelt` and reads the packs, and every caller builds the agent before `backend.load()`. | Fix the name in `agent.enabled_tools` (`kumaru info` lists the tools), or the pack the message names ([knowledge.md](knowledge.md)). |
 | A stored thought seems to change nothing. | By design, `reasoning` is never counted or sent. | Keep answers only, and render thoughts separately. |
 | The `streamed:` log line is missing. | The consumer stopped iterating early (`break` or a client disconnect). | Expected. |
 | The logged TTFT is far below the time to the first answer word. | TTFT counts the first thought. | Expected with thinking on. The server's final `stats.thinking_ms` measures the thinking phase. |
@@ -321,6 +322,7 @@ async def complete_with_tools(self, messages, **overrides):
 - `src\kumaru\agent\prompt.py`: `build_system_prompt()` and `ensure_system_message()`.
 - `src\kumaru\agent\memory.py`: `MemoryPolicy` and `get_policy()`.
 - `src\kumaru\agent\tools.py`: `ToolBelt`.
+- `src\kumaru\agent\knowledge.py`: `load_pack()` and `reference_context()`; see [knowledge.md](knowledge.md).
 - `src\kumaru\backends\base.py`: `Backend.generate()`, `stream()`, `count_tokens()`, `context_length`.
 - `src\kumaru\core\types.py`: `GenerationParams.merged()`, `Message`, `StreamChunk`, `ChatResult`.
 - `src\kumaru\core\config.py`: `GenerationParams` as `generation`, `ThinkingModeConfig`, `AgentConfig`.

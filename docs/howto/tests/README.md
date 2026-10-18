@@ -1,6 +1,6 @@
 # `tests/`
 
-> The offline regression suite. 517 tests, no GPU, no downloads, under a minute.
+> The offline regression suite. 537 tests, no GPU, no downloads, under a minute.
 
 **Read this when:** you have changed something and want to know whether you broke it, or you are adding a feature and need to know where its test belongs.
 
@@ -41,6 +41,7 @@ The parts that genuinely need a GPU are covered by `scripts\verify.ps1 -Full`, w
 | `test_backends.py` | `generate()` drifting from `stream()`; **stop sequences split across chunk boundaries being missed**; echo ignoring `max_tokens` or misreporting `length`; a batched greedy reply differing from the one the model gives alone, a batch spanning more than the context window, or a batch too big for the GPU failing instead of retrying in halves; a request or load slipping past `aclose()` |
 | `test_agent.py` | Prompt assembly losing the system message or dropping client system messages; memory policies overflowing the budget or dropping the system prompt |
 | `test_tools.py` | A hung tool stalling the agent; a failing or unknown tool raising instead of returning `ERROR: ...` text |
+| `test_knowledge.py` | Coding guidance missing from the CLI, API or UI path, or duplicated; learned references losing their whitespace, overwriting a file or running code; invalid packs failing without the reason, or only after the model has loaded; references overflowing the context, being cut anywhere but at an exact prefix, or all being read whatever the budget |
 | `test_server.py` | API shape changing; SSE framing breaking; auth being bypassable; error responses losing their shape |
 | `test_cli.py` | Flag handling, one-shot chat, `config` and the `bench` commands breaking; every command runs in-process on the echo backend |
 | `test_llamacpp_server.py` | llama-server model resolution, command line, request payload and failure handling regressing; no process is started and nothing is downloaded |

@@ -18,12 +18,15 @@ from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator, Sequence
+from pathlib import Path
 
+from kumaru.agent.knowledge import load_pack, reference_context
 from kumaru.agent.memory import get_policy
 from kumaru.agent.prompt import build_system_prompt, ensure_system_message
 from kumaru.agent.tools import ToolBelt
 from kumaru.backends.base import Backend
 from kumaru.core.config import KumaruConfig
+from kumaru.core.errors import ContextLengthExceededError
 from kumaru.core.logging import get_logger
 from kumaru.core.types import ChatResult, GenerationParams, Message, StreamChunk
 
@@ -34,10 +37,16 @@ class ChatAgent:
     """Turns a message list into a reply, using a backend and a memory policy."""
 
     def __init__(self, backend: Backend, config: KumaruConfig) -> None:
+        """Read config and local knowledge packs; never touch the backend.
+
+        Callers build the agent *before* `backend.load()`, so an unreadable or
+        invalid pack fails while there is still no model to release.
+        """
         self.backend = backend
         self.config = config
         self.memory = get_policy(config.agent.memory_policy)
         self.tools = ToolBelt(config.agent.enabled_tools)
+        self.knowledge = [load_pack(Path(path)) for path in config.agent.knowledge_files]
 
     # -- prompt assembly ----------------------------------------------------
 
@@ -60,10 +69,12 @@ class ChatAgent:
         At most half the window is reserved: `max_tokens` is a ceiling, not a
         forecast, and the generation methods trim it to the room actually left.
         """
+        references = reference_context(self.knowledge, self.config.agent.max_knowledge_chars)
+        context = "\n\n".join(part for part in (references, extra_context) if part)
         system_prompt = build_system_prompt(
             self.config.agent,
             tool_descriptions=self.tools.descriptions(),
-            extra_context=extra_context,
+            extra_context=context,
         )
         normalized = ensure_system_message(messages, system_prompt)
 
@@ -76,7 +87,14 @@ class ChatAgent:
         reserved = min(reserved, window // 2)
         budget = min(self.config.agent.max_history_tokens, max(512, window - reserved - 128))
 
-        return self.memory.apply(normalized, budget, self.backend.count_tokens)
+        prepared = self.memory.apply(normalized, budget, self.backend.count_tokens)
+        if (self.config.agent.expertise or self.knowledge) and self.backend.count_tokens(prepared) > budget:
+            raise ContextLengthExceededError(
+                "Engineering guidance, references and recent messages exceed the prompt budget.",
+                hint="Reduce agent.max_knowledge_chars or expertise, shorten the request, "
+                "or increase the context/history budget.",
+            )
+        return prepared
 
     def resolve_params(self, **overrides) -> GenerationParams:
         """Resolve the decoding parameters for one request.
@@ -178,6 +196,8 @@ class ChatAgent:
             "memory_policy": self.memory.name,
             "max_history_tokens": self.config.agent.max_history_tokens,
             "tools": list(self.tools.tools),
+            "expertise": self.config.agent.expertise,
+            "knowledge_topics": [pack.topic for pack in self.knowledge],
             "generation": self.config.generation.model_dump(),
             "thinking_mode": self.config.thinking_mode.model_dump(exclude_none=True),
         }

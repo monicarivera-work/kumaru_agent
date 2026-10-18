@@ -244,7 +244,7 @@ A new generation knob belongs on `GenerationParams`; see `docs\howto\src\kumaru\
 - **`kumaru config` prints API keys.** `dump_yaml` redacts nothing. Workaround: delete the `api_key:` lines before sharing.
 - **An all-digit API key from an environment variable becomes an int**, and validation then fails with `Input should be a valid string`. Workaround: quote it inside the value, `$env:KUMARU_SERVER__API_KEY = '"12345"'`.
 - **`server.max_concurrent_requests` has no minimum.** `0` makes every generation wait forever, and no error is logged; a negative value fails at startup with `ValueError: Semaphore initial value must be >= 0`. Workaround: keep it ≥ 1, and ≥ `llama_server.parallel`.
-- **`agent.memory_policy` is a free string.** An unknown name passes validation; `ChatAgent` then logs `unknown memory_policy '<name>'; using sliding_window` when it is built, after the model loads. Workaround: `sliding_window`, `drop_oldest` or `none`.
+- **`agent.memory_policy` is a free string.** An unknown name passes validation; `ChatAgent` then logs `unknown memory_policy '<name>'; using sliding_window` when it is built, before the model loads. Workaround: `sliding_window`, `drop_oldest` or `none`.
 
 ## Related files
 

@@ -1,0 +1,12 @@
+# Coding assistant with reviewed, on-demand reference learning.
+# kumaru chat -c coder  |  kumaru serve -c coder
+# Uses the default transformers backend; override backend/model for your hardware.
+agent:
+  expertise: [coding, playwright, windows, apis]
+  knowledge_files: []
+  max_knowledge_chars: 6000
+  max_history_tokens: 6144
+
+generation:
+  max_tokens: 2048
+  temperature: 0.2
