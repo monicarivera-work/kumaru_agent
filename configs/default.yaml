@@ -139,6 +139,8 @@ agent:
   expertise: []               # coding | playwright | windows | apis; see coder.yaml
   knowledge_files: []         # absolute paths to JSON packs created by kumaru learn
   max_knowledge_chars: 6000   # total reference characters added to the prompt
+  knowledge_indexes: []       # absolute paths to documentation indexes: kumaru learn --source FOLDER
+  max_retrieved_chars: 6000   # characters of matching passages added to each question; 0 = off
 
 server:
   host: 127.0.0.1             # 0.0.0.0 exposes to your LAN — set api_key first

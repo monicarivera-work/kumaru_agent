@@ -37,7 +37,7 @@ Three properties make a benchmark number usable, and this module guarantees them
    - A benchmark that executes code is refused without `--allow-code-exec`.
    - Each benchmark's `preflight()` runs.
 2. **Load and sample** every benchmark's questions (`select_items`, see [`base.md`](base.md#what--n--limit-picks-select_items)). This happens before the model loads, so a typo or missing package fails in seconds.
-3. **Build the `ChatAgent`, then load the backend once** (`loading <model>...`). Building the agent first means a bad knowledge pack or tool name also fails before the model loads. Resolve decoding with `ChatAgent.resolve_params(thinking=, thinking_budget=, temperature=)`. This is exactly how `kumaru chat` decodes: `generation` < `thinking_mode` (only when thinking is on) < flags.
+3. **Build the `ChatAgent`, then load the backend once** (`loading <model>...`). Building the agent first means a bad knowledge pack, documentation index or tool name also fails before the model loads. Resolve decoding with `ChatAgent.resolve_params(thinking=, thinking_budget=, temperature=)`. This is exactly how `kumaru chat` decodes: `generation` < `thinking_mode` (only when thinking is on) < flags.
 4. **Name the run** (`default_label`, below). The directory is `--out`, or else `<repo>\runs\bench\<YYYYmmdd-HHMMSS>-<label>`. The default is anchored at the repo root, not the current directory.
 5. **Check every benchmark against existing results** (the fingerprint, below). This happens before anything is written, so a refused resume leaves the old run untouched.
 6. Create the directory, print `results: <dir>` and write `run.json`.

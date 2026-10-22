@@ -22,6 +22,11 @@ from kumaru.core.errors import ConfigError
 MAX_FILE_BYTES = 128_000
 MAX_REPORTED_ERRORS = 5
 
+# Labels that cite a reference: shared by knowledge packs and documentation indexes.
+Topic = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+Version = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+Source = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+
 EXPERTISE = {
     "coding": (
         "Software engineering: work across languages and desktop, web, mobile, embedded, "
@@ -68,9 +73,9 @@ class KnowledgePack(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
-    topic: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
-    version: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
-    source: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    topic: Topic
+    version: Version
+    source: Source
     content: str = Field(min_length=1, max_length=100_000)
 
     @field_validator("content")

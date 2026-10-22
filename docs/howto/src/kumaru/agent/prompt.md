@@ -7,13 +7,14 @@
 ---
 
 ## What it does
-This file composes the full system prompt from configured persona text, quality directives, the current date, enabled tool descriptions, and optional retrieved context. It also ensures every message list has exactly one system message at index 0. Client-supplied system text augments, rather than replaces, server-side instructions: every nonblank client system message is appended after Kumaru's prompt, in the order sent.
+This file composes the full system prompt from configured persona text, quality directives, engineering guidance (`agent.expertise`), the documentation-excerpts rule, the current date, enabled tool descriptions, and optional retrieved context. It also ensures every message list has exactly one system message at index 0. Client-supplied system text augments, rather than replaces, server-side instructions: every nonblank client system message is appended after Kumaru's prompt, in the order sent.
 
 ## Why it exists
 The system prompt is the fastest way to change answer behavior without fine-tuning. Keeping assembly in one module makes prompt order deliberate and testable. Without normalization, clients could send no system prompt, several system prompts, or a replacement prompt that accidentally drops Kumaru's guardrails.
 
 ## Mental model
 - Stable identity goes first; volatile context goes last near the user's question.
+- Documentation excerpts are not part of the system prompt. With `agent.knowledge_indexes` set, `ChatAgent` puts them at the start of the latest user message, and `excerpts=True` adds only `EXCERPTS_RULE`, a fixed sentence saying the user did not write that block and it is untrusted data. The system prompt then stays the same whatever is retrieved, so servers such as llama.cpp can reuse their prompt cache ([doc_index.md](doc_index.md)).
 - Server guardrails always apply, even when a client sends `role="system"`.
 - `ensure_system_message()` removes all original system messages from the body and merges them into the one at index 0: Kumaru's prompt first, then each nonblank client system message, stripped, in the order sent, separated by blank lines. Blank ones add nothing, and none is ever dropped.
 
@@ -22,7 +23,7 @@ The system prompt is the fastest way to change answer behavior without fine-tuni
 | Name | Signature | What it's for |
 |---|---|---|
 | `QUALITY_DIRECTIVES` | `str` | Shared behavioral guardrails appended to every system prompt. |
-| `build_system_prompt` | `build_system_prompt(config: AgentConfig, *, tool_descriptions: Sequence[str] = (), extra_context: str \| None = None, include_date: bool = True) -> str` | Builds the complete system prompt string for a request. |
+| `build_system_prompt` | `build_system_prompt(config: AgentConfig, *, tool_descriptions: Sequence[str] = (), extra_context: str \| None = None, include_date: bool = True, excerpts: bool = False) -> str` | Builds the complete system prompt string for a request. `excerpts=True` adds `EXCERPTS_RULE` (from `agent\doc_index.py`) after the engineering guidance; `ChatAgent` passes it when documentation indexes are configured. |
 | `ensure_system_message` | `ensure_system_message(messages: Sequence[Message], system_prompt: str) -> list[Message]` | Returns a new list with exactly one merged system message at index 0. |
 
 ## How to use it
@@ -99,7 +100,7 @@ def build_system_prompt(config, *, tool_descriptions=(), extra_context=None, inc
     return "\n\n".join(s for s in sections if s)
 ```
 
-If the new section is optional and request-specific, prefer the existing `extra_context` parameter instead of adding global state.
+If the new section is optional and request-specific, prefer the existing `extra_context` parameter instead of adding global state. The system prompt comes before the whole history, so text there that changes from turn to turn stops servers such as llama.cpp from reusing their cache of that history. That is why documentation excerpts go in the latest user message instead.
 
 ## Failure modes
 
@@ -108,13 +109,14 @@ If the new section is optional and request-specific, prefer the existing `extra_
 | Client prompt does not override Kumaru behavior | `ensure_system_message()` merges client text after server text by design. | Change `config.agent.system_prompt` for server-wide behavior. |
 | Prompt contains a stale date in tests | `include_date=True` uses wall-clock time. | Pass `include_date=False` in deterministic tests. |
 | Tool use is never mentioned | `ToolBelt.descriptions()` is empty because `agent.enabled_tools` is empty. | Register the tool and add its name to config. |
-| Retrieved context seems ignored | Context was placed in an earlier user message instead of `extra_context`. | Pass `extra_context` to `ChatAgent.prepare`, `complete`, or `stream`. |
+| Retrieved context seems ignored | Context was placed in an earlier user message instead of `extra_context`. | Pass `extra_context` to `ChatAgent.prepare`, `complete`, or `stream`. For documentation, use `agent.knowledge_indexes`, which adds the matching passages to every question ([doc_index.md](doc_index.md)). |
 | A client system message seems ignored | It was blank or whitespace-only, which adds nothing; otherwise it is in the merged message, after Kumaru's prompt. | Send nonblank text. To see the merged prompt, call `ChatAgent.prepare()` on the same messages. |
 
 ## Related files
 
 - `src\kumaru\agent\chat.py` — calls `build_system_prompt()` and `ensure_system_message()`.
 - `src\kumaru\agent\tools.py` — provides tool descriptions inserted into the prompt.
+- `src\kumaru\agent\doc_index.py` — `EXCERPTS_RULE`, and the excerpts `ChatAgent` adds to the latest user message.
 - `src\kumaru\core\config.py` — defines `AgentConfig.system_prompt`.
 - `src\kumaru\core\types.py` — defines `Message` and `Role.SYSTEM`.
 - `ui\app.js` — lets the browser prepend one client system message from the UI.

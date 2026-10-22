@@ -273,7 +273,7 @@ Then `agent.memory_policy: summarize` in config. `ChatAgent` is untouched.
 
 ### The judgement call
 
-More context is not automatically better. Models attend most reliably to the beginning and end of their window — the "lost in the middle" effect. **Retrieving 2,000 relevant tokens beats stuffing 100,000 mediocre ones**, and it is far cheaper. Reach for a longer window only after retrieval has failed you.
+More context is not automatically better. Models attend most reliably to the beginning and end of their window — the "lost in the middle" effect. **Retrieving 2,000 relevant tokens beats stuffing 100,000 mediocre ones**, and it is far cheaper. Reach for a longer window only after retrieval has failed you. Documentation already works this way: an index built by `kumaru learn` holds up to 1 GiB of documentation and sends each question only its best passages, within `agent.max_retrieved_chars` ([how-to](howto/src/kumaru/agent/doc_index.md)).
 
 ---
 
@@ -323,7 +323,7 @@ Each of these is additive. None requires touching the agent loop:
 | Capability | Where it plugs in |
 |---|---|
 | Web search, code execution, file I/O | `@TOOLS.register(...)` |
-| RAG over your documents | A `MemoryPolicy`, plus a retrieval tool |
+| RAG over your documents | Built in for documentation folders: `kumaru learn` indexes one, and `agent.knowledge_indexes` adds the passages that match each question ([how-to](howto/src/kumaru/agent/doc_index.md)). Embeddings would join the keyword search in `find_passages` |
 | Multi-agent orchestration | A `Backend` that fans out to sub-agents |
 | Structured output / JSON mode | `GenerationParams` field + backend support |
 | Vision input | `Message.content` becomes a union type |
@@ -496,7 +496,7 @@ Every stage is additive. A judge is another kind of grader, so it arrives as a n
 3. **Fix latency before throughput.** Until you have more than two concurrent users, throughput is not your problem.
 4. **Use the engine's slots before adding hardware.** `llamacpp_server` already batches 4 requests. Move to vLLM (Linux or WSL) when you need dozens; it costs one config file.
 5. **Fine-tune only after prompting plateaus.** And run `configs/train/lora-small.yaml` first to validate the pipeline in five minutes.
-6. **Add retrieval before adding context length.** Cheaper, more accurate, and updatable.
+6. **Add retrieval before adding context length.** Cheaper, more accurate, and updatable. For documentation, index the folder with `kumaru learn` and list it in `agent.knowledge_indexes`.
 7. **Add tools last.** They multiply capability and they multiply failure modes.
 
 ---

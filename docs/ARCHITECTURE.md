@@ -284,7 +284,7 @@ Having both is the point: one file to learn from, one file to work with.
 |---|---|
 | A database | The agent is stateless. Adding persistence would undo the property that makes scaling trivial. |
 | User accounts / multi-tenancy | This is a local-first tool. Bearer-token auth exists for when you bind beyond localhost. |
-| A vector store | RAG is a `MemoryPolicy` plus a tool. Both plug in without core changes. |
+| A vector store | Documentation retrieval is keyword search (BM25) in one SQLite file per documentation set (`agent/doc_index.py`), so no embedding model competes with the LLM for the GPU. Embeddings can join it in `find_passages`, and retrieval over history is a `MemoryPolicy`; both plug in without core changes. |
 | Active tool calling | The seam exists and is inert. v0.2 is still chat-only, as specified. |
 | A JS framework | See Decision 10. |
 | Prometheus / OpenTelemetry | `Metrics` is ~30 lines with the same call sites. Swap it when you need it. |

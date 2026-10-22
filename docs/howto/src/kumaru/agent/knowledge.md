@@ -1,13 +1,13 @@
 # `src\kumaru\agent\knowledge.py`
 
-> Coding guidance and reviewed reference packs. `EXPERTISE` holds four fixed guidance paragraphs that `agent.expertise` adds to the system prompt. `KnowledgePack` files, created by `kumaru learn` and listed in `agent.knowledge_files`, go into every prompt as labelled, untrusted data under one character budget.
+> Coding guidance and reviewed reference packs. `EXPERTISE` holds four fixed guidance paragraphs that `agent.expertise` adds to the system prompt. `KnowledgePack` files, created by `kumaru learn` from one file and listed in `agent.knowledge_files`, go into every prompt as labelled, untrusted data under one character budget. Given a folder, `kumaru learn` builds a documentation index instead, which sends only the passages that match each question ([doc_index.md](doc_index.md)).
 
-**Read this when:** you use the `coder` profile or `agent.expertise`, you import documentation for a language or platform version with `kumaru learn`, a pack is rejected (`Invalid knowledge pack ...`, or `/healthz` returns 503), references crowd out the conversation, or you add an expertise area or a pack field.
+**Read this when:** you use the `coder` profile or `agent.expertise`, you import documentation for a language or platform version with `kumaru learn`, you are choosing between a pack and a documentation index, a pack is rejected (`Invalid knowledge pack ...`, or `/healthz` returns 503), references crowd out the conversation, or you add an expertise area or a pack field.
 
 ---
 
 ## What it does
-Two independent mechanisms. Both are prompt text: nothing is downloaded, executed, retrieved by similarity or trained.
+Two independent mechanisms. Both are prompt text: nothing is downloaded, executed or trained, and packs are sent whole rather than chosen per question. For documentation too large to send whole, index its folder instead; [doc_index.md](doc_index.md) compares the two.
 
 | Mechanism | Switched on by | Where it lands | Size |
 |---|---|---|---|
@@ -15,7 +15,7 @@ Two independent mechanisms. Both are prompt text: nothing is downloaded, execute
 | **References**: `KnowledgePack` JSON files | `agent.knowledge_files`, a list of paths. | The `Relevant context:` section at the end of the system prompt, ahead of any per-call `extra_context`. | At most `agent.max_knowledge_chars` (default 6000) for all packs together, including a 245-character header and one label line per pack. |
 
 The functions cover a pack's whole life:
-- `kumaru learn` reads a reviewed UTF-8 file (`read_local_text`), validates it as a `KnowledgePack`, and writes it with `save_pack`, which never overwrites.
+- `kumaru learn`, given a file, reads it as reviewed UTF-8 (`read_local_text`), validates it as a `KnowledgePack`, and writes it with `save_pack`, which never overwrites. Given a folder, it builds a documentation index instead.
 - `ChatAgent.__init__` reads every configured pack with `load_pack`.
 - `ChatAgent.prepare()` calls `reference_context()` on every request to cut the packs to the budget.
 
@@ -67,7 +67,8 @@ The functions cover a pack's whole life:
 | `EXPERTISE` | `dict[str, str]` | The four guidance paragraphs, keyed `coding`, `playwright`, `windows` and `apis`. `build_system_prompt` adds the configured ones, de-duplicated and in config order, under `Engineering guidance:`. |
 | `MAX_FILE_BYTES` | `128_000` | Upper bound for every file read (`read_local_text`) or written (`save_pack`). |
 | `MAX_REPORTED_ERRORS` | `5` | How many problems `describe_errors` lists before `and N more`. |
-| `KnowledgePack` | `class KnowledgePack(BaseModel)` with `topic`, `version`, `source`, `content: str` | One reviewed reference. `extra="forbid"`. Labels are trimmed; `content` is kept exactly. Whitespace-only content fails with `String should contain non-whitespace text`. |
+| `Topic`, `Version`, `Source` | `Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=...)]`, with maximums of 200, 100 and 2,000 characters | The labels that cite a reference. Shared by `KnowledgePack` and documentation indexes (`doc_index.IndexLabel`). |
+| `KnowledgePack` | `class KnowledgePack(BaseModel)` with `topic: Topic`, `version: Version`, `source: Source`, `content: str` | One reviewed reference. `extra="forbid"`. Labels are trimmed; `content` is kept exactly. Whitespace-only content fails with `String should contain non-whitespace text`. |
 | `describe_errors` | `describe_errors(exc: ValidationError) -> str` | `"loc: msg"` per problem (only `msg` when there is no field), joined with `"; "`. At most 5, then `and N more`. Never includes input values. |
 | `read_local_text` | `read_local_text(path: Path) -> str` | Expands `~`, reads at most `MAX_FILE_BYTES + 1` bytes and decodes strict UTF-8. Raises `ConfigError("Cannot read local reference <path>: <reason>")`. |
 | `load_pack` | `load_pack(path: Path) -> KnowledgePack` | `read_local_text`, then `model_validate_json`. Raises `ConfigError("Invalid knowledge pack <path>: <describe_errors>")` with the hint ``A pack is a JSON object with only nonempty topic, version, source and content strings; `kumaru learn` creates one.`` |
@@ -80,7 +81,7 @@ The config fields, in `src\kumaru\core\config.py`, `AgentConfig`:
 - `knowledge_files: list[str] = Field(default_factory=list)`
 - `max_knowledge_chars: int = Field(default=6000, ge=0, le=24000)`
 
-The command, in `src\kumaru\cli.py`: `kumaru learn TOPIC --version VERSION --source FILE --output PACK`, with `-o` short for `--output`. All four are required. The pack's `source` is the file's name, not its path.
+The command, in `src\kumaru\cli.py`: `kumaru learn TOPIC --version VERSION --source FILE --output PACK`, with `-o` short for `--output`. All four are required. The pack's `source` is the file's name, not its path. When `--source` is a folder, the same command builds a documentation index (`_learn_folder`).
 
 ## How to use it
 
@@ -135,7 +136,7 @@ agent:
   max_knowledge_chars: 6000
 ```
 
-Use absolute paths: a relative one resolves against the current directory, not the YAML file's folder. A running server lists what it loaded in `GET /v1/info`, under `agent.expertise` and `agent.knowledge_topics`.
+Use absolute paths: a relative one resolves against the current directory, not the YAML file's folder. A running server lists what it loaded in `GET /v1/info`, under `agent.expertise` and `agent.knowledge_topics`, and documentation indexes under `agent.index_topics`.
 
 ### Preview what the model will see (no model needed)
 
@@ -219,7 +220,7 @@ Every enabled paragraph is sent with every request. Keep it short, phrase it as 
 If the model should see the field, add it to the label line in `_reference_parts`; it then uses budget for every pack. Add a `learn` option if users should set it, and extend `tests\test_knowledge.py`.
 
 ### Choose references per question
-`reference_context` is a prefix cut, not retrieval. For many or large references, select per question instead. Pass the retrieved text as `extra_context` to `complete()` or `stream()`; it follows the packs in the same section. Keep static packs for what every question needs. `docs\SCALABILITY.md` covers where retrieval fits.
+`reference_context` is a prefix cut, not retrieval. For many or large references, put them in a folder, index it with `kumaru learn` and list the index in `agent.knowledge_indexes`: each question then gets only its best passages ([doc_index.md](doc_index.md)). To add text chosen some other way, pass it as `extra_context` to `complete()` or `stream()`; it follows the packs in the same section. Keep static packs for what every question needs.
 
 Rules to keep:
 - Nothing here fetches, executes or trains: `learn` stays an explicit, local action.
@@ -235,7 +236,7 @@ Rules to keep:
 | `Invalid knowledge pack <path>: Invalid JSON: expected value at line 1 column 1` | The file is not JSON, or it starts with a UTF-8 byte-order mark. Windows PowerShell 5.1 writes one with `Set-Content -Encoding UTF8` and `Out-File -Encoding utf8`. | Save it as UTF-8 without a BOM (PowerShell 7's default, or `[IO.File]::WriteAllText($path, $text)`), or recreate it with `kumaru learn`. |
 | `Invalid knowledge pack <path>: Input should be an object` | The file holds a JSON array or a single value. | One pack per file, as a JSON object. |
 | `error: Cannot read local reference <path>: [Errno 2] No such file or directory: ...` | A wrong path in `knowledge_files` or `--source`, or a relative path resolved against the current directory. | Use absolute paths. |
-| `Cannot read local reference <path>: file exceeds 128000 bytes` | The source or pack is over `MAX_FILE_BYTES`. | Split it by topic. Only `max_knowledge_chars` characters of all packs together reach the model anyway. |
+| `Cannot read local reference <path>: file exceeds 128000 bytes` | The source or pack is over `MAX_FILE_BYTES`. | Put the source in a folder and index that instead ([doc_index.md](doc_index.md)), or split it by topic. Only `max_knowledge_chars` characters of all packs together reach the model anyway. |
 | `Cannot read local reference <path>: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte` | The source is UTF-16, the default of `>` and `Out-File` in Windows PowerShell 5.1, or uses a legacy code page. | Re-save it as UTF-8. |
 | `error: Cannot create knowledge pack <path>: [Errno 17] File exists: ...` | `learn` never overwrites. | Choose a new name, for example with the version in it, or delete the old pack yourself. |
 | `Cannot create knowledge pack <path>: [Errno 2] No such file or directory: ...` | The output folder does not exist; `learn` does not create folders. | `New-Item -ItemType Directory C:\references` first. |
@@ -246,7 +247,7 @@ Rules to keep:
 | A changed pack has no effect. | Packs are read when the agent is built. | Restart `kumaru chat` or `kumaru serve`, or send `POST /v1/backend` to a running server. |
 | No `Engineering guidance:` with `-c qwen36` or another profile. | Only `coder` sets `agent.expertise`. | `$env:KUMARU_AGENT__EXPERTISE = '[coding, playwright, windows, apis]'`. |
 | `Invalid configuration` with `Input should be 'coding', 'playwright', 'windows' or 'apis'` | A typo in `agent.expertise`. | Use one of the four names. |
-| `Invalid configuration` with `Input should be less than or equal to 24000` | `max_knowledge_chars` is outside 0–24,000. | Stay in range. For more reference text, select it per question instead. |
+| `Invalid configuration` with `Input should be less than or equal to 24000` | `max_knowledge_chars` is outside 0–24,000. | Stay in range. For more reference text, use a documentation index, which sends only the passages each question needs. |
 | The model follows an instruction found inside a reference. | The header is guidance to the model, not an enforced boundary. | Import only text you have reviewed. Never import secrets, unreviewed web pages or issue text. |
 | Reference text reaches another machine. | With `openai_compat`, or a `llamacpp_server` on another host, the prompt goes to that server, references included. | Use a local backend for private references. |
 
@@ -254,7 +255,8 @@ Rules to keep:
 - `src\kumaru\agent\chat.py` — `ChatAgent.__init__` loads the packs into `agent.knowledge`. `prepare()` calls `reference_context()` and raises the 413 guard. `describe()` reports `expertise` and `knowledge_topics`.
 - `src\kumaru\agent\prompt.py` — `build_system_prompt()` adds `EXPERTISE` as `Engineering guidance:` and the references as `Relevant context:`.
 - `src\kumaru\core\config.py` — `AgentConfig.expertise`, `knowledge_files` and `max_knowledge_chars`.
-- `src\kumaru\cli.py` — `kumaru learn`.
+- `src\kumaru\cli.py` — `kumaru learn`, which builds a pack from a file or an index from a folder (`_learn_folder`).
+- `src\kumaru\agent\doc_index.py` — documentation indexes, which share `Topic`, `Version`, `Source` and `describe_errors`; see [doc_index.md](doc_index.md).
 - `configs\coder.yaml` — the profile that enables all four expertise areas.
 - `src\kumaru\core\errors.py` — `ConfigError`, and `ContextLengthExceededError` (HTTP 413).
 - `tests\test_knowledge.py` — offline tests, including one that checks a bad pack stops every entry point before the model loads.
