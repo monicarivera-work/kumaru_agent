@@ -120,7 +120,7 @@ A greedy run made before this change is not comparable with one made after it: s
 | `TransformersBackend.info` | `def info(self) -> BackendInfo` | `model_id` = `backend.model`; `device` and `dtype` as resolved (`"cpu"` and `"unknown"` before load); `context_length` after the clamp; `quantization` = `"4bit-nf4"`, `"8bit"` or `None`; `extra` = `{"parameters": ..., "adapter": adapter_path, "max_batch_size": ...}`, the batch size in use after any out-of-memory halving. |
 | `TransformersBackend.count_tokens` | `def count_tokens(self, messages: Sequence[Message]) -> int` | Exact token count of the rendered prompt (rendered without the thinking flag). The base heuristic before load. |
 | `TransformersBackend._render_prompt` | `def _render_prompt(self, messages: Sequence[Message], thinking: bool \| None = None) -> str` | The exact prompt string. Use it to debug prompt format. |
-| `TransformersBackend.stream` | `async def stream(self, messages: Sequence[Message], params: GenerationParams) -> AsyncIterator[StreamChunk]` | Loads if needed, then streams reasoning and answer chunks, then one final chunk with `finish_reason` and `usage`. Never batched. |
+| `TransformersBackend.stream` | `async def stream(self, messages: Sequence[Message], params: GenerationParams, *, tools: Sequence[dict[str, Any]] \| None = None) -> AsyncIterator[StreamChunk]` | Loads if needed, then streams reasoning and answer chunks, then one final chunk with `finish_reason` and `usage`. Never batched. Non-empty `tools` raise `ConfigError` (`check_tools`): this backend cannot call tools. |
 | `TransformersBackend.generate` | `async def generate(self, messages: Sequence[Message], params: GenerationParams) -> ChatResult` | One complete reply. Greedy requests share a batch when `backend.max_batch_size` > 1; otherwise it is `Backend.generate()`, which drains `stream()`. |
 | `TransformersBackend.BATCH_IDLE_S`, `.BATCH_MAX_WAIT_S` | `0.02`, `0.25` (seconds) | When a partly full batch starts: after this long with no new request, or this long after its first request. |
 
@@ -298,12 +298,14 @@ Under `kumaru serve`, load errors show in `/healthz` (`status: "error"`) and as 
 | The GPU stays busy for a while after Stop or a disconnect | A long prompt is still being prefilled. Kumaru notices the departed reader only when the first chunk of output is handed over, and only then sets `halt`; after that, `generate` stops about one decoding step later. | Expected. Shorter history (`agent.max_history_tokens`) shortens the prefill. |
 | `kumaru serve` does not respond at all, even `/healthz`, during startup | The first-run download and load run synchronously on the event loop. | Wait; pre-download with `kumaru chat -c <profile> -q hi` once. |
 | `ValueError` asking for `trust_remote_code=True` | The checkpoint ships custom modelling code. | `backend.trust_remote_code: true`, only for repos you trust. |
+| `The transformers backend cannot call tools, and tools are enabled (agent.enabled_tools, or kumaru chat --workspace).` | Tools are enabled. This backend neither sends tool declarations to the model nor reads calls out of its output, so it refuses them instead of dropping them silently. `ChatAgent` checks when it is built, before the weights load. | Use `llamacpp_server` (`-c qwen36`), or `openai_compat` with a server that parses tool calls (the hint says so too). |
 
 ## Known limitations
 
 - **`device: cuda:N` does not pin a GPU.** On CUDA the model loads with `device_map="auto"`, which spreads it over every visible GPU. Workaround: `$env:CUDA_VISIBLE_DEVICES='1'` before starting Kumaru, or `backend.extra.device_map: "cuda:1"`.
 - **Batching is static and greedy-only.** A batch runs until its longest row ends, so on mixed-length answers much of it is padding. Sampled and streamed requests are not batched. For continuous batching, use `llamacpp_server` or vLLM through `openai_compat`.
 - **bf16 batching is not batch-invariant.** A greedy reply can depend on which other requests shared its batch. fp32 makes this rare, at twice the memory; only `max_batch_size: 1` rules it out.
+- **No tool calling.** `supports_tools` is `False`, so `kumaru chat --workspace` and `agent.enabled_tools` fail with `ConfigError`. Workaround: `llamacpp_server`, whose server parses the calls with the model's own template.
 
 ## Related files
 

@@ -7,7 +7,7 @@
 ---
 
 ## What it does
-This file exposes `ChatAgent` as the public symbol of `kumaru.agent`. It also documents the boundary between the agent layer and the server layer. The package groups prompt assembly, memory trimming, tool seams, and turn orchestration.
+This file exposes `ChatAgent` as the public symbol of `kumaru.agent`. It also documents the boundary between the agent layer and the server layer. The package groups prompt assembly, memory trimming, the tools and the loop that runs them with your approval, and turn orchestration.
 
 ## Why it exists
 Without this package boundary, callers would import implementation modules directly and couple themselves to file layout. The server should know that a `ChatAgent` exists, not how prompt, memory, and tools are internally split. That keeps the same agent usable from FastAPI, tests, a CLI command, or a future batch evaluator.
@@ -21,7 +21,7 @@ Without this package boundary, callers would import implementation modules direc
 
 | Name | Signature | What it's for |
 |---|---|---|
-| `ChatAgent` | `class ChatAgent(backend: Backend, config: KumaruConfig)` | Orchestrates one chat turn: `prepare` builds the system prompt and fits history to the context budget, `resolve_params` merges generation settings (since v0.2 including the `thinking_mode` preset), and `complete`/`stream` call the backend. `describe` reports configuration. Re-exported from `kumaru.agent.chat`; see [chat.md](chat.md). |
+| `ChatAgent` | `class ChatAgent(backend: Backend, config: KumaruConfig, *, approver: Approver \| None = None)` | Orchestrates one chat turn: `prepare` builds the system prompt and fits history to the context budget, `resolve_params` merges generation settings (since v0.2 including the `thinking_mode` preset), and `complete`/`stream` call the backend and run the tool calls it asks for. A tool that would change something runs only after `approver` says yes; without one, those tools are not offered. `describe` reports configuration. Re-exported from `kumaru.agent.chat`; see [chat.md](chat.md). |
 | `__all__` | `list[str] = ["ChatAgent"]` | Defines the intentional public import surface for `from kumaru.agent import *`. |
 
 ## How to use it
@@ -90,13 +90,14 @@ Do not export helper functions that are only used inside `ChatAgent`; import tho
 | `ImportError: cannot import name 'ChatAgent' from 'kumaru.agent'` | Package not installed from this checkout or stale environment. | Reinstall the project in editable mode from the repo root. |
 | Circular import while starting the server | New package export imports server code back into `kumaru.agent`. | Keep agent code independent of `kumaru.server`; move shared contracts to `kumaru.core`. |
 | CLI and server behave differently | One caller imported and modified lower-level modules directly. | Import `ChatAgent` from `kumaru.agent` and pass explicit `KumaruConfig`. |
-| Tool descriptions missing from prompts | Caller bypassed `ChatAgent` and called a backend directly. | Use `ChatAgent.prepare`, `complete`, or `stream` for chat turns. |
+| Tools are never called | Caller bypassed `ChatAgent` and called a backend directly, or built it without an `approver`, so tools that change things were withheld (a warning is logged). | Use `ChatAgent.complete` or `stream` for chat turns, and pass an `approver` where a person can answer (`chat.md`). |
 
 ## Related files
 
 - `src\kumaru\agent\chat.py` — defines the re-exported `ChatAgent`.
 - `src\kumaru\agent\prompt.py` — builds the system message used by the agent.
 - `src\kumaru\agent\memory.py` — enforces the context-window budget.
-- `src\kumaru\agent\tools.py` — resolves configured tool names.
+- `src\kumaru\agent\tools.py` — resolves configured tool names, and asks the approver before a tool changes anything.
+- `src\kumaru\agent\workspace.py` and `commands.py` — the project-folder tools: files, and allowed programs.
 - `src\kumaru\server\app.py` — imports `ChatAgent` to serve HTTP requests.
 

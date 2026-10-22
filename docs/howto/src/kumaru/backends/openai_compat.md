@@ -6,7 +6,8 @@
 - you are pointing Kumaru at vLLM, Ollama, SGLang, TGI, LM Studio, a llama.cpp server you run yourself, or a hosted OpenAI-compatible API;
 - a hosted API rejects Kumaru's requests;
 - thinking output arrives in the wrong place;
-- you are subclassing it for an engine-specific feature, as `llamacpp_server` does.
+- you are subclassing it for an engine-specific feature, as `llamacpp_server` does;
+- the model writes tool calls as text instead of making them.
 
 ---
 
@@ -18,7 +19,8 @@
 - streaming usage is requested;
 - reasoning is read from `delta.reasoning_content` or `delta.reasoning`, with an inline `<think>` fallback;
 - stop sequences are sent upstream (first 4) and also enforced locally, on the answer only;
-- upstream finish reasons are normalised.
+- upstream finish reasons are normalised;
+- when the agent offers tools, their declarations are sent as `tools`, and the model's calls, which stream in fragments, are reassembled and returned whole on the final chunk (`supports_tools = True`).
 
 It is registered as `openai_compat` with aliases `ollama`, `vllm` and `remote`. `llamacpp_server` is a subclass: it reuses all of this and only adds process management plus llama.cpp-specific fields.
 
@@ -26,7 +28,9 @@ v0.2 changes:
 - **Reasoning channel.** Separate reasoning fields and inline `<think>…</think>` both become `StreamChunk.reasoning`.
 - **More request fields.** `presence_penalty` is sent as a standard field. `top_k`, `min_p`, `repetition_penalty` and `chat_template_kwargs.enable_thinking` are sent as extended fields, and the new `strict_openai` switch drops them. v0.1 sent none of these. So with the defaults, `top_k: 50` and `repetition_penalty: 1.05` now reach the server.
 - **Error handling.** An in-stream `error` event now raises `BackendError`, and so does a connection that fails mid-request (refused, reset or silent for `timeout_s`), through the `_connection_lost` override point.
-- **Finish reasons.** Unknown values such as `tool_calls` or `content_filter` map to `"stop"` instead of failing validation.
+- **Finish reasons.** Unknown values such as `content_filter` map to `"stop"` instead of failing validation.
+
+Tool calling came later. The backend sends nothing new unless the agent offers tools; then it sends `tools`, forwards earlier calls and their results in `messages`, and reports `finish_reason: "tool_calls"`. It never runs a tool: `ChatAgent` does, after asking (`agent\chat.md`, "The tool loop").
 
 ## Why it exists
 
@@ -50,23 +54,27 @@ A single flag keeps one adapter usable for both.
    - `reasoning`, used by Ollama and OpenRouter;
    - `<think>…</think>` at the start of `content`, via `ReasoningSplitter()` with its defaults.
 5. Stop sequences are enforced locally because OpenAI-compatible servers differ in stop support. The local tracker sees answer text only. The same list is also sent upstream, and an engine matches it on its raw output. llama-server does, and that output includes the thinking (`find_stopping_strings` runs on the generated text before reasoning is parsed out). So a stop string the model *thinks* can still end the reply upstream.
+6. Tool calls are the server's job to parse and Kumaru's job to run. The server reads the calls out of the model's output with its chat template or tool parser, and streams them as `delta.tool_calls` fragments. This class only joins the fragments. The calls reach the agent on the final chunk, after any text the model wrote first.
 
 ## Public API
 
 | Name | Signature | What it's for |
 |---|---|---|
 | `DEFAULT_BASE_URL` | `DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1"` | Default endpoint; Ollama's OpenAI-compatible API. |
-| `normalize_finish_reason` | `def normalize_finish_reason(value: Any) -> FinishReason` | `stop`/`eos` → `"stop"`. `length`, `error` and `cancelled` pass through. Anything else, including `None`, becomes `"stop"`. Shared with `llamacpp_backend`. |
+| `normalize_finish_reason` | `def normalize_finish_reason(value: Any) -> FinishReason` | `stop`/`eos` → `"stop"`; `tool_calls` and the pre-2023 `function_call` → `"tool_calls"`. `length`, `error` and `cancelled` pass through. Anything else, including `None`, becomes `"stop"`. Shared with `llamacpp_backend`. |
+| `merge_tool_call_delta` | `def merge_tool_call_delta(calls: list[dict[str, Any]], fragment: dict[str, Any]) -> None` | Folds one streamed `delta.tool_calls[]` fragment into `calls`, in place. Fragments with the same `index` join one call: the first gives its id and name, and the rest append slices of the JSON arguments. A fragment without an index continues the last call. A new id starts a new call even at the same index, because some servers send each call whole at index 0. Arguments sent as a JSON object are serialised. |
+| `finish_tool_calls` | `def finish_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]` | The merged calls in OpenAI shape, `{"id", "type": "function", "function": {"name", "arguments"}}`, without the internal `_index`. A call the server sent without an id gets `call_<12 hex>`. |
 | `OpenAICompatBackend` | `class OpenAICompatBackend(config: BackendConfig)` | Remote backend registered as `openai_compat`, `ollama`, `vllm` and `remote`. `__init__` strips a trailing `/` from `base_url or DEFAULT_BASE_URL`. |
 | `OpenAICompatBackend.name` | `name = "openai_compat"` | Registry and introspection name. |
+| `OpenAICompatBackend.supports_tools` | `supports_tools = True` | Class attribute: `stream()` accepts `tools`, so `ChatAgent` may offer them. Inherited by `LlamaServerBackend`. |
 | `OpenAICompatBackend.aclose` | `async def aclose(self) -> None` | Closes the HTTP client and marks the backend unloaded. Safe to call twice. |
 | `OpenAICompatBackend.info` | `def info(self) -> BackendInfo` | `device`/`dtype` = `"remote"`, `context_length` = `backend.max_context_length`, `extra={"base_url": ...}`. |
 | `OpenAICompatBackend.strict_openai` | `property -> bool` | `bool(backend.extra.strict_openai)`, default `False`. When true, the extended fields are not sent. |
-| `OpenAICompatBackend.stream` | `async def stream(self, messages: Sequence[Message], params: GenerationParams) -> AsyncIterator[StreamChunk]` | Lazy-loads, POSTs a streaming chat completion, parses SSE, splits reasoning, tracks stops, and ends with one `StreamChunk(finish_reason=..., usage=...)`. |
+| `OpenAICompatBackend.stream` | `async def stream(self, messages: Sequence[Message], params: GenerationParams, *, tools: Sequence[dict[str, Any]] \| None = None) -> AsyncIterator[StreamChunk]` | Lazy-loads, POSTs a streaming chat completion, parses SSE, splits reasoning, tracks stops, merges tool-call fragments, and ends with one `StreamChunk(finish_reason=..., usage=..., tool_calls=...)`. `tool_calls` is `None` when the model made no call. |
 | `OpenAICompatBackend.list_remote_models` | `async def list_remote_models(self) -> list[str]` | Lazy-loads, then returns the `id`s from upstream `GET /models`. |
 
 Protected extension points, documented because subclasses rely on them:
-- `_payload(messages, params, *, stream: bool) -> dict[str, Any]` — the portable request body;
+- `_payload(messages, params, *, stream: bool, tools: Sequence[dict[str, Any]] | None = None) -> dict[str, Any]` — the portable request body;
 - `_extended_fields(params) -> dict[str, Any]` — the engine-specific additions;
 - `_connection_lost(exc: Exception) -> BackendError` — the error raised when the HTTP connection fails during a request. `llamacpp_server` overrides it to report its child's exit code and log.
 
@@ -78,6 +86,7 @@ Protected extension points, documented because subclasses rely on them:
 | `stop` | `generation.stop` is non-empty. Only the first 4 strings are sent upstream (a common server cap); all of them are enforced locally. | portable |
 | `seed` | `seed` is not `None` | portable |
 | `presence_penalty` | `presence_penalty` is not `None` (a standard OpenAI field) | portable |
+| `tools` | the agent offers tools (`stream(..., tools=...)`). A standard OpenAI field, so `strict_openai` keeps it. | portable |
 | `stream_options: {include_usage: true}` | streaming | portable |
 | `top_k` | `top_k > 0` | extended |
 | `min_p` | `min_p` is not `None`, so an explicit `0.0` *is* sent | extended |
@@ -88,6 +97,8 @@ Protected extension points, documented because subclasses rely on them:
 
 With every default (`GenerationParams()`) and `strict_openai` off, the body is `model, messages, max_tokens: 1024, temperature: 0.7, top_p: 0.95, stream, stream_options, top_k: 50, repetition_penalty: 1.05`.
 
+In a tool conversation, `messages` also carries the earlier rounds, as `Message.to_openai()` renders them: an assistant turn with its `tool_calls`, then one `{"role": "tool", "content": <result>, "name": <tool>, "tool_call_id": <id>}` per call. The agent re-sends `tools` and the whole conversation every round, so the server sees each result before it decides the next step.
+
 ### How the stream is parsed
 
 - Lines that do not start with `data:` are ignored. These are keep-alives, comments and `event:` lines.
@@ -95,6 +106,7 @@ With every default (`GenerationParams()`) and `strict_openai` off, the body is `
 - An event with a truthy `error` raises `BackendError("Upstream error: ...")`.
 - An event with `usage` updates usage, and the last one wins. If no event carries usage, the final chunk carries `Usage()` (zeros). `generate()` then estimates usage. The streaming stats frame does not: it reports `completion_tokens: 0` and `tokens_per_second: 0.0`.
 - Per choice, the reasoning field plus any inline reasoning becomes `reasoning`. The remaining answer text goes through the stop tracker and becomes `delta`. Both travel in one chunk. `finish_reason` is normalised.
+- Per choice, each `delta.tool_calls[]` fragment goes through `merge_tool_call_delta()`. Calls are not streamed as they grow: the final chunk carries them all, through `finish_tool_calls()`. If there is at least one call, the final `finish_reason` is `"tool_calls"` even when the server said `stop` or nothing, as some do. The exception is `"length"`: the call may be cut off mid-argument, and the agent never runs calls from a cut-off reply.
 - After a stop sequence matches, the loop breaks and leaves the response context, which closes the HTTP stream early.
 - Any `httpx.TransportError` while connecting or reading is re-raised as `self._connection_lost(exc)`, chained `from exc`. An `httpx.ReadTimeout` means the server is connected but silent, so it gets its own message; everything else (`ConnectError`, `ReadError`, `RemoteProtocolError`, `ConnectTimeout`, …) reports the exception type. The base `generate()` aggregates `stream()`, so non-streaming calls raise the same errors.
 
@@ -210,6 +222,20 @@ kumaru chat -c vllm --no-think -q "One-line answer: capital of France?"
 
 Reasoning streams back as `delta.reasoning_content` in Kumaru's SSE and is shown dim by `kumaru chat`. Kumaru's `thinking_mode` preset still applies on top: generation < `thinking_mode` (only when thinking is on) < per-request. See [`default.yaml.md`](../../../configs/default.yaml.md).
 
+### Let the model work in a project folder
+
+`kumaru chat --workspace DIR` offers the project-folder tools, and asks you before every change and command ([`cli.md`](../cli.md)). Over this backend, the upstream server must turn the model's output into tool calls:
+- llama-server needs `--jinja`, which `llamacpp_server` always passes, so `kumaru chat -c qwen36 --workspace .\scratch` needs no extra setup;
+- vLLM needs `--enable-auto-tool-choice --tool-call-parser <parser>`, for example `hermes` for Qwen2.5;
+- Ollama needs a model whose template supports tools.
+
+```powershell
+vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000 --enable-auto-tool-choice --tool-call-parser hermes
+kumaru chat -c vllm --workspace .\scratch
+```
+
+What the tools read (file contents, command output) is sent to the server, like everything else in the conversation. With a hosted API, that means it leaves your machine.
+
 ## Tuning / operational notes
 
 | Knob | Effect | Trade-off / expected number |
@@ -286,7 +312,9 @@ Rules for subclasses:
 | Usage is zero | Upstream ignored `stream_options.include_usage`. | Use a server or version that emits streaming usage, or treat usage as unavailable. |
 | Text continues past a stop upstream | Server stop support is incomplete, or you configured more than 4 stops. | Keep `generation.stop` configured; local tracking truncates emitted text. |
 | With `generation.stop` set, a thinking model's reply ends mid-thought or with an empty answer | The upstream engine matched a stop string inside the reasoning. llama-server checks stops on raw generated text, thinking included; the local answer-only tracking cannot prevent that. | Use stop strings that cannot occur in prose, or leave `generation.stop` empty for thinking models. |
-| `content_filter`/`tool_calls` endings reported as `stop` | `normalize_finish_reason` maps unknown reasons to `"stop"`. | Expected; Kumaru's `FinishReason` has no such values. |
+| `content_filter` endings reported as `stop` | `normalize_finish_reason` maps unknown reasons to `"stop"`. | Expected; Kumaru's `FinishReason` has no such value. |
+| The model writes its tool call as text in the answer (for example `<tool_call>{...}</tool_call>`), and nothing runs | The server passes the model's output through without parsing calls: llama-server without `--jinja`, vLLM without a tool-call parser, or a template without tool support. | Start the server with tool parsing on (Mental model, item 6), or use `llamacpp_server`. |
+| `Upstream returned 400: ...` that mentions tools or tool choice | The server refuses `tools`. vLLM does when it was started without `--enable-auto-tool-choice` and `--tool-call-parser`. | Turn on the server's tool calling, or use Kumaru without `--workspace` and with `agent.enabled_tools: []`. |
 | Works locally but fails in deployment | `127.0.0.1` points at the wrong host or container. | Use service DNS or a host address reachable from the Kumaru process. |
 | Unauthorized response | Missing or wrong upstream API key. | Set `KUMARU_BACKEND__API_KEY` or `backend.api_key`. |
 | `The openai_compat backend cannot attach a LoRA adapter (backend.adapter_path is '<path>').` at load | `--adapter` or `adapter_path` is set. Kumaru attaches adapters only in the transformers backend; this class refuses rather than serve the base model under the adapter's name. | Let the upstream server load the adapter (vLLM: `--enable-lora --lora-modules <name>=<path>`) and set `backend.model` to `<name>`; or serve it with `backend.name: transformers`. |
@@ -298,7 +326,9 @@ Rules for subclasses:
 - `src\kumaru\core\config.py` — `base_url`, `api_key`, `timeout_s`, `extra`, model and context settings.
 - `src\kumaru\core\registry.py` — lazy registration as `openai_compat`, `ollama`, `vllm` and `remote`.
 - `src\kumaru\core\types.py` — `Message.to_openai()`, `GenerationParams`, `FinishReason`.
+- `src\kumaru\agent\chat.py` — the tool loop that sends `tools` through this class and runs the calls it returns; see [`chat.md`](../agent/chat.md).
 - `configs\vllm.yaml` — production-throughput profile for this backend.
 - `configs\default.yaml` — documents remote backend fields.
 - `src\kumaru\backends\transformers_backend.py` — local development backend this replaces at scale.
 - `tests\test_backends.py` — strict-payload, finish-reason and transport-error tests.
+- `tests\test_tool_loop.py` — the `tools` payload, call reassembly from fragments, the finish-reason rules, and the agent loop over this protocol.

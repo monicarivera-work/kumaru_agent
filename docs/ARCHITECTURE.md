@@ -135,7 +135,7 @@ A semaphore in `server/app.py` caps in-flight generations. Requests beyond the c
 
 With `llamacpp_server` there are two queues. Kumaru admits `max_concurrent_requests` (8); the engine runs `llama_server.parallel` of them at once (4 slots) and queues the rest itself. The engine's limit protects VRAM: llama-server reserves its KV cache when it starts, so an extra request waits for a free slot rather than running out of memory. Kumaru's limit protects the API server from an unbounded backlog.
 
-The same reasoning produces the tool-iteration cap in `agent/tools.py`. Tool calling is an unbounded loop driven by a stochastic process; without a cap, one confused model burns your GPU indefinitely. Limits on unbounded loops are safety properties.
+The same reasoning produces the tool-round cap in `agent/chat.py` (`agent.max_tool_iterations`, 10 rounds per message). Tool calling is an unbounded loop driven by a stochastic process; without a cap, one confused model burns your GPU indefinitely. Limits on unbounded loops are safety properties.
 
 ---
 
@@ -278,6 +278,23 @@ Having both is the point: one file to learn from, one file to work with.
 
 ---
 
+## Decision 15 — The agent changes nothing without your yes
+
+**The problem.** To build an app, a website or a game, a model has to write several files, run the build and the tests, read the failures and fix them. Printing code in the chat leaves all of that to you. But a model that can write files and run programs can also do damage, by mistake or because a file it read told it to.
+
+**What we did.** `kumaru chat --workspace DIR` turns on five tools: `list_files`, `read_file`, `write_file` and `edit_file` (`agent/workspace.py`), and `run_command` (`agent/commands.py`). `ChatAgent` runs the loop. The tool declarations go with each request. `llamacpp_server` and `openai_compat` return the model's calls, `echo` scripts calls for tests, and the other backends refuse tools. The agent runs each call and sends the result back, for at most `agent.max_tool_iterations` rounds per message.
+
+- **A call does nothing by itself.** A tool that would change something first returns an `Action`: the path and a unified diff, or the exact command line, its folder and its time limit. `ToolBelt` shows it to an approver and applies it only on yes. Listing and reading need no approval.
+- **No approver, no such tools.** Only the terminal can ask. The server, the web UI, `eval` and `bench` build `ChatAgent` without an approver, so it withholds every tool that changes something or uses the project folder.
+- **One folder.** Every path must be provably inside the folder. `..`, absolute paths, other drives and UNC paths, links and junctions, alternate data streams, device names and `.git` are refused.
+- **No shell.** A command is an argv list for a program named in `agent.workspace.allowed_commands`, and shells and launchers are refused when the config loads. It runs with a reduced environment, so API keys stay out. At its time limit, everything it started is stopped: a Job Object on Windows (as in Decision 13), a process group elsewhere.
+
+**What it is not.** The folder confines the file tools, not the programs. An approved `python` or `npm` command runs with your permissions and can do anything they can. File contents and command output are untrusted text, so read each request before you answer `y`. For code you do not trust, use a container or a VM.
+
+**Why only the terminal.** Approval over HTTP needs its own protocol, timeouts and UI. Withholding the tools there is the smaller change and the safe default, and an approval round-trip can be added later without touching the tools.
+
+---
+
 ## What is deliberately missing
 
 | Not here | Why |
@@ -285,10 +302,10 @@ Having both is the point: one file to learn from, one file to work with.
 | A database | The agent is stateless. Adding persistence would undo the property that makes scaling trivial. |
 | User accounts / multi-tenancy | This is a local-first tool. Bearer-token auth exists for when you bind beyond localhost. |
 | A vector store | RAG is a `MemoryPolicy` plus a tool. Both plug in without core changes. |
-| Active tool calling | The seam exists and is inert. v0.2 is still chat-only, as specified. |
+| Tool approval over HTTP | Only `kumaru chat` can ask you before a change or a command, so the server and the web UI never offer those tools (Decision 15). |
 | A JS framework | See Decision 10. |
 | Prometheus / OpenTelemetry | `Metrics` is ~30 lines with the same call sites. Swap it when you need it. |
-| A sandbox for model-written code | HumanEval's guard stops accidents. Real isolation is a container or VM, and Kumaru should not pretend to be one. |
+| A sandbox for model-written code | HumanEval's guard stops accidents. Real isolation is a container or VM, and Kumaru should not pretend to be one. The project folder confines the file tools; commands you approve run with your permissions. |
 | An LLM judge for grading | Every built-in grader is deterministic and checked against answer keys. A judge model has its own error rate; see [BENCHMARKS.md §10](BENCHMARKS.md#10-where-evaluation-goes-next). |
 
 Each of these is an *addition*, not a *refactor*. That is the test every design decision here had to pass.

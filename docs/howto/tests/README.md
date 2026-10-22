@@ -1,6 +1,6 @@
 # `tests/`
 
-> The offline regression suite. 537 tests, no GPU, no downloads, under a minute.
+> The offline regression suite. 783 tests, no GPU, no downloads, under a minute.
 
 **Read this when:** you have changed something and want to know whether you broke it, or you are adding a feature and need to know where its test belongs.
 
@@ -8,7 +8,7 @@
 
 ## What it does
 
-Exercises every layer that does not require a model: config resolution, the registry, core types, the backend contract, agent policies, the HTTP API including SSE streaming, the training data pipeline and distillation data.
+Exercises every layer that does not require a model: config resolution, the registry, core types, the backend contract, agent policies, the tool loop and its project folder, the HTTP API including SSE streaming, the training data pipeline and distillation data.
 
 ## Why it exists — and why it has no GPU tests
 
@@ -38,9 +38,12 @@ The parts that genuinely need a GPU are covered by `scripts\verify.ps1 -Full`, w
 | `test_config.py` | Config precedence silently changing; profiles failing to parse; typos being ignored; env var coercion breaking |
 | `test_registry.py` | Plugin resolution breaking; aliases leaking into user-facing lists; duplicate registration passing silently |
 | `test_types.py` | The wire vocabulary changing shape; `merged()` mutating shared state; division-by-zero in throughput maths |
-| `test_backends.py` | `generate()` drifting from `stream()`; **stop sequences split across chunk boundaries being missed**; echo ignoring `max_tokens` or misreporting `length`; a batched greedy reply differing from the one the model gives alone, a batch spanning more than the context window, or a batch too big for the GPU failing instead of retrying in halves; a request or load slipping past `aclose()` |
+| `test_backends.py` | `generate()` drifting from `stream()`; **stop sequences split across chunk boundaries being missed**; echo ignoring `max_tokens` or misreporting `length`; a batched greedy reply differing from the one the model gives alone, a batch spanning more than the context window, or a batch too big for the GPU failing instead of retrying in halves; a request or load slipping past `aclose()`; a server's `tool_calls` finish reason being reported as `stop` |
 | `test_agent.py` | Prompt assembly losing the system message or dropping client system messages; memory policies overflowing the budget or dropping the system prompt |
-| `test_tools.py` | A hung tool stalling the agent; a failing or unknown tool raising instead of returning `ERROR: ...` text |
+| `test_tools.py` | A hung tool stalling the agent; a failing or unknown tool raising instead of returning `ERROR: ...` text; **a change being made without a yes**, or a tool that changes things being offered where nobody can approve it; a read asking for approval |
+| `test_tool_loop.py` | The tool loop running a declined or cut-off call, going past `agent.max_tool_iterations`, or losing earlier rounds' results; trimming dropping the request, or a round whose results alone outgrow the budget; tools leaking into the system prompt instead of the request; a backend that cannot call tools ignoring them; openai_compat reassembling streamed calls wrongly; `kumaru chat --workspace` changing anything without `y`, its prompt or streamed text letting control characters steer the terminal, or a hangup or `kill` skipping the cleanups; the server offering a tool that changes anything |
+| `test_workspace.py` | **A path leaving the project folder**: `..`, absolute, other-drive and UNC paths, symlinks, junctions (also one swapped in after the diff was shown), alternate data streams, device names, trailing dots and spaces; a file changed, created or deleted after its diff was shown being overwritten; an edit rewriting the line endings of lines it left alone; listings and reads ignoring their limits |
+| `test_commands.py` | **A command reaching a shell**: a program off the allowed list running, a shell such as `cmd` or PowerShell being allowed, or a batch-file argument `cmd` would act on; your secrets reaching the program; a timeout, a cancel or Kumaru exiting leaving child processes running; output ignoring its limit; `PATH` keeping a folder where a project file could pose as a program |
 | `test_knowledge.py` | Coding guidance missing from the CLI, API or UI path, or duplicated; learned references losing their whitespace, overwriting a file or running code; invalid packs failing without the reason, or only after the model has loaded; references overflowing the context, being cut anywhere but at an exact prefix, or all being read whatever the budget |
 | `test_server.py` | API shape changing; SSE framing breaking; auth being bypassable; error responses losing their shape |
 | `test_cli.py` | Flag handling, one-shot chat, `config` and the `bench` commands breaking; every command runs in-process on the echo backend |

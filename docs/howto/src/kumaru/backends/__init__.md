@@ -114,6 +114,8 @@ asyncio.run(main())
 
 This prints `HELLO stop 1`: the stream reported no usage, so `generate()` estimated it. A thinking-capable backend also yields `StreamChunk(reasoning=...)`; the contract is in [base.md](base.md).
 
+Two arguments are enough for a backend that cannot call tools: `ChatAgent` passes `tools=` only when it offers tools, and it refuses to build when tools are enabled on a backend whose `supports_tools` is `False`. To let the model call tools, set `supports_tools = True` and accept `*, tools=None`, as [base.md](base.md) describes.
+
 ### Drive a blocking engine with `iterate_in_thread`
 
 ```python

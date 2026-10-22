@@ -2,12 +2,12 @@
 
 > System-prompt assembly and normalization helpers for Kumaru chat turns.
 
-**Read this when:** you are editing assistant behavior, adding retrieved context, enabling tools, or debugging why a client system prompt did not replace server guardrails.
+**Read this when:** you are editing assistant behavior, adding retrieved context, or debugging why a client system prompt did not replace server guardrails.
 
 ---
 
 ## What it does
-This file composes the full system prompt from configured persona text, quality directives, the current date, enabled tool descriptions, and optional retrieved context. It also ensures every message list has exactly one system message at index 0. Client-supplied system text augments, rather than replaces, server-side instructions: every nonblank client system message is appended after Kumaru's prompt, in the order sent.
+This file composes the full system prompt from configured persona text, quality directives, the current date, and optional retrieved context. It can also list tool descriptions, but `ChatAgent` passes none: tool declarations travel in the request's `tools` field, and the model's chat template renders them (`agent\chat.md`, "The tool loop"). It also ensures every message list has exactly one system message at index 0. Client-supplied system text augments, rather than replaces, server-side instructions: every nonblank client system message is appended after Kumaru's prompt, in the order sent.
 
 ## Why it exists
 The system prompt is the fastest way to change answer behavior without fine-tuning. Keeping assembly in one module makes prompt order deliberate and testable. Without normalization, clients could send no system prompt, several system prompts, or a replacement prompt that accidentally drops Kumaru's guardrails.
@@ -37,7 +37,9 @@ prompt = build_system_prompt(AgentConfig(), include_date=False)
 print(prompt)
 ```
 
-### Include enabled tool descriptions
+### List tools in the prompt
+
+For a model reached without native tool calling, the prompt can list tools as text. `ChatAgent` does not do this: listing them again beside the request's `tools` would only spend history budget.
 
 ```python
 from kumaru.agent.prompt import build_system_prompt
@@ -107,14 +109,14 @@ If the new section is optional and request-specific, prefer the existing `extra_
 |---|---|---|
 | Client prompt does not override Kumaru behavior | `ensure_system_message()` merges client text after server text by design. | Change `config.agent.system_prompt` for server-wide behavior. |
 | Prompt contains a stale date in tests | `include_date=True` uses wall-clock time. | Pass `include_date=False` in deterministic tests. |
-| Tool use is never mentioned | `ToolBelt.descriptions()` is empty because `agent.enabled_tools` is empty. | Register the tool and add its name to config. |
+| The system prompt does not list the tools | By design: `ChatAgent` sends the declarations in the request (`tools`), and the chat template renders them into the model's prompt. | See what is offered in the `tools:` line of `kumaru chat`, or `agent.tools` in `GET /v1/info`. |
 | Retrieved context seems ignored | Context was placed in an earlier user message instead of `extra_context`. | Pass `extra_context` to `ChatAgent.prepare`, `complete`, or `stream`. |
 | A client system message seems ignored | It was blank or whitespace-only, which adds nothing; otherwise it is in the merged message, after Kumaru's prompt. | Send nonblank text. To see the merged prompt, call `ChatAgent.prepare()` on the same messages. |
 
 ## Related files
 
 - `src\kumaru\agent\chat.py` — calls `build_system_prompt()` and `ensure_system_message()`.
-- `src\kumaru\agent\tools.py` — provides tool descriptions inserted into the prompt.
+- `src\kumaru\agent\tools.py` — `ToolBelt.descriptions()` produces lines for `tool_descriptions`; `ChatAgent` sends `ToolBelt.specs()` in the request instead.
 - `src\kumaru\core\config.py` — defines `AgentConfig.system_prompt`.
 - `src\kumaru\core\types.py` — defines `Message` and `Role.SYSTEM`.
 - `ui\app.js` — lets the browser prepend one client system message from the UI.
