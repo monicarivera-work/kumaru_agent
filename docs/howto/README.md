@@ -40,6 +40,8 @@ One page per file. Each page answers the same seven questions: what it does, why
 | `agent/prompt.py` | [page](src/kumaru/agent/prompt.md) | Tuning answer quality, or injecting context |
 | `agent/memory.py` | [page](src/kumaru/agent/memory.md) | Conversations get truncated; adding summarization or RAG |
 | `agent/knowledge.py` | [page](src/kumaru/agent/knowledge.md) | Coding guidance; importing reference packs with `kumaru learn` |
+| `agent/doc_index.py` | [page](src/kumaru/agent/doc_index.md) | **Indexing a documentation folder** with `kumaru learn`; which passages reach each answer |
+| `agent/doc_chunks.py` | [page](src/kumaru/agent/doc_chunks.md) | A documentation format converts badly; adding a format |
 | `agent/tools.py` | [page](src/kumaru/agent/tools.md) | **Adding a capability the model can call** |
 
 ## Server — the HTTP surface

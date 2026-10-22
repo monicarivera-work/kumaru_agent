@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime as _dt
 from collections.abc import Sequence
 
+from kumaru.agent.doc_index import EXCERPTS_RULE
 from kumaru.agent.knowledge import EXPERTISE
 from kumaru.core.config import AgentConfig
 from kumaru.core.types import Message, Role
@@ -41,14 +42,22 @@ def build_system_prompt(
     tool_descriptions: Sequence[str] = (),
     extra_context: str | None = None,
     include_date: bool = True,
+    excerpts: bool = False,
 ) -> str:
-    """Compose the full system prompt from its parts."""
+    """Compose the full system prompt from its parts.
+
+    `excerpts` adds the rule for the documentation excerpts `ChatAgent` puts
+    in the latest user message when `agent.knowledge_indexes` is set.
+    """
     sections: list[str] = [config.system_prompt.strip(), QUALITY_DIRECTIVES]
     if config.expertise:
         sections.append(
             "Engineering guidance:\n"
             + "\n".join(EXPERTISE[name] for name in dict.fromkeys(config.expertise))
         )
+    if excerpts:
+        # Fixed text, so the prompt prefix is the same whatever is retrieved.
+        sections.append(EXCERPTS_RULE)
 
     if include_date:
         today = _dt.datetime.now().strftime("%Y-%m-%d")
@@ -61,7 +70,8 @@ def build_system_prompt(
         sections.append(f"You can call these tools:\n{listed}")
 
     if extra_context:
-        # Retrieved documents land here — last, so they sit nearest the question.
+        # Reference packs and caller context land here — last, so they sit
+        # nearest the question. Documentation excerpts go in the question itself.
         sections.append(f"Relevant context:\n{extra_context.strip()}")
 
     return "\n\n".join(s for s in sections if s)

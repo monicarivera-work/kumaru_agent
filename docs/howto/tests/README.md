@@ -1,6 +1,6 @@
 # `tests/`
 
-> The offline regression suite. 537 tests, no GPU, no downloads, under a minute.
+> The offline regression suite. 645 tests, no GPU, no downloads, under a minute.
 
 **Read this when:** you have changed something and want to know whether you broke it, or you are adding a feature and need to know where its test belongs.
 
@@ -41,14 +41,16 @@ The parts that genuinely need a GPU are covered by `scripts\verify.ps1 -Full`, w
 | `test_backends.py` | `generate()` drifting from `stream()`; **stop sequences split across chunk boundaries being missed**; echo ignoring `max_tokens` or misreporting `length`; a batched greedy reply differing from the one the model gives alone, a batch spanning more than the context window, or a batch too big for the GPU failing instead of retrying in halves; a request or load slipping past `aclose()` |
 | `test_agent.py` | Prompt assembly losing the system message or dropping client system messages; memory policies overflowing the budget or dropping the system prompt |
 | `test_tools.py` | A hung tool stalling the agent; a failing or unknown tool raising instead of returning `ERROR: ...` text |
-| `test_knowledge.py` | Coding guidance missing from the CLI, API or UI path, or duplicated; learned references losing their whitespace, overwriting a file or running code; invalid packs failing without the reason, or only after the model has loaded; references overflowing the context, being cut anywhere but at an exact prefix, or all being read whatever the budget |
+| `test_knowledge.py` | Coding guidance missing from the CLI, API or UI path, or duplicated; learned references losing their whitespace, overwriting a file or running code; invalid packs failing without the reason, or only after the model has loaded; references overflowing the context, being cut anywhere but at an exact prefix, or all being read whatever the budget; chat control tokens in a reference reaching the prompt unescaped, even where the budget cuts one |
+| `test_doc_chunks.py` | A documentation format losing its sections, code or link text, or keeping navigation and markup; code fences being split mid-line or closed early; broken HTML losing the text before the break; **a crafted or deeply nested file taking quadratic or exponential time**, which would stall `kumaru learn` |
+| `test_doc_index.py` | Indexing following a link out of the folder, even one swapped in after the folder was listed, overwriting a file, leaving a partial index or stopping at one bad page; oversized folders being read instead of refused; searches changing the index or ranking differently from run to run; question text acting as search syntax; **a crafted index running queries of its own, re-ranking passages or hanging startup**; excerpts overflowing their budget or the prompt's, even when shortened, losing their citation or keeping only it, being closed by a document, switching chat roles through control tokens, or reaching anything but the latest question; a missing index failing only after the model has loaded |
 | `test_server.py` | API shape changing; SSE framing breaking; auth being bypassable; error responses losing their shape |
 | `test_cli.py` | Flag handling, one-shot chat, `config` and the `bench` commands breaking; every command runs in-process on the echo backend |
 | `test_llamacpp_server.py` | llama-server model resolution, command line, request payload and failure handling regressing; no process is started and nothing is downloaded |
 | `test_bench_extract.py` | Answer extraction misreading a reply, which silently corrupts every benchmark score |
 | `test_bench_graders.py` | Question sampling or a grader deciding right vs wrong incorrectly, including a shipped golden format row accepting a reply its prompt rules out |
 | `test_bench_ifeval.py` | IFEval's instruction checks, strict/loose readings or its four metrics drifting |
-| `test_bench_runner.py` | The files a run leaves behind, exact resume, refusing to mix settings, surviving bad requests and graders, and the paired comparison of two runs |
+| `test_bench_runner.py` | The files a run leaves behind, exact resume, refusing to mix settings or documentation indexes, surviving bad requests and graders, and the paired comparison of two runs |
 | `test_bench_stats.py` | Wilson intervals, McNemar's test, the paired bootstrap or Holm's correction drifting from hand-checked values |
 | `test_train_data.py` | **Loss masking regressing** — the highest-consequence silent bug in the project; collator padding labels with a real token id; corpus packing changing the `tokens.bin` format, holding the whole corpus in RAM, or leaving a partial file behind |
 | `test_train_runner.py` | Training preflight missing a data file the task will read (LoRA `train_file` and `eval_file`; pretraining `text_file` or its `train_file` fallback), or accepting a directory as one, so a bad path fails at minute 0 instead of after the tokenizer and model load |

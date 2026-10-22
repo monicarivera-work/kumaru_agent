@@ -20,6 +20,7 @@ import time
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
+from kumaru.agent.doc_index import excerpt_block, find_passages, open_index, with_excerpts
 from kumaru.agent.knowledge import load_pack, reference_context
 from kumaru.agent.memory import get_policy
 from kumaru.agent.prompt import build_system_prompt, ensure_system_message
@@ -37,16 +38,17 @@ class ChatAgent:
     """Turns a message list into a reply, using a backend and a memory policy."""
 
     def __init__(self, backend: Backend, config: KumaruConfig) -> None:
-        """Read config and local knowledge packs; never touch the backend.
+        """Read config, local knowledge packs and documentation indexes; never touch the backend.
 
         Callers build the agent *before* `backend.load()`, so an unreadable or
-        invalid pack fails while there is still no model to release.
+        invalid pack or index fails while there is still no model to release.
         """
         self.backend = backend
         self.config = config
         self.memory = get_policy(config.agent.memory_policy)
         self.tools = ToolBelt(config.agent.enabled_tools)
         self.knowledge = [load_pack(Path(path)) for path in config.agent.knowledge_files]
+        self.indexes = [open_index(Path(path)) for path in config.agent.knowledge_indexes]
 
     # -- prompt assembly ----------------------------------------------------
 
@@ -57,11 +59,13 @@ class ChatAgent:
         extra_context: str | None = None,
         reserve_tokens: int | None = None,
     ) -> list[Message]:
-        """Normalize and budget the conversation. Pure and side-effect free.
+        """Normalize and budget the conversation. Changes nothing outside the result.
 
         Kept public and separate from generation so tests can assert on the
         exact prompt without running a model — the fastest way to catch the
-        class of bug where the model is fine but the prompt is wrong.
+        class of bug where the model is fine but the prompt is wrong. With
+        `agent.knowledge_indexes` set, it also searches them (read-only) and
+        puts the best passages at the start of the latest user message.
 
         `reserve_tokens` is the room kept free for the reply; it defaults to the
         configured `max_tokens`. Thinking replies are far longer, so the
@@ -75,6 +79,7 @@ class ChatAgent:
             self.config.agent,
             tool_descriptions=self.tools.descriptions(),
             extra_context=context,
+            excerpts=bool(self.indexes),
         )
         normalized = ensure_system_message(messages, system_prompt)
 
@@ -87,7 +92,7 @@ class ChatAgent:
         reserved = min(reserved, window // 2)
         budget = min(self.config.agent.max_history_tokens, max(512, window - reserved - 128))
 
-        prepared = self.memory.apply(normalized, budget, self.backend.count_tokens)
+        prepared = self._apply_memory(normalized, budget)
         if (self.config.agent.expertise or self.knowledge) and self.backend.count_tokens(prepared) > budget:
             raise ContextLengthExceededError(
                 "Engineering guidance, references and recent messages exceed the prompt budget.",
@@ -95,6 +100,47 @@ class ChatAgent:
                 "or increase the context/history budget.",
             )
         return prepared
+
+    def _apply_memory(self, messages: list[Message], budget: int) -> list[Message]:
+        """Run the memory policy, first adding documentation excerpts to the latest question.
+
+        Excerpts outrank older history, which the policy drops to make room,
+        but not the system prompt and the latest exchange: when those leave too
+        little room, the excerpts are halved until they fit, and left out if
+        even a shortened best passage does not.
+        """
+        count = self.backend.count_tokens
+        configured = self.config.agent.max_retrieved_chars
+        passages = find_passages(self.indexes, messages) if configured else []
+        limit = configured
+        while passages:
+            block, used = excerpt_block(passages, limit)
+            if not block:
+                logger.info(
+                    "retrieval: %d passages left out: %s",
+                    len(passages),
+                    "no room in the prompt budget"
+                    if limit < configured
+                    else "agent.max_retrieved_chars is too small",
+                )
+                break
+            try:
+                prepared = self.memory.apply(with_excerpts(messages, block), budget, count)
+            except ContextLengthExceededError:  # the "none" policy refuses instead of trimming
+                prepared = []
+            # drop_oldest may have dropped the question itself, excerpts and all.
+            kept = any(message.content.startswith(block) for message in prepared)
+            if kept and count(prepared) <= budget:
+                logger.info(
+                    "retrieval: %d passages, %d chars%s",
+                    len(used),
+                    len(block),
+                    " (shortened to fit the prompt budget)" if limit < configured else "",
+                )
+                logger.debug("retrieved: %s", [hit.citation for hit in used])
+                return prepared
+            limit //= 2
+        return self.memory.apply(messages, budget, count)
 
     def resolve_params(self, **overrides) -> GenerationParams:
         """Resolve the decoding parameters for one request.
@@ -198,6 +244,7 @@ class ChatAgent:
             "tools": list(self.tools.tools),
             "expertise": self.config.agent.expertise,
             "knowledge_topics": [pack.topic for pack in self.knowledge],
+            "index_topics": [index.info.topic for index in self.indexes],
             "generation": self.config.generation.model_dump(),
             "thinking_mode": self.config.thinking_mode.model_dump(exclude_none=True),
         }

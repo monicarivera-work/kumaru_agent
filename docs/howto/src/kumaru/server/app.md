@@ -203,7 +203,7 @@ curl.exe -sI http://127.0.0.1:8080/static/app.js        # content-type: text/jav
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `/healthz` stays `loading` for minutes | The load is still running: a first-run GGUF download, or `llama-server` warming up (up to `startup_timeout_s`, 900 s). | Watch the server log and `runs\logs\llama-server-<port>.log`. Gate traffic on `/healthz`. |
-| `/healthz` returns 503 `"status": "error"`, and chat returns 503 `Backend failed to load: ...` | `BACKENDS.create()`, `ChatAgent(...)` (a bad knowledge pack or tool name) or `backend.load()` raised. The state is sticky. | Read `detail`. Fix the cause, then `POST /v1/backend` (even with the same values) or restart. `kumaru serve -b echo` checks the rest of the stack. |
+| `/healthz` returns 503 `"status": "error"`, and chat returns 503 `Backend failed to load: ...` | `BACKENDS.create()`, `ChatAgent(...)` (a bad knowledge pack, documentation index or tool name) or `backend.load()` raised. The state is sticky. | Read `detail`. Fix the cause, then `POST /v1/backend` (even with the same values) or restart. `kumaru serve -b echo` checks the rest of the stack. |
 | Chat returns 503 `Backend is still loading.` | The load took longer than `ensure_ready`'s fixed 600 s. `server.request_timeout_s` is not read. | Wait for `/healthz` to report `ok` before sending traffic. |
 | Chat returns 503 after a failed `POST /v1/backend` | A failed swap leaves no backend, and each chat request retries the same bad config. | Swap to a working config. |
 | In-flight requests break during a swap | The swap does not drain the semaphore and closes the backend under them. | Swap while idle. |
@@ -221,7 +221,7 @@ curl.exe -sI http://127.0.0.1:8080/static/app.js        # content-type: text/jav
 - `src\kumaru\server\routes_chat.py` — endpoints that use `AppState`, the semaphore, and metrics.
 - `src\kumaru\server\schemas.py` — wire models.
 - `src\kumaru\core\errors.py` — `KumaruError.http_status` and `hint`, which the handler serializes.
-- `src\kumaru\agent\chat.py` — `ChatAgent`, constructed before the load, so a bad knowledge pack or tool name fails before the model takes memory.
+- `src\kumaru\agent\chat.py` — `ChatAgent`, constructed before the load, so a bad knowledge pack, documentation index or tool name fails before the model takes memory.
 - `src\kumaru\backends\base.py` — `load()`/`aclose()` lifecycle used by load, swap, and shutdown.
 - `src\kumaru\core\logging.py` — `setup_logging`.
 - `ui\index.html`, `ui\app.js`, `ui\styles.css` — served from `/` and `/static`. `app.js` calls `/v1/chat/completions`, `/v1/info`, and `/v1/backend`.

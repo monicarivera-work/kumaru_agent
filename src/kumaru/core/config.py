@@ -173,6 +173,10 @@ class AgentConfig(_Base):
     expertise: list[Literal["coding", "playwright", "windows", "apis"]] = Field(default_factory=list)
     knowledge_files: list[str] = Field(default_factory=list)
     max_knowledge_chars: int = Field(default=6000, ge=0, le=24000)
+    # Documentation indexes built by `kumaru learn TOPIC --source FOLDER`. The
+    # passages matching each question are added to it, within this budget.
+    knowledge_indexes: list[str] = Field(default_factory=list)
+    max_retrieved_chars: int = Field(default=6000, ge=0, le=24000)
 
 
 class ServerConfig(_Base):

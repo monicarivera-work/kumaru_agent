@@ -87,7 +87,8 @@ The signatures show the CLI defaults. In Python, the real defaults are `typer.Op
 | `chat` | `chat(config: str = None, backend: str = None, model: str = None, device: str = None, adapter: str = None, context: int = None, temperature: float = None, max_tokens: int = None, think: bool = None, thinking_budget: int = None, prompt: str = None) -> None` | `kumaru chat`: builds the config from the backend flags, then runs `asyncio.run(_chat_loop(cfg, prompt, overrides))`, where `overrides` holds the four generation flags. |
 | `info` | `info() -> None` | `kumaru info`: versions, registered components, profiles, optional packages and CUDA devices. |
 | `show_config` | `show_config(config: str = None, backend: str = None, model: str = None) -> None` | `kumaru config`: prints `Panel(cfg.dump_yaml(), title="resolved configuration")`. |
-| `learn` | `learn(topic: str, source: Path, version: str, output: Path) -> None` | `kumaru learn TOPIC`: reads `source` (`read_local_text`), builds a `KnowledgePack` whose `source` is the file's name, and writes it with `save_pack`, which never overwrites. Invalid input raises `ConfigError` `Cannot create knowledge pack <output>: <field>: <reason>`. See [knowledge.md](agent/knowledge.md). |
+| `learn` | `learn(topic: str, source: Path, version: str, output: Path) -> None` | `kumaru learn TOPIC`. When `source` is a folder, it calls `_learn_folder`. Otherwise it reads `source` (`read_local_text`), builds a `KnowledgePack` whose `source` is the file's name, and writes it with `save_pack`, which never overwrites. Invalid input raises `ConfigError` `Cannot create knowledge pack <output>: <field>: <reason>`. See [knowledge.md](agent/knowledge.md). |
+| `_learn_folder` | `_learn_folder(topic: str, folder: Path, version: str, output: Path) -> None` | Private. Runs `build_index` under a status line that counts files (`Indexing 120/492 files...`), then prints the index's path, its file and passage counts and size, the files with no new text, up to three skipped files per reason and the ignored file types. See [doc_index.md](agent/doc_index.md). |
 | `train` | `train(config: str, resume: str = None, dry_run: bool = False) -> None` | `kumaru train CONFIG`: calls `run_training(Path(config), resume=resume, dry_run=dry_run)`. |
 | `evaluate` | `evaluate(config: str = None, backend: str = None, model: str = None, adapter: str = None, suite: str = "smoke", output: str = None) -> None` | `kumaru eval`: `asyncio.run(run_eval(cfg, suite=suite, output=output))`. |
 | `bench_list` | `bench_list() -> None` | `kumaru bench list`. |
@@ -100,7 +101,7 @@ The signatures show the CLI defaults. In Python, the real defaults are `typer.Op
 | `main` | `main() -> None` | Console-script entry point. Calls `ensure_utf8_streams()`, then `app()`; a `KumaruError` prints `error:`/`hint:` and raises `SystemExit(1)`. Its `KeyboardInterrupt` branch (`interrupted`, exit 130) does not run in practice; see [Exit codes](#errors-and-exit-codes). |
 | `_build_overrides` | `_build_overrides(**kwargs: Any) -> dict[str, Any]` | Private, and the one place flags become config paths. Drops `None` values and unknown keys. `tests\test_cli.py` tests it directly. |
 | `_load` | `_load(config: str \| None, **flags: Any)` | Private. Returns the `KumaruConfig` from `load_config(config, overrides=_build_overrides(**flags))`. |
-| `_chat_loop` | `async _chat_loop(cfg: Any, single_prompt: str \| None, overrides: dict[str, Any]) -> None` | Private. The terminal REPL behind `chat`. Builds the `ChatAgent` before `backend.load()`, so a bad knowledge pack or tool name fails before the model loads. Passes `overrides` to every `agent.stream` call. |
+| `_chat_loop` | `async _chat_loop(cfg: Any, single_prompt: str \| None, overrides: dict[str, Any]) -> None` | Private. The terminal REPL behind `chat`. Builds the `ChatAgent` before `backend.load()`, so a bad knowledge pack, documentation index or tool name fails before the model loads. Passes `overrides` to every `agent.stream` call. |
 
 ## How to use it
 
@@ -114,7 +115,7 @@ The examples are PowerShell, run from the repo root with the venv active; otherw
 | `kumaru chat` | Chat in the terminal, with no server in between. | Yes, before the first prompt. |
 | `kumaru info` | Show versions, hardware, and which optional components are installed. | No. It imports torch and queries CUDA, so it is slow, especially on a cold start. |
 | `kumaru config` | Print the fully merged configuration and exit. | No. |
-| `kumaru learn TOPIC` | Learn from local references without downloads, execution, or fine-tuning. | No. |
+| `kumaru learn TOPIC` | Learn from local references without downloads, execution, or fine-tuning. A file becomes a knowledge pack; a folder becomes a documentation index. | No. |
 | `kumaru train CONFIG` | Fine-tune (LoRA) or pretrain a model. See docs/TRAINING.md. | Yes. |
 | `kumaru eval` | Measure latency, throughput, and answer quality. | Yes. |
 | `kumaru bench list\|run\|report\|compare` | Score models on public benchmarks; compare runs with significance tests. | `run` only. |
@@ -141,9 +142,9 @@ Quoted text is the option's `--help` string. A dash means the option has none.
 | `--thinking-budget` | `chat` | per message | "Max thinking tokens before answering." `x>=0`. |
 | `-q, --prompt` | `chat` | — | "Answer one question and exit." |
 | `-s, --suite` | `eval` | — | Default `smoke`. "smoke \| speed \| jsonl file path". |
-| `-o, --output` | `eval`, `learn` | — | `eval`: "Write results to this JSON file." `learn`: "New knowledge pack JSON file." Required by `learn`; its folder must exist, and an existing file is never replaced. |
-| `TOPIC` (argument) | `learn` | — | Required. "Language or platform to learn." |
-| `--source` | `learn` | — | Required. "Reviewed UTF-8 reference file." At most 128,000 bytes. |
+| `-o, --output` | `eval`, `learn` | — | `eval`: "Write results to this JSON file." `learn`: "New knowledge pack JSON file; for a folder, a new index file such as godot.sqlite." Required by `learn`; its folder must exist, and an existing file is never replaced. |
+| `TOPIC` (argument) | `learn` | — | Required. "Language, framework or platform to learn." |
+| `--source` | `learn` | — | Required. "Reviewed UTF-8 reference file, or a documentation folder to index (Markdown, MDX, reStructuredText, HTML or plain text)." A file may be at most 128,000 bytes. |
 | `--version` | `learn` | — | Required. "Language/platform version." |
 | `CONFIG` (argument) | `train` | — | Required. "Training config YAML (see configs/train/)." |
 | `--resume` | `train` | — | "Checkpoint directory to resume from." |
@@ -340,7 +341,7 @@ kumaru bench run gsm8k ifeval -c qwen36 --think --thinking-budget 4096 -n 50 -o 
 
 - **Resuming.**
   - A rerun with the same `--out` reuses the finished answers.
-  - A run whose fingerprint differs (model, decoding parameters, seed or prompt mode) is refused before anything is written.
+  - A run whose fingerprint differs (model, decoding parameters, seed, prompt mode or documentation indexes) is refused before anything is written.
   - On Ctrl+C the runner prints `Stopped. Finished answers are saved; resume with --out <dir>`.
 - **`humaneval`** refuses to run without `--allow-code-exec`.
 
@@ -435,7 +436,7 @@ def serve(
 | `Missing argument 'config'.` from `kumaru train`, exit 2. | `train` takes a positional path, not `-c`. | `kumaru train configs\train\lora-small.yaml`. |
 | `error: Training config not found: <path>`. | A wrong path. | Start from a file in `configs\train\`. |
 | `error: 'humaneval' grades answers by running model-written code on this machine.` | Benchmarks that execute code are opt-in. | Add `--allow-code-exec` after reading the safeguards in `docs\BENCHMARKS.md`, or drop `humaneval`. |
-| `error: <dir> holds results from different settings (model, decoding parameters, seed or prompt mode).` | `--out` points at a run made with other settings, and resuming would mix them. | Omit `--out`, or choose a new directory. |
+| `error: <dir> holds results from different settings (model, decoding parameters, seed, prompt mode or documentation indexes).` | `--out` points at a run made with other settings, and resuming would mix them. | Omit `--out`, or choose a new directory. |
 | A bench run is not in `runs\bench\<label>`. | The default folder is `runs\bench\<YYYYMMDD-HHMMSS>-<label>`. | Use the `results:` or `saved to` path that the run prints. |
 | `error: No benchmark results in <dir>`. | `bench report` was pointed at a folder that `bench run` didn't create. | Point it at a run folder under `runs\bench\`. |
 | `error: <dir> holds answers to gsm8k, an evaluation set: training on them would inflate the score it measures.` | `distill build` was given a run of a test split or a golden set. | Run the teacher on `gsm8k_train` and pass that run. See `docs\howto\src\kumaru\train\distill.md`. |
@@ -457,6 +458,7 @@ def serve(
 - `src\kumaru\core\logging.py`: `ensure_utf8_streams()`, plus which log settings each command honours (`docs\howto\src\kumaru\core\logging.md`).
 - `src\kumaru\agent\chat.py`: `ChatAgent.stream` and `resolve_params`, behind `chat` and `bench run` (`docs\howto\src\kumaru\agent\chat.md`).
 - `src\kumaru\agent\knowledge.py`: `KnowledgePack`, `read_local_text` and `save_pack`, behind `learn` (`docs\howto\src\kumaru\agent\knowledge.md`).
+- `src\kumaru\agent\doc_index.py`: `build_index` and `format_types`, behind `learn` for a folder (`docs\howto\src\kumaru\agent\doc_index.md`).
 - `src\kumaru\server\app.py`: `run(cfg)`, called by `serve` (`docs\howto\src\kumaru\server\app.md`).
 - `src\kumaru\train\runner.py`: `run_training`, called by `train` (`docs\TRAINING.md`).
 - `src\kumaru\eval\harness.py`: `run_eval`, called by `eval` (`docs\howto\src\kumaru\eval\harness.md`).

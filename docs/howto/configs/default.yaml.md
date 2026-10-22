@@ -77,11 +77,13 @@ Exceptions and gaps:
 - **Ranges are checked at load.**
   - `generation`: `max_tokens` 1–131,072, `temperature` 0–2, `top_p` 0–1, `top_k` ≥ 0, `repetition_penalty` 0.5–2, `min_p` 0–1, `presence_penalty` −2–2, `thinking_budget` ≥ 0. `thinking_mode` has the same ranges.
   - `llama_server`: `parallel` 1–64, `n_cpu_moe` ≥ 0, `batch_size`/`ubatch_size` ≥ 1, `startup_timeout_s` > 0.
+  - `agent`: `max_knowledge_chars` and `max_retrieved_chars` 0–24,000.
 - **`telemetry.log_level` is checked at load.** It must be `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in any case and with any surrounding spaces; `WARN` becomes `WARNING` and `FATAL` becomes `CRITICAL`. Any other name fails before the server starts: `Invalid configuration: … telemetry.log_level  Input should be 'DEBUG', 'INFO', 'WARNING', 'ERROR' or 'CRITICAL'`. Earlier builds accepted any string, and `kumaru serve` then died inside uvicorn with `KeyError: 'warn'`. The bare `KUMARU_LOG_LEVEL` variable is not a config field and is not checked; an unknown name there falls back to INFO.
 - **An empty section fails.** A header whose keys are all commented out is YAML `null`, which fails with `Input should be a valid dictionary or instance of ThinkingModeConfig` (or the respective section class). Delete the header too.
 - **Some values are checked only when used:**
   - `backend.name`, when the backend is created. Names are case-sensitive (`error: Unknown backend: 'Echo'.`, followed by the list). Aliases: `hf` → `transformers`, `gguf` → `llamacpp`, `llama-server`/`llama_server` → `llamacpp_server`, `ollama`/`vllm`/`remote` → `openai_compat`.
   - `agent.enabled_tools`, when the agent is built: `Unknown tool: 'x'. (Available tools: current_time)`.
+  - `agent.knowledge_files` and `agent.knowledge_indexes`, also when the agent is built, before any model loads: `Invalid knowledge pack <path>: ...`, `Documentation index not found: <path>`.
   - `backend.dtype`, when transformers loads: `Unknown dtype 'x'`.
   - `agent.memory_policy` is never checked. An unknown name logs `unknown memory_policy 'x'; using sliding_window`.
 
@@ -198,6 +200,11 @@ A sampling preset that is applied over `generation` only while thinking is on. R
 | `memory_policy` | `sliding_window` | What to drop when the budget is exceeded. `sliding_window` keeps the system message plus the newest messages that fit, and always at least the newest two. `drop_oldest` removes messages from the front with no floor, and can drop the current question. `none` fails the request with HTTP 413 (`Conversation needs N tokens but the budget is B.`). |
 | `enabled_tools` | `[]` | Tool names whose descriptions are added to the system prompt. The only built-in is `current_time`. Nothing executes tools yet: there is no tool-calling loop. |
 | `max_tool_iterations` | `4` | Reserved; nothing reads it. |
+| `expertise` | `[]` | Fixed engineering guidance added to the system prompt: any of `coding`, `playwright`, `windows` and `apis`. The `coder` profile turns on all four. [Details](../src/kumaru/agent/knowledge.md). |
+| `knowledge_files` | `[]` | Absolute paths to knowledge packs, which `kumaru learn` makes from one reviewed file. The packs go whole, in this order, into every system prompt. A missing or invalid pack stops startup before the model loads. |
+| `max_knowledge_chars` | `6000` | The budget for all packs together, labels included: 0–24,000. Text past it is not sent. |
+| `knowledge_indexes` | `[]` | Absolute paths to documentation indexes, which `kumaru learn` makes from a folder. Each request searches them and puts the passages that best match the latest question at its start, cited and labelled as untrusted. A missing or unreadable index stops startup before the model loads. [Details](../src/kumaru/agent/doc_index.md). |
+| `max_retrieved_chars` | `6000` | The budget for each request's passages, citations included: 0–24,000, where `0` turns retrieval off. When the prompt budget is tight, older history is dropped first, then the passages are halved until they fit. Separate from `max_knowledge_chars`. |
 
 ### `server`
 
