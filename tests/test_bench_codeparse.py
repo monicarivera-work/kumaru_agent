@@ -3,12 +3,42 @@
 What must never regress: a brace or comment marker inside a string, character
 or regular expression passing for code (the function would end in the wrong
 place and a right answer would not compile); offsets drifting between the
-masked and the original text; and calls or prototypes passing for definitions.
+masked and the original text; calls or prototypes passing for definitions; and
+time linear in the text's length, as a reply can be thousands of repetitions
+of one character and must still grade in moments.
 """
+
+import functools
+import string
+import time
+from collections.abc import Callable
 
 import pytest
 
-from kumaru.eval.benchmarks.codeparse import chunks, defines, mask, matching, uncomment
+from kumaru.eval.benchmarks.codeparse import (
+    LANGUAGES,
+    chunks,
+    defines,
+    find_definition,
+    mask,
+    matching,
+    uncomment,
+)
+
+
+def cpu_seconds(work: Callable[[], object], limit: float) -> float:
+    """CPU seconds `work` takes; the faster of two tries if the first passes `limit`.
+
+    CPU time, not wall time: other programs busy on the machine barely change it.
+    """
+    best = float("inf")
+    for _ in range(2):
+        start = time.process_time()
+        work()
+        best = min(best, time.process_time() - start)
+        if best <= limit:
+            break
+    return best
 
 
 def test_mask_blanks_comments_and_zeroes_literals_at_the_same_offsets() -> None:
@@ -38,6 +68,11 @@ def test_mask_blanks_comments_and_zeroes_literals_at_the_same_offsets() -> None:
         ("cs", 'var a = @"C:\\"; var b = $"{x}}}{{";\nvoid F() {}\n'),
         ("cs", 'var r = """\n  }\n  """;\nvoid F() {}\n'),
         ("java", 'String s = """\n  }\n  """;\nvoid f() {}\n'),
+        # A probe for a regular expression that fails remembers what it read;
+        # a later one reading the same characters outside a [class] still closes.
+        ("js", "x = /[ /}/;\nfunction f() {}\n"),
+        # A run of "@" that starts no string does not hide a later one that does.
+        ("cs", '@@@@x = 1; var s = @"}";\nvoid F() {}\n'),
     ],
 )
 def test_braces_inside_literals_and_comments_are_not_code(lang: str, code: str) -> None:
@@ -51,6 +86,8 @@ def test_matching_finds_the_bracket_that_closes_an_opener() -> None:
     assert matching(masked, 1) == masked.index(")", masked.index("}"))
     assert matching(masked, 3) == 5
     assert matching("f(", 1) == -1
+    with pytest.raises(KeyError):
+        matching(masked, 0)  # "f" opens nothing
 
 
 def test_chunks_cut_top_level_pieces_and_give_the_text_back() -> None:
@@ -151,3 +188,53 @@ def test_defines_tells_definitions_from_calls(lang: str, code: str, expected: bo
 def test_an_unknown_language_is_refused() -> None:
     with pytest.raises(ValueError, match="unsupported language"):
         mask("x", "kotlin")
+
+
+# -- time linear in the text's length ---------------------------------------------
+
+# What a reply that degenerates into repetition might repeat: every ASCII
+# punctuation character, the prefixes the scanner probes for a literal or a
+# comment, and pieces of definitions and statements.
+PUMPS = (
+    *string.punctuation,
+    *("$@", '@"', '$"', "${", "`${", "/[", "\\/", "r#", 'r#"', "br#", "b'", 'R"(', 'u8R"'),
+    *('"""', "'''", "/*", "//", "#["),
+    *("\n", "+\n", "add(", "long add(", "const add:", "a = add(1);\n"),
+)
+
+
+def read_everything(text: str, lang: str, name: str) -> None:
+    masked = mask(text, lang)
+    uncomment(text, lang, masked=masked)
+    chunks(text, lang, masked=masked)
+    defines(text, name, lang, masked=masked)
+    find_definition(masked, name)
+
+
+@pytest.mark.parametrize("lang", LANGUAGES)
+def test_a_repeated_piece_is_read_in_linear_time(lang: str) -> None:
+    # A probe that reads again what a failed one read makes this quadratic:
+    # 4,000 "@" then took C# 1 s, and 2,000 "/[" JavaScript 0.4 s.
+    # The slowest piece now takes under 0.02 s.
+    name = "Add" if lang == "cs" else "add"
+    slow = {}
+    for pump in PUMPS:
+        pump = pump.replace("add", name)
+        text = pump * (4000 // len(pump))
+        seconds = cpu_seconds(functools.partial(read_everything, text, lang, name), 0.25)
+        if seconds > 0.25:
+            slow[pump] = round(seconds, 2)
+    assert slow == {}
+
+
+def test_a_long_run_of_a_binding_without_a_value_is_read_in_linear_time() -> None:
+    # Searching on from each "const add" for its "=" made this quadratic: 8 s.
+    text = "const add:" * 10_000
+    assert cpu_seconds(functools.partial(defines, text, "add", "js"), 0.5) < 0.5
+
+
+@pytest.mark.parametrize(("lang", "hole"), [("js", "`${"), ("ts", "`${"), ("cs", '$"{')])
+def test_interpolations_nested_past_the_limit_run_to_the_end_of_the_text(lang: str, hole: str) -> None:
+    # Python's recursion limit used to end this with a RecursionError.
+    text = hole * 2000
+    assert mask(text, lang) == "0" * len(text)

@@ -11,8 +11,8 @@ protections:
 - a time limit per step. When a step ends or times out, everything it started
   is killed, not just its own process. On Windows each step runs in a job
   object, which also caps memory (`KUMARU_CODE_MEMORY_MB`, default 4096) and
-  turns crash dialogs off. On Linux and macOS each step gets its own process
-  group;
+  running processes (512, as in Docker) and turns crash dialogs off. On Linux
+  and macOS each step gets its own process group;
 - bounded output: only the last 64 KB of each stream is kept;
 - a random marker the program prints after its last test, so code that exits
   early with status 0 cannot pass untested.
@@ -146,6 +146,36 @@ def run(program: Program, *, sandbox: str = "none") -> Outcome:
         return _run_docker(program) if sandbox == "docker" else _run_local(program)
 
 
+# -- finding programs ---------------------------------------------------------
+
+
+def find_program(name: str) -> str | None:
+    """The absolute path of the program `name` in a PATH folder, or None.
+
+    Unlike `shutil.which`, it never looks in the current folder, which `which`
+    searches first on Windows: a node.cmd left in the folder Kumaru was started
+    from would run instead of Node.js. Empty and relative PATH entries, which
+    also depend on the current folder, are skipped. On Windows a name without
+    one of PATHEXT's extensions is tried with each of them.
+    """
+    names = [name]
+    if _WINDOWS:
+        pathext = [ext for ext in os.environ.get("PATHEXT", "").split(os.pathsep) if len(ext) > 1 and ext[0] == "."]
+        pathext = pathext or [".COM", ".EXE", ".BAT", ".CMD"]
+        if not name.upper().endswith(tuple(ext.upper() for ext in pathext)):
+            names = [name + ext for ext in pathext]
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        folder = entry.strip('"') if _WINDOWS else entry
+        # On Windows pathlib also wants a drive: "\bin" and "C:bin" depend on the current folder.
+        if not folder or not Path(folder).is_absolute():
+            continue
+        for candidate in names:
+            path = os.path.join(folder, candidate)
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+    return None
+
+
 # -- how many at once ---------------------------------------------------------
 
 _slots_lock = threading.Lock()
@@ -219,6 +249,7 @@ def _pump(stream: IO[bytes], tail: _Tail) -> None:
 # and none can leave. Each step's process is created suspended, put in a new
 # job, then resumed, so it cannot start a child before it is contained.
 
+_JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
 _JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
 _JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION = 0x00000400  # no crash dialogs
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
@@ -226,6 +257,8 @@ _JOB_BASIC_ACCOUNTING = 1
 _JOB_EXTENDED_LIMITS = 9
 _HANDLE = ctypes.c_void_p
 _DWORD = ctypes.c_uint32
+# Processes a step may have running at once, as Docker's --pids-limit: a fork bomb stops here.
+MAX_PROCESSES = 512
 
 
 class _BasicLimits(ctypes.Structure):
@@ -315,7 +348,12 @@ class _Job:
         if not self.handle:
             raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined]
         info = _ExtendedLimits()
-        flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | _JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
+        flags = (
+            _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            | _JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
+            | _JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+        )
+        info.BasicLimitInformation.ActiveProcessLimit = MAX_PROCESSES
         limit = memory_limit_mb()
         if limit:
             flags |= _JOB_OBJECT_LIMIT_JOB_MEMORY
@@ -516,18 +554,29 @@ def docker_image() -> str:
     return os.environ.get("KUMARU_SANDBOX_IMAGE", "").strip() or DEFAULT_IMAGE
 
 
+def _build_command(image: str) -> str:
+    return f"docker build -t {image} -f {DOCKERFILE} ."
+
+
+def _docker_program(image: str) -> str:
+    """docker's absolute path, which is what runs (see `find_program`)."""
+    docker = find_program("docker")
+    if not docker:
+        raise ToolchainMissing(
+            "--sandbox docker needs Docker, which is not installed.",
+            hint=f"Install Docker, then build the image once: {_build_command(image)}",
+        )
+    return docker
+
+
 def check_docker(image: str | None = None) -> str:
     """The sandbox image's ID. Raises ToolchainMissing unless Docker runs and has the image."""
     image = image or docker_image()
-    build = f"docker build -t {image} -f {DOCKERFILE} ."
-    if not shutil.which("docker"):
-        raise ToolchainMissing(
-            "--sandbox docker needs Docker, which is not installed.",
-            hint=f"Install Docker, then build the image once: {build}",
-        )
+    build = _build_command(image)
+    docker = _docker_program(image)
     try:
         proc = subprocess.run(
-            ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+            [docker, "image", "inspect", "--format", "{{.Id}}", image],
             capture_output=True,
             text=True,
             timeout=60,
@@ -545,14 +594,14 @@ def check_docker(image: str | None = None) -> str:
     return proc.stdout.strip()
 
 
-def docker_command(image: str, name: str, env: dict[str, str], script: str) -> list[str]:
+def docker_command(docker: str, image: str, name: str, env: dict[str, str], script: str) -> list[str]:
     """`docker run` for one program: no network, read-only root, unprivileged, limited.
 
-    The program's files arrive on stdin as a tar archive; only /work and /tmp
-    (both in memory) are writable.
+    `docker` is the docker program's absolute path. The program's files arrive
+    on stdin as a tar archive; only /work and /tmp (both in memory) are writable.
     """
     argv = [
-        "docker", "run", "--rm", "-i", "--pull", "never", "--name", name,
+        docker, "run", "--rm", "-i", "--pull", "never", "--name", name,
         "--network", "none", "--read-only",
         "--tmpfs", "/work:rw,exec,nosuid,nodev,size=512m,mode=1777",
         "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=1g,mode=1777",
@@ -630,9 +679,11 @@ def _tar(files: dict[str, str]) -> bytes:
 
 
 def _run_docker(program: Program) -> Outcome:
+    image = docker_image()
+    docker = _docker_program(image)
     name = f"kumaru-{secrets.token_hex(6)}"
     token = f"kumaru-{secrets.token_hex(12)}"
-    argv = docker_command(docker_image(), name, program.env, docker_script(program, token))
+    argv = docker_command(docker, image, name, program.env, docker_script(program, token))
     # Every step's own limit, plus time to start and remove the container.
     budget = sum(step.timeout_s + 2 for step in program.steps) + 30
     flags = _CREATE_NO_WINDOW if _WINDOWS else 0
@@ -642,7 +693,7 @@ def _run_docker(program: Program) -> Outcome:
             argv, input=_tar(program.files), capture_output=True, timeout=budget, creationflags=flags, check=False
         )
     except subprocess.TimeoutExpired:
-        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=60, creationflags=flags, check=False)
+        subprocess.run([docker, "rm", "-f", name], capture_output=True, timeout=60, creationflags=flags, check=False)
         return Outcome("timeout", program.steps[-1].stage, None, "", "", budget, "the container did not finish in time")
     elapsed = time.monotonic() - start
     stdout = proc.stdout.decode("utf-8", errors="replace")
@@ -656,6 +707,6 @@ def _run_docker(program: Program) -> Outcome:
     if proc.returncode != 0:
         raise KumaruError(
             f"The sandbox container failed (docker run exited with {proc.returncode}): {stderr.strip()[-400:]}",
-            hint=f"Check that Docker is running and the image is built: docker build -t {docker_image()} -f {DOCKERFILE} .",
+            hint=f"Check that Docker is running and the image is built: {_build_command(image)}",
         )
     return parse_docker_output(stdout, token, program)

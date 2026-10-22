@@ -21,10 +21,18 @@ literals, raw and verbatim strings, interpolation holes, Rust's chars versus
 lifetimes, C++ digit separators, JavaScript regular expressions), which covers
 what models write. Code that confuses them is usually broken anyway, and then
 fails to compile either way.
+
+Everything here takes time linear in the text's length, because a reply can
+be tens of thousands of characters of junk ("@@@@...", "/[/[/[...") and grading
+it must still take moments, not hours: a probe for a literal that fails
+remembers what it read, and interpolation holes nest at most 32 deep (deeper
+ones run to the end of the text).
 """
 
 from __future__ import annotations
 
+import bisect
+import functools
 import re
 from dataclasses import dataclass
 
@@ -55,6 +63,18 @@ _AFTER_BRACE_WORDS = frozenset({"else", "catch", "finally", "while", "as", "sati
 _JS_AFTER_BRACE_WORDS = _AFTER_BRACE_WORDS | {"from"}
 # JavaScript/TypeScript: a line starting with one of these continues the line before.
 _JS_CONTINUES = ".,?:=+-*/%&|^<>{"
+# ...unless it starts with one of these words.
+_JS_NOT_CONTINUED = _AFTER_BRACE_WORDS | {"extends", "implements"}
+# A word: letters, digits, "_" and (except in C#) "$". `\w` is exactly
+# `str.isalnum()` plus "_".
+_WORD = re.compile(r"[\w$]+")
+_WORD_CS = re.compile(r"\w+")
+# Interpolation holes nested deeper than this run to the end of the text.
+_MAX_NESTING = 32
+_BRACKETS = re.compile(r"[()\[\]{}]")
+_OPENERS = {")": "(", "]": "[", "}": "{"}
+# After a parameter list: a body, not a prototype or a call.
+_BODY = re.compile(r"[^;{}=]*(?:\{|=>)")
 
 
 def _ident(ch: str, lang: str) -> bool:
@@ -68,86 +88,118 @@ class _Scanner:
         if lang not in LANGUAGES:
             raise ValueError(f"unsupported language {lang!r}; expected one of {', '.join(LANGUAGES)}")
         self.text, self.lang, self.n = text, lang, len(text)
-        # (start, end, is_comment)
+        # (start, end, is_comment) of the outermost comments and literals, in
+        # order. Those inside an interpolation hole are not kept: the literal
+        # around them covers them.
         self.spans: list[tuple[int, int, bool]] = []
+        self._word = _WORD_CS if lang == "cs" else _WORD
+        self._nesting = 0
+        # The run of C# "@"/"$" that last failed to start a string: its
+        # suffixes fail too, so `scan` need not read it again from each one.
+        self._cs_fail = (-1, -1)
+        # JavaScript regular-expression probes are deterministic walks over
+        # (position, inside a [class]) states; those that reached a line end
+        # mark every state they passed as dead (bit 1 outside a class, bit 2
+        # inside), so a later probe stops on reaching one.
+        self._dead: bytearray | None = None
 
     def scan(self, i: int = 0, *, hole: bool = False) -> int:
         """Record spans from `i`. In a `hole` (an interpolation whose "{" the
         caller consumed), stop after the "}" that closes it."""
+        if not hole:
+            return self._scan(i, hole=False)
+        if self._nesting >= _MAX_NESTING:
+            return self.n
+        self._nesting += 1
+        try:
+            return self._scan(i, hole=True)
+        finally:
+            self._nesting -= 1
+
+    def _scan(self, i: int, *, hole: bool) -> int:
         text, n, lang = self.text, self.n, self.lang
         depth = 0
         regex_ok = True  # would a "/" here start a JavaScript regular expression?
         while i < n:
             ch = text[i]
-            nxt = text[i + 1] if i + 1 < n else ""
-            if ch == "/" and nxt == "/":
-                end = text.find("\n", i)
-                end = n if end < 0 else end
-                self.spans.append((i, end, True))
-                i = end
+            if ch.isspace():
+                i += 1
                 continue
-            if ch == "/" and nxt == "*":
-                end = self._block_comment(i)
-                self.spans.append((i, end, True))
-                i = end
-                continue
-            end = self._literal(i, regex_ok)
-            if end is not None:
-                self.spans.append((i, end, False))
-                i, regex_ok = end, False
-                continue
-            if _ident(ch, lang):
+            comment = ch == "/" and i + 1 < n and text[i + 1] in "/*"
+            end: int | None
+            if comment:
+                if text[i + 1] == "/":
+                    end = text.find("\n", i)
+                    end = n if end < 0 else end
+                else:
+                    end = self._block_comment(i)
+            elif _ident(ch, lang):
                 j = self._word_end(i)
-                regex_ok = text[i:j] in _JS_REGEX_AFTER
-                i = j
+                end = self._prefixed(i, j)
+                if end is None:
+                    regex_ok = text[i:j] in _JS_REGEX_AFTER
+                    i = j
+                    continue
+            else:
+                end = self._literal(i, regex_ok)
+            if end is not None:
+                if self._nesting == 0:
+                    self.spans.append((i, end, comment))
+                i = end
+                if not comment:
+                    regex_ok = False
                 continue
-            if not ch.isspace():
-                if hole:
-                    if ch == "{":
-                        depth += 1
-                    elif ch == "}":
-                        if depth == 0:
-                            return i + 1
-                        depth -= 1
-                regex_ok = ch not in ")]"
+            if hole:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    if depth == 0:
+                        return i + 1
+                    depth -= 1
+            regex_ok = ch not in ")]"
             i += 1
         return n
 
     # -- pieces ---------------------------------------------------------------
 
     def _word_end(self, i: int) -> int:
-        text, n, lang = self.text, self.n, self.lang
-        number = text[i].isdigit()
+        """End of the word whose first character is `text[i]`."""
+        text, n = self.text, self.n
+        number = self.lang == "cpp" and text[i].isdigit()
         j = i + 1
-        while j < n:
-            c = text[j]
-            if _ident(c, lang):
-                j += 1
-            elif number and c == "'" and lang == "cpp" and j + 1 < n and text[j + 1].isalnum():
+        while True:
+            match = self._word.match(text, j)
+            if match:
+                j = match.end()
+            if number and j + 1 < n and text[j] == "'" and text[j + 1].isalnum():
                 j += 1  # a digit separator: 1'000'000
-            else:
-                break
-        return j
+                continue
+            return j
+
+    def _prefixed(self, i: int, j: int) -> int | None:
+        """End of a literal whose prefix is the word `text[i:j]` (Rust's
+        b"x", r#"x"#, C++'s u8"x", R"(x)"), or None if no literal starts there."""
+        text, n, lang = self.text, self.n, self.lang
+        if lang not in ("rs", "cpp") or j >= n or text[j] not in "\"'#":
+            return None
+        word, q = text[i:j], text[j]
+        if lang == "rs":
+            if word in ("r", "br", "cr") and q in ('"', "#"):
+                return self._rust_raw(j)
+            if word in ("b", "c") and q == '"':
+                return self._quoted(j, '"', multiline=True)
+            if word == "b" and q == "'":
+                return self._quoted(j, "'", multiline=False)
+        elif q == '"' and word in _CPP_RAW_PREFIXES:
+            return self._cpp_raw(j)
+        elif q in ('"', "'") and word in _CPP_STRING_PREFIXES:
+            return self._quoted(j, q, multiline=False)
+        return None
 
     def _literal(self, i: int, regex_ok: bool) -> int | None:
-        """End of the literal starting at `i`, or None if none starts there."""
-        text, n, lang = self.text, self.n, self.lang
+        """End of the unprefixed literal starting at `i`, or None if none starts there."""
+        text, lang = self.text, self.lang
         ch = text[i]
-        if _ident(ch, lang):
-            j = self._word_end(i)
-            word, q = text[i:j], text[j] if j < n else ""
-            if lang == "rs":
-                if word in ("r", "br", "cr") and q in ('"', "#"):
-                    return self._rust_raw(j)
-                if word in ("b", "c") and q == '"':
-                    return self._quoted(j, '"', multiline=True)
-                if word == "b" and q == "'":
-                    return self._quoted(j, "'", multiline=False)
-            elif lang == "cpp" and q == '"' and word in _CPP_RAW_PREFIXES:
-                return self._cpp_raw(j)
-            elif lang == "cpp" and q in ('"', "'") and word in _CPP_STRING_PREFIXES:
-                return self._quoted(j, q, multiline=False)
-            return None
         if ch == '"':
             if lang == "java" and text.startswith('"""', i):
                 return self._until(i + 3, '"""', escapes=True)
@@ -230,14 +282,19 @@ class _Scanner:
 
     def _regex(self, i: int) -> int | None:
         text, n = self.text, self.n
+        dead = self._dead
+        passed: list[int] = []  # states read, as position * 2 + in_class
         j, in_class = i + 1, False
         while j < n:
+            if dead is not None and dead[j] & (1 << in_class):
+                break  # an earlier probe went on from here to a line end
+            passed.append(j * 2 + in_class)
             c = text[j]
             if c == "\\":
                 j += 2
                 continue
             if c == "\n":
-                return None  # no closing "/" on this line: it was a division
+                break  # no closing "/" on this line: it was a division
             if in_class:
                 in_class = c != "]"
             elif c == "[":
@@ -248,6 +305,10 @@ class _Scanner:
                     j += 1  # flags
                 return j
             j += 1
+        if dead is None:
+            dead = self._dead = bytearray(n)
+        for state in passed:
+            dead[state >> 1] |= 1 << (state & 1)
         return None
 
     def _rust_raw(self, j: int) -> int | None:
@@ -290,12 +351,15 @@ class _Scanner:
     def _cs_prefixed(self, i: int) -> int | None:
         """C# @"verbatim", $"interpolated {x}", $@"both" and $\"\"\"raw\"\"\" strings."""
         text, n = self.text, self.n
+        if self._cs_fail[0] <= i < self._cs_fail[1]:
+            return None
         j, interpolated, verbatim = i, False, False
         while j < n and text[j] in "@$":
             interpolated |= text[j] == "$"
             verbatim |= text[j] == "@"
             j += 1
         if j >= n or text[j] != '"':
+            self._cs_fail = (i, j)
             return None  # @identifier
         if text.startswith('"""', j) and not verbatim:
             return self._cs_raw(j)
@@ -327,14 +391,16 @@ def mask(text: str, lang: str) -> str:
     """
     scanner = _Scanner(text, lang)
     scanner.scan()
-    chars = list(text)
+    pieces: list[str] = []
+    done = 0
     for start, end, comment in scanner.spans:
-        for k in range(start, min(end, len(chars))):
-            if not comment:
-                chars[k] = "0"
-            elif chars[k] != "\n":
-                chars[k] = " "
-    return "".join(chars)
+        end = min(end, len(text))
+        piece = text[start:end]
+        pieces.append(text[done:start])
+        pieces.append("\n".join(" " * len(line) for line in piece.split("\n")) if comment else "0" * len(piece))
+        done = end
+    pieces.append(text[done:])
+    return "".join(pieces)
 
 
 def uncomment(text: str, lang: str, *, masked: str | None = None) -> str:
@@ -344,19 +410,29 @@ def uncomment(text: str, lang: str, *, masked: str | None = None) -> str:
 
 
 def matching(masked: str, i: int) -> int:
-    """Index of the bracket that closes the one at `masked[i]`, or -1."""
-    opener = masked[i]
-    closer = _PAIRS[opener]
-    depth = 0
-    for j in range(i, len(masked)):
-        ch = masked[j]
-        if ch == opener:
-            depth += 1
-        elif ch == closer:
-            depth -= 1
-            if depth == 0:
-                return j
-    return -1
+    """Index of the bracket that closes the one at `masked[i]`, or -1.
+
+    Only brackets of the same kind count, as the kinds need not nest properly
+    in code `mask` got wrong. Every bracket of a text is matched at once, and
+    the last few texts are remembered, so a caller can ask about each bracket.
+    """
+    if masked[i] not in _PAIRS:
+        raise KeyError(masked[i])
+    return _closers(masked).get(i, -1)
+
+
+@functools.lru_cache(maxsize=8)
+def _closers(masked: str) -> dict[int, int]:
+    """Each opening bracket's index -> the index of the bracket that closes it."""
+    found: dict[int, int] = {}
+    open_at: dict[str, list[int]] = {opener: [] for opener in _PAIRS}
+    for match in _BRACKETS.finditer(masked):
+        ch, j = match.group(), match.start()
+        if ch in open_at:
+            open_at[ch].append(j)
+        elif open_at[_OPENERS[ch]]:
+            found[open_at[_OPENERS[ch]].pop()] = j
+    return found
 
 
 @dataclass(frozen=True)
@@ -385,15 +461,26 @@ def chunks(
     after_words = _JS_AFTER_BRACE_WORDS if lang in ("js", "ts") else _AFTER_BRACE_WORDS
     out: list[Chunk] = []
     begin, started, depth, i = start, False, 0, start
+    last = -1  # the current piece's last non-space character so far
+    spaces = (0, -1)  # the last run of whitespace measured: masked[a:b], b at a non-space or `end`
 
     def emit(stop: int) -> None:
-        nonlocal begin, started
+        nonlocal begin, started, last
         if masked[begin:stop].strip():
             out.append(Chunk(begin, stop, text[begin:stop], masked[begin:stop]))
-        begin, started = stop, False
+        begin, started, last = stop, False, -1
+
+    def skip_space(j: int) -> int:
+        # Asked with ever larger `j`: each run of whitespace is read once.
+        nonlocal spaces
+        if not spaces[0] <= j <= spaces[1]:
+            spaces = (j, _skip_space(masked, j, end))
+        return spaces[1]
 
     while i < end:
         ch = masked[i]
+        if not ch.isspace():
+            last = i
         if depth == 0 and not started:
             if ch.isspace():
                 i += 1
@@ -420,7 +507,7 @@ def chunks(
                 continue
             depth -= 1
             if depth == 0 and ch == "}":
-                j = _skip_space(masked, i + 1, end)
+                j = skip_space(i + 1)
                 if j < end and masked[j] == ";":
                     emit(j + 1)
                     i = j + 1
@@ -430,7 +517,13 @@ def chunks(
                     continue
                 emit(i + 1)
         elif depth == 0 and (
-            ch == ";" or (ch == "\n" and asi and started and _statement_ends(masked, begin, i, end, lang))
+            ch == ";"
+            or (
+                ch == "\n"
+                and asi
+                and started
+                and _statement_ends(masked, begin, last, skip_space(i + 1), end, lang)
+            )
         ):
             emit(i + 1)
         i += 1
@@ -461,21 +554,23 @@ def _line_end(masked: str, i: int, end: int) -> int:
         i = newline + 1
 
 
-def _statement_ends(masked: str, begin: int, i: int, end: int, lang: str) -> bool:
-    """Does the line break at `i` end the statement, as automatic semicolons would?"""
-    before = masked[begin:i].rstrip()
-    if not before:
+def _statement_ends(masked: str, begin: int, last: int, after: int, end: int, lang: str) -> bool:
+    """Does a line break end the statement, as automatic semicolons would?
+
+    The statement started at `begin`; `last` is its last non-space character
+    before the break (-1 if none) and `after` the first one after it (or `end`).
+    """
+    if last < begin:
         return False
-    last = before[-1]
-    complete = last.isalnum() or last in "_$)]}" or before.endswith(("++", "--"))
+    c = masked[last]
+    complete = c.isalnum() or c in "_$)]}" or (last > begin and masked[last - 1 : last + 1] in ("++", "--"))
     if lang == "go" or not complete:
         return complete
-    j = _skip_space(masked, i + 1, end)
-    if j >= end:
+    if after >= end:
         return True
-    if masked[j] in _JS_CONTINUES and not masked.startswith(("++", "--"), j):
+    if masked[after] in _JS_CONTINUES and not masked.startswith(("++", "--"), after):
         return False
-    return _word_at(masked, j) not in _AFTER_BRACE_WORDS | {"extends", "implements"}
+    return _word_at(masked, after) not in _JS_NOT_CONTINUED
 
 
 def defines(code: str, name: str, lang: str, *, masked: str | None = None) -> bool:
@@ -483,16 +578,32 @@ def defines(code: str, name: str, lang: str, *, masked: str | None = None) -> bo
     masked = mask(code, lang) if masked is None else masked
     word = re.escape(name)
     if lang in ("js", "ts"):
-        pattern = (
-            rf"(?<![\w$.])function\s*\*?\s*{word}\s*[<(]"
-            rf"|(?<![\w$.])(?:const|let|var)\s+{word}\s*(?::[^=;]*)?=(?![=>])"
-        )
-        return re.search(pattern, masked) is not None
+        return _js_defines(masked, word)
     if lang == "go":
         return re.search(rf"(?m)^[ \t]*func\s+{word}\s*[\[(]", masked) is not None
     if lang == "rs":
         return re.search(rf"(?<![\w.])fn\s+{word}\s*[<(]", masked) is not None
     return find_definition(masked, name) >= 0
+
+
+def _js_defines(masked: str, word: str) -> bool:
+    """`function word(`, or `const word = ...` (`let`, `var`, maybe with a
+    `: Type` before the "="), but not `word == ...` or `word => ...`."""
+    if re.search(rf"(?<![\w$.])function\s*(?:\*\s*)?{word}\s*[<(]", masked):
+        return True
+    stops: list[int] | None = None  # where each "=" and ";" is, once a type needs them
+    for match in re.finditer(rf"(?=(?<![\w$.])(?:const|let|var)\s+{word}\s*([:=]))", masked):
+        at = match.start(1)
+        if masked[at] == ":":  # the type runs to the first "=" or ";"
+            if stops is None:
+                stops = [stop.start() for stop in re.finditer(r"[=;]", masked)]
+            k = bisect.bisect_right(stops, at)
+            if k == len(stops) or masked[stops[k]] != "=":
+                continue
+            at = stops[k]
+        if masked[at + 1 : at + 2] not in ("=", ">"):
+            return True
+    return False
 
 
 def find_definition(masked: str, name: str) -> int:
@@ -503,17 +614,21 @@ def find_definition(masked: str, name: str) -> int:
     so calls and prototypes do not count.
     """
     for match in re.finditer(rf"(?<![\w$]){re.escape(name)}\s*\(", masked):
-        before = masked[: match.start()].rstrip()
-        if not before:
+        k = match.start()
+        while k > 0 and masked[k - 1].isspace():
+            k -= 1
+        if k == 0:
             continue
-        prev = before[-1]
+        prev = masked[k - 1]
         if prev.isalnum() or prev == "_":
-            word = re.search(r"\w+$", before)
-            if word is None or word.group(0) in _NOT_A_TYPE:
+            w = k - 1
+            while w > 0 and (masked[w - 1].isalnum() or masked[w - 1] == "_"):
+                w -= 1
+            if masked[w:k] in _NOT_A_TYPE:
                 continue
         elif prev not in ">]*&?":
             continue
         close = matching(masked, match.end() - 1)
-        if close >= 0 and re.match(r"[^;{}=]*(?:\{|=>)", masked[close + 1 : close + 400]):
+        if close >= 0 and _BODY.match(masked, close + 1, close + 400):
             return match.start()
     return -1

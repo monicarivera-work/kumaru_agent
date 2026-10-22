@@ -332,7 +332,8 @@ By default, on your machine: `--allow-code-exec` is your consent. Every program,
 
 - a fresh temporary folder, deleted afterwards, and a scrubbed environment (no API keys);
 - 120 s to compile and 15 s to run. When a step ends or times out, everything it started is killed, not just its own process;
-- on Windows, a job object per step, which caps its memory at 4 GB (`KUMARU_CODE_MEMORY_MB`) and suppresses crash dialogs;
+- on Windows, a job object per step, which caps its memory at 4 GB (`KUMARU_CODE_MEMORY_MB`) and its processes at 512, and suppresses crash dialogs;
+- compilers and runtimes found only in `PATH`'s absolute folders, never in the current folder, and run by absolute path;
 - a random marker placed after the last test. A program passes only if it exits with 0 *and* prints the marker, so code that exits early cannot pass untested.
 
 That stops accidents, not adversaries: the program runs as you, can read your files and can reach the network.

@@ -14,11 +14,15 @@ only with KUMARU_TEST_TOOLCHAINS=1 (seconds per program).
 """
 
 import dataclasses
+import functools
 import importlib.util
 import os
+import random
 import re
 import sys
+import time
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
@@ -29,6 +33,7 @@ from kumaru.core.registry import suite_members
 from kumaru.eval.benchmarks import codeexec, multipl_e, runner
 from kumaru.eval.benchmarks.base import BenchItem, Grade
 from kumaru.eval.benchmarks.codeexec import Outcome, Step, ToolchainMissing
+from kumaru.eval.benchmarks.extract import fences, open_fence
 from kumaru.eval.benchmarks.multipl_e import Toolchain, assemble, extract_answer
 
 MARK = "kumaru-finished-0123456789abcdef"
@@ -50,6 +55,21 @@ def finished(status: str, stage: str = "run", returncode: int | None = 0, stdout
         return Outcome(status, stage, returncode, stdout, stderr, 0.1)
 
     return run
+
+
+def cpu_seconds(work: Callable[[], object], limit: float) -> float:
+    """CPU seconds `work` takes; the faster of two tries if the first passes `limit`.
+
+    CPU time, not wall time: other programs busy on the machine barely change it.
+    """
+    best = float("inf")
+    for _ in range(2):
+        start = time.process_time()
+        work()
+        best = min(best, time.process_time() - start)
+        if best <= limit:
+            break
+    return best
 
 
 def installed(lang: str) -> multipl_e.MultiPLE:
@@ -263,6 +283,30 @@ def test_the_entry_point_is_the_last_function_a_prompt_opens() -> None:
         multipl_e.entry_point("package x_test\n\n// func add(x int) int\n", "go")
 
 
+# The regexes `fences` and `open_fence` replaced here: the same answers, in quadratic time.
+OLD_FENCE = re.compile(r"```[ \t]*([^\s`]*)[^\n]*\n(.*?)```", re.DOTALL)
+OLD_OPEN_FENCE = re.compile(r"```[ \t]*[^\s`]*[^\n]*\n(.*)$", re.DOTALL)
+
+
+def test_the_fence_scans_find_what_the_regexes_they_replaced_found() -> None:
+    rng = random.Random(9)
+    pieces = ["`", "```", "\n", " ", "\t", "a", "rust", "{rust}", ",ignore", "x y"]
+    for _ in range(3000):
+        text = "".join(rng.choices(pieces, k=rng.randint(0, 14)))
+        assert fences(text, multipl_e._FENCE_TAG) == OLD_FENCE.findall(text), text
+        old = OLD_OPEN_FENCE.search(text)
+        assert open_fence(text) == (old.group(1) if old else None), text
+
+
+@pytest.mark.parametrize(
+    "reply", ["`" * 100_000, "```" + "a" * 100_000, "```" * 33_333], ids=["backquotes", "open fence", "fences"]
+)
+def test_a_long_reply_without_a_closed_fence_is_read_in_linear_time(reply: str) -> None:
+    # The regexes this replaced tried a fence from every ``` and read on to the
+    # end of its line each time: 10 to 11 s each.
+    assert cpu_seconds(functools.partial(extract_answer, reply, "rs", "add"), 0.5) < 0.5
+
+
 # -- assembling one program ---------------------------------------------------------
 
 
@@ -442,6 +486,101 @@ def test_a_go_import_binds_its_last_path_element(path: str, name: str) -> None:
 )
 def test_a_rust_use_binds_its_last_names(use: str, names: set[str]) -> None:
     assert multipl_e._rust_use_names(use) == names
+
+
+# The regexes the scans in _js_from and _go_specs replaced: the same answers,
+# in quadratic time or worse.
+OLD_JS_FROM = re.compile(
+    r"import\s*(.+?)\s*from\s*(['\"][^'\"]+['\"])(?:\s*(?:with|assert)\s*\{[^}]*\})?", re.DOTALL
+)
+OLD_GO_SPEC = re.compile(r"""(?:([A-Za-z_]\w*|\.)\s+)?["`]([^"`\n]+)["`]""")
+
+
+def test_the_import_scan_reads_what_the_regex_it_replaced_read() -> None:
+    rng = random.Random(9)
+    tokens = ["import", "from", " ", "\n", "x", "{", "}", "'m'", '"m"', "'", '"', "with", "assert", ",", "*", "as"]
+    ends = ["", " from 'm'", 'from"m"', " from 'm' with { x }", " from 'm'assert{}", " from 'm' with {}}"]
+    for _ in range(3000):
+        statement = "import" + "".join(rng.choices(tokens, k=rng.randint(0, 9))) + rng.choice(ends)
+        old = OLD_JS_FROM.fullmatch(statement)
+        # The regex also read a blank clause ("import from 'm'"): nothing is imported either way.
+        expected = (old.group(1).strip(), old.group(2)) if old and old.group(1).strip() else None
+        assert multipl_e._js_from(statement) == expected, statement
+
+
+@pytest.mark.parametrize(
+    ("text", "specs"),
+    [
+        ('"fmt"', [("", "fmt")]),
+        ('m "math"\n. "strings"', [("m", "math"), (".", "strings")]),
+        ('9abc "x"', [("abc", "x")]),  # an alias starts with a letter
+        ('a.b "x"', [("b", "x")]),
+        ('x. "p"', [(".", "p")]),
+        ('"a" b "c"', [("", "a"), ("b", "c")]),
+    ],
+)
+def test_a_go_import_is_its_path_and_the_alias_before_it(text: str, specs: list[tuple[str, str]]) -> None:
+    assert multipl_e._go_specs(text) == specs
+
+
+def test_the_go_import_scan_reads_what_the_regex_it_replaced_read() -> None:
+    rng = random.Random(9)
+    tokens = ['"', "`", "a", "ab", "9", "_", ".", " ", "\n", "\t", "é", "x/y"]
+    for _ in range(3000):
+        text = "".join(rng.choices(tokens, k=rng.randint(0, 14)))
+        assert multipl_e._go_specs(text) == OLD_GO_SPEC.findall(text), text
+
+
+def test_go_looks_up_only_so_many_import_names_that_are_not_identifiers(monkeypatch: pytest.MonkeyPatch) -> None:
+    go = CANARIES["go"]
+    source = (
+        'import (\n\t"gopkg.in/yaml.v2"\n\t"x/a.b"\n)\n\n'
+        "func add(x int, y int) int {\n\t_ = yaml.v2.X\n\t_ = a.b.Y\n\treturn x + y\n}\n"
+    )
+    program = assemble("go", go.prompt, source, go.tests, MARK, "add")
+    assert '"gopkg.in/yaml.v2"' in program and '"x/a.b"' in program
+    # Each such name is a search of the whole program. Past the limit, which
+    # only a degenerate reply reaches, a name counts as unused.
+    monkeypatch.setattr(multipl_e, "_GO_MAX_ODD_NAMES", 1)
+    program = assemble("go", go.prompt, source, go.tests, MARK, "add")
+    assert '"gopkg.in/yaml.v2"' in program and '"x/a.b"' not in program
+
+
+def cs_assembled(source: str) -> str:
+    cs = CANARIES["cs"]
+    return assemble("cs", cs.prompt, source, cs.tests, MARK, "Add")
+
+
+def test_csharp_looks_into_namespaces_only_so_deep(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = (
+        "namespace A {\nnamespace B {\nnamespace C {\n"
+        "class S { public static long Add(long x, long y) { return x + y; } }\n}\n}\n}\n"
+    )
+    assert "return x + y;" in cs_assembled(source)
+    # Each level reads its whole body again; only a degenerate reply nests past the limit.
+    monkeypatch.setattr(multipl_e, "_MAX_NAMESPACES", 2)
+    assert "return x + y;" not in cs_assembled(source)
+
+
+@pytest.mark.parametrize(
+    "work",
+    [
+        # The regex this replaced backtracked over the spaces in cubic time: 5 s.
+        functools.partial(multipl_e._js_import, "import" + " " * 2000 + "x"),
+        # It tried an alias from every letter of the word, reading to its end: 11 s.
+        functools.partial(multipl_e._go_imports, "import (\n" + "a" * 30_000 + "\n)"),
+        # `=\s*[^;(]+` tried every split of the spaces between its two parts: 7 s.
+        functools.partial(
+            cs_assembled, "using a =" + " " * 30_000 + "\nclass S { static long Add(long x, long y) { return x; } }\n"
+        ),
+        # Each namespace read its body again, until Python's recursion limit
+        # ended it: 2 s, then a RecursionError.
+        functools.partial(cs_assembled, "namespace a {\n" * 1200 + "}\n" * 1200),
+    ],
+    ids=["js import", "go import", "cs using", "cs namespaces"],
+)
+def test_a_degenerate_declaration_is_assembled_in_linear_time(work: Callable[[], object]) -> None:
+    assert cpu_seconds(work, 0.5) < 0.5
 
 
 # -- the problems ---------------------------------------------------------------------
@@ -640,6 +779,36 @@ def test_a_passing_program_records_only_how_it_passed(monkeypatch: pytest.Monkey
     grade = bench.grade(canary_item("go"), CANARIES["go"].good)
     assert grade.correct
     assert grade.detail == {"status": "passed", "stage": "run", "mode": "whole"}
+
+
+# Tools that never run: these tests replace codeexec.run.
+FAKE_TOOLS = {
+    "py": {"python": "python"},
+    "js": {"node": "node"},
+    "ts": {"node": "node"},
+    "cs": {"dotnet": "dotnet"},
+    "java": {"javac": "javac", "java": "java"},
+    "cpp": {"cxx": "c++"},
+    "go": {"go": "go"},
+    "rs": {"rustc": "rustc"},
+}
+
+
+@pytest.mark.parametrize("lang", list(multipl_e.LANGUAGES))
+def test_a_degenerate_reply_is_graded_in_moments(lang: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A reply that repeats a piece until the token limit (some 30,000 to
+    # 100,000 characters) is read before anything runs, with no time limit.
+    # A probe that read again what a failed one had read made these pieces
+    # quadratic: at a fifth of this length, C# took 13 s and JavaScript 2 s.
+    monkeypatch.setattr(codeexec, "run", finished("compile_error", "compile", 1))
+    bench = multipl_e.BY_LANGUAGE[lang]()
+    bench._toolchain = Toolchain(FAKE_TOOLS[lang], "fake")
+    body = "\n".join(piece * (20_000 // len(piece)) for piece in ("@", "$", "$@", "/[", "\\/"))
+    reply = f"```{multipl_e.LANGUAGES[lang].fence}\n{body}\n```\n"
+    item = canary_item(lang)
+    grades: list[Grade] = []
+    assert cpu_seconds(lambda: grades.append(bench.grade(item, reply)), 2.0) < 2.0
+    assert grades[0].extracted == "compile_error"
 
 
 # -- the grader self-check (scripts/check_graders.py) -----------------------------------

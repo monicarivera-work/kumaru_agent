@@ -8,6 +8,7 @@ tests run real (tiny) Python programs; Docker itself is faked.
 """
 
 import io
+import os
 import re
 import subprocess
 import sys
@@ -141,6 +142,23 @@ def test_a_program_cannot_use_more_memory_than_the_cap(monkeypatch: pytest.Monke
     assert "MemoryError" in outcome.stderr
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="the process cap is a Windows job-object limit")
+def test_a_program_cannot_run_more_processes_at_once_than_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(codeexec, "MAX_PROCESSES", 3)
+    marker = codeexec.new_marker()
+    code = (
+        "import subprocess, sys\nchildren = []\ntry:\n"
+        "    for _ in range(4):\n"
+        "        children.append(subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']))\n"
+        "except OSError as exc:\n    print('refused after', len(children), exc.winerror)\n"
+        "for child in children:\n    child.kill()\n" + finish(marker)
+    )
+    outcome = codeexec.run(python(code, marker))
+    assert outcome.passed, outcome.stderr
+    # The program itself and two children; the third is ERROR_NOT_ENOUGH_QUOTA.
+    assert "refused after 2 1816" in outcome.stdout
+
+
 def test_a_compiler_that_is_not_installed_is_a_missing_toolchain() -> None:
     program = Program({}, (Step(("kumaru-no-such-compiler", "x.c"), 30, "compile"),), "marker")
     with pytest.raises(ToolchainMissing, match="Could not start"):
@@ -178,7 +196,56 @@ def test_at_most_max_workers_programs_run_at_once(monkeypatch: pytest.MonkeyPatc
         codeexec.set_max_workers(0)
 
 
+# -- finding programs -------------------------------------------------------------
+
+WINDOWS = sys.platform == "win32"
+
+
+def plant(folder: Path, name: str) -> Path:
+    """A runnable stand-in for the program `name` in `folder` (a .cmd on Windows)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / (f"{name}.cmd" if WINDOWS else name)
+    path.write_text("@echo off\n" if WINDOWS else "#!/bin/sh\n")
+    path.chmod(0o755)
+    return path
+
+
+def test_find_program_never_runs_a_decoy_from_the_current_folder(
+    scratch_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # On Windows shutil.which looks in the current folder first, so a node.cmd
+    # planted where Kumaru was started from would run as Node.js.
+    here = scratch_dir / "here"
+    plant(here, "node")
+    plant(here / "rel", "node")
+    real = plant(scratch_dir / "bin", "node")
+    monkeypatch.chdir(here)
+    relative = ["", ".", "rel", os.path.join("..", "here")]
+    if WINDOWS:
+        # Relative too: to the current folder on drive C:, and to the current drive.
+        relative += [here.drive + "rel", str(here / "rel").removeprefix(here.drive)]
+        monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    monkeypatch.setenv("PATH", os.pathsep.join(relative))
+    assert codeexec.find_program("node") is None
+
+    folder = f'"{real.parent}"' if WINDOWS else str(real.parent)  # cmd accepts a quoted entry
+    monkeypatch.setenv("PATH", os.pathsep.join([*relative, folder]))
+    found = codeexec.find_program("node")
+    assert found is not None and Path(found).is_absolute()
+    assert os.path.samefile(found, real)
+    assert codeexec.find_program("kumaru-no-such-program") is None
+    if WINDOWS:
+        assert os.path.samefile(codeexec.find_program("node.cmd") or "", real)
+
+
 # -- Docker -----------------------------------------------------------------------
+
+DOCKER = "/opt/docker/bin/docker"
+
+
+def find_docker(monkeypatch: pytest.MonkeyPatch, path: str | None = DOCKER) -> None:
+    monkeypatch.setattr(codeexec, "find_program", lambda name: path if name == "docker" else None)
+
 
 TWO_STEPS = Program(
     {"p.c": "int main() {}"},
@@ -193,7 +260,7 @@ def record(token: str, index: int, rc: int, millis: int, marks: int, out: str = 
 
 
 def test_docker_runs_each_program_without_network_privileges_or_a_writable_root() -> None:
-    argv = codeexec.docker_command("img", "kumaru-x", {"B": "2", "A": "1"}, "echo hi")
+    argv = codeexec.docker_command(DOCKER, "img", "kumaru-x", {"B": "2", "A": "1"}, "echo hi")
     joined = " ".join(argv)
     for flag in (
         "--network none",
@@ -207,6 +274,7 @@ def test_docker_runs_each_program_without_network_privileges_or_a_writable_root(
     ):
         assert flag in joined
     assert joined.index("--env A=1") < joined.index("--env B=2")
+    assert argv[:2] == [DOCKER, "run"]
     assert argv[-3:] == ["img", "-c", "echo hi"]
 
 
@@ -256,6 +324,7 @@ def fake_docker(monkeypatch: pytest.MonkeyPatch, reply) -> list[list[str]]:
         code, stdout = reply(argv, input, token.group(1) if token else "")
         return subprocess.CompletedProcess(argv, code, stdout.encode(), b"docker said no")
 
+    find_docker(monkeypatch)
     monkeypatch.setattr(codeexec.subprocess, "run", run)
     return calls
 
@@ -276,6 +345,7 @@ def test_a_docker_run_sends_the_files_as_a_tar_and_reads_the_reports(
     outcome = codeexec.run(TWO_STEPS, sandbox="docker")
     assert outcome.passed
     assert sent == {"p.c": "int main() {}"}
+    assert calls[0][0] == DOCKER
     assert "my-image" in calls[0]
 
 
@@ -301,35 +371,42 @@ def test_a_container_that_never_finishes_is_removed(monkeypatch: pytest.MonkeyPa
 
     def run(argv, **kwargs):
         calls.append(argv)
-        if argv[:2] == ["docker", "run"]:
+        if argv[:2] == [DOCKER, "run"]:
             raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
+    find_docker(monkeypatch)
     monkeypatch.setattr(codeexec.subprocess, "run", run)
     outcome = codeexec.run(TWO_STEPS, sandbox="docker")
     assert outcome.status == "timeout"
     name = calls[0][calls[0].index("--name") + 1]
-    assert calls[1] == ["docker", "rm", "-f", name]
+    assert calls[1] == [DOCKER, "rm", "-f", name]
 
 
 def test_check_docker_says_how_to_get_docker_and_the_image(monkeypatch: pytest.MonkeyPatch) -> None:
     build = "docker build -t kumaru-sandbox -f docker/sandbox/Dockerfile ."
     monkeypatch.delenv("KUMARU_SANDBOX_IMAGE", raising=False)
-    monkeypatch.setattr(codeexec.shutil, "which", lambda name: None)
+    calls: list[list[str]] = []
+    answer = {"code": 1, "out": ""}
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, answer["code"], answer["out"], "no such image")
+
+    monkeypatch.setattr(codeexec.subprocess, "run", run)
+    find_docker(monkeypatch, None)
     with pytest.raises(ToolchainMissing, match="not installed") as caught:
         codeexec.check_docker()
     assert build in str(caught.value.hint)
+    with pytest.raises(ToolchainMissing, match="not installed"):
+        codeexec.run(TWO_STEPS, sandbox="docker")
+    assert calls == []  # never a bare "docker", which Windows looks for in the current folder first
 
-    monkeypatch.setattr(codeexec.shutil, "which", lambda name: "docker")
-    answer = {"code": 1, "out": ""}
-    monkeypatch.setattr(
-        codeexec.subprocess,
-        "run",
-        lambda argv, **kwargs: subprocess.CompletedProcess(argv, answer["code"], answer["out"], "no such image"),
-    )
+    find_docker(monkeypatch)
     with pytest.raises(ToolchainMissing, match="no image 'kumaru-sandbox'") as caught:
         codeexec.check_docker()
     assert build in str(caught.value.hint)
 
     answer.update(code=0, out="sha256:abc\n")
     assert codeexec.check_docker() == "sha256:abc"
+    assert calls[-1][:3] == [DOCKER, "image", "inspect"]

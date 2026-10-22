@@ -26,7 +26,6 @@ dataset `openai/openai_humaneval`, split `test`.
 
 from __future__ import annotations
 
-import re
 import sys
 import textwrap
 from typing import Any
@@ -34,7 +33,7 @@ from typing import Any
 from kumaru.core.errors import KumaruError
 from kumaru.eval.benchmarks import codeexec
 from kumaru.eval.benchmarks.base import BenchItem, Benchmark, Grade, load_hf_rows
-from kumaru.eval.benchmarks.extract import extract_code
+from kumaru.eval.benchmarks.extract import defines_python, extract_code
 
 PROMPT = (
     "Complete the following Python function. Return the complete function, including "
@@ -68,10 +67,7 @@ DOCKER_PYTHON = "python3"
 def assemble_program(prompt: str, completion: str, test: str, entry_point: str) -> str:
     """Join the problem, the model's code and the hidden tests into one script."""
     code = extract_code(completion, entry_point)
-    defines = re.search(
-        rf"^\s*(?:async\s+)?def\s+{re.escape(entry_point)}\s*\(", code, re.MULTILINE
-    )
-    if defines:
+    if defines_python(code, entry_point):
         # The prompt still contributes imports and helper functions; its stub
         # (a docstring-only body, which is valid Python) is then overridden.
         body = prompt + "\n\n" + code

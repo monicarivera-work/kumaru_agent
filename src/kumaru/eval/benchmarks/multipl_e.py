@@ -55,7 +55,6 @@ import hashlib
 import os
 import platform
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -77,7 +76,7 @@ from kumaru.eval.benchmarks.codeparse import (
     matching,
     uncomment,
 )
-from kumaru.eval.benchmarks.extract import extract_code
+from kumaru.eval.benchmarks.extract import defines_python, extract_code, fences, open_fence
 from kumaru.eval.benchmarks.humaneval import assemble_program
 
 DATASET = "nuprl/MultiPL-E"
@@ -139,8 +138,7 @@ PROMPT = (
 
 # -- reading the answer ---------------------------------------------------------
 
-_FENCE = re.compile(r"```[ \t]*([^\s`]*)[^\n]*\n(.*?)```", re.DOTALL)
-_OPEN_FENCE = re.compile(r"```[ \t]*[^\s`]*[^\n]*\n(.*)$", re.DOTALL)
+_FENCE_TAG = re.compile(r"[ \t]*([^\s`]*)")
 # The functions MultiPL-E prompts end with; the last one is the problem's.
 _ENTRY = {
     "js": r"(?<![\w$.])function\s+([A-Za-z_$][\w$]*)\s*\(",
@@ -158,8 +156,7 @@ def _tag(tag: str) -> str:
 def defines_entry(code: str, entry: str, lang: str) -> bool:
     """Does `code` define the function the problem asks for?"""
     if lang == "py":
-        pattern = rf"^\s*(?:async\s+)?def\s+{re.escape(entry)}\s*\("
-        return re.search(pattern, code, re.MULTILINE) is not None
+        return defines_python(code, entry)
     return defines(code, entry, lang)
 
 
@@ -172,10 +169,10 @@ def extract_answer(reply: str, lang: str, entry: str) -> str:
     the code after it; a reply without fences is used whole.
     """
     reply = reply or ""
-    blocks = [(_tag(tag), body) for tag, body in _FENCE.findall(reply)]
+    blocks = [(_tag(tag), body) for tag, body in fences(reply, _FENCE_TAG)]
     if not blocks:
-        match = _OPEN_FENCE.search(reply)
-        return match.group(1) if match else reply
+        code = open_fence(reply)
+        return reply if code is None else code
     aliases = LANGUAGES[lang].aliases
     candidates = [body for tag, body in blocks if not tag or tag in aliases]
     candidates = candidates or [body for _, body in blocks]
@@ -244,6 +241,8 @@ def _before_last_brace(text: str, lang: str, insertion: str) -> str:
 
 def _is_main(chunk: Chunk, name: str) -> bool:
     """Is this piece a definition of `main`? The hidden tests bring their own."""
+    if name not in chunk.code:  # most pieces; a reply can have one per character
+        return False
     signature = chunk.code.split("{", 1)[0]
     return find_definition(signature + "{}", name) >= 0
 
@@ -259,7 +258,36 @@ _TS_KEEP = re.compile(
 )
 _JS_EXPORT = re.compile(r"export\s+(?:default\s+)?(?=[\w@])")
 _JS_IMPORT = re.compile(r"import\b(?!\s*[.(])")
+_JS_MODULE = re.compile(r"\s*(['\"][^'\"]+['\"])")
+_JS_ATTRIBUTES = re.compile(r"\s*(?:with|assert)\s*\{")
 _TS_REQUIRE = "declare var require: any;"
+
+
+def _js_from(s: str) -> tuple[str, str] | None:
+    r"""`(clause, module)` for `import <clause> from '<module>'`, import
+    attributes (`with {...}`) allowed; None for any other statement.
+
+    What fullmatching
+    `import\s*(.+?)\s*from\s*(['"][^'"]+['"])(?:\s*(?:with|assert)\s*\{[^}]*\})?`
+    finds when the clause is not blank, by a scan: on a long statement that
+    regex backtracks in quadratic time or worse. The clause ends at the first
+    "from" after its first character that the rest of the statement fits. A
+    blank clause (`import from 'm'`) imports nothing: None.
+    """
+    if not s.startswith("import"):
+        return None
+    clause_start = len(s) - len(s[6:].lstrip())
+    inner_brace = s.rfind("}", 0, len(s) - 1)  # the attributes' {...} holds no "}"
+    at = s.find("from", clause_start + 1)
+    while at >= 0:
+        module = _JS_MODULE.match(s, at + 4)
+        if module:
+            end = module.end()
+            attributes = _JS_ATTRIBUTES.match(s, end) if s.endswith("}") else None
+            if end == len(s) or (attributes is not None and attributes.end() - 1 > inner_brace):
+                return s[6:at].strip(), module.group(1)
+        at = s.find("from", at + 4)
+    return None
 
 
 def _js_import(statement: str) -> str:
@@ -273,26 +301,27 @@ def _js_import(statement: str) -> str:
     match = re.fullmatch(r"import\s*(['\"][^'\"]+['\"])", s)
     if match:
         return f"require({match.group(1)});"
-    match = re.fullmatch(
-        r"import\s*(.+?)\s*from\s*(['\"][^'\"]+['\"])(?:\s*(?:with|assert)\s*\{[^}]*\})?", s, re.DOTALL
-    )
-    if not match:
+    found = _js_from(s)
+    if found is None:
         return ""
-    clause, module = match.group(1).strip(), match.group(2)
+    clause, module = found
     out = []
-    braces = re.search(r"\{(.*)\}", clause, re.DOTALL)
-    for name in (clause[: braces.start()] if braces else clause).split(","):
+    # The named imports: from the first "{" to the last "}".
+    first, last = clause.find("{"), clause.rfind("}")
+    braces = clause[first + 1 : last] if 0 <= first < last else None
+    for name in (clause[:first] if braces is not None else clause).split(","):
         name = name.strip()
         star = re.fullmatch(r"\*\s*as\s+([A-Za-z_$][\w$]*)", name)
         if star or re.fullmatch(r"[A-Za-z_$][\w$]*", name):
             out.append(f"const {star.group(1) if star else name} = require({module});")
-    if braces:
+    if braces is not None:
         names = []
-        for spec in braces.group(1).split(","):
+        for spec in braces.split(","):
             spec = spec.strip()
             if not spec or re.match(r"type\s", spec):
                 continue
-            parts = re.split(r"\s+as\s+", spec)
+            # (?<!\s): one try per run of spaces, not one per space.
+            parts = re.split(r"(?<!\s)\s+as\s+", spec)
             names.append(parts[0] if len(parts) == 1 else f"{parts[0]}: {parts[1]}")
         if names:
             out.append(f"const {{ {', '.join(names)} }} = require({module});")
@@ -330,13 +359,43 @@ def _assemble_js(lang: str, source: str, tests: str, marker: str) -> str:
 
 # -- Go -------------------------------------------------------------------------
 
-_GO_SPEC = re.compile(r"""(?:([A-Za-z_]\w*|\.)\s+)?["`]([^"`\n]+)["`]""")
+_GO_PATH = re.compile(r"""["`]([^"`\n]+)["`]""")
+_GO_ALIAS_START = re.compile(r"[A-Za-z_]")
 _GO_TEST_FUNC = re.compile(r"func\s+(?:Test|Benchmark|Fuzz|Example)(?![a-z])\w*\s*\(")
+# Names checked one by one for use; see _assemble_go.
+_GO_MAX_ODD_NAMES = 64
+
+
+def _go_specs(text: str) -> list[tuple[str, str]]:
+    r"""(alias, path) for each quoted path in `text`, with the alias before it, if any.
+
+    What findall with (?:([A-Za-z_]\w*|\.)\s+)?["`]([^"`\n]+)["`] finds, by a
+    scan: that regex retries every letter of a long word, in quadratic time.
+    """
+    specs = []
+    pos = 0
+    while (path := _GO_PATH.search(text, pos)) is not None:
+        start = space = path.start()
+        while space > pos and text[space - 1].isspace():
+            space -= 1
+        alias = ""
+        if pos < space < start:
+            if text[space - 1] == ".":
+                alias = "."
+            else:
+                word = space
+                while word > pos and (text[word - 1].isalnum() or text[word - 1] == "_"):
+                    word -= 1
+                first = _GO_ALIAS_START.search(text, word, space)
+                alias = text[first.start() : space] if first else ""
+        specs.append((alias, path.group(1)))
+        pos = path.end()
+    return specs
 
 
 def _go_imports(text: str) -> list[tuple[str, str]]:
     """(alias, path) for each package an `import` declaration names; alias "" if none."""
-    return _GO_SPEC.findall(re.sub(r"^\s*import\b", "", uncomment(text, "go")))
+    return _go_specs(re.sub(r"^\s*import\b", "", uncomment(text, "go")))
 
 
 def _go_name(path: str) -> str:
@@ -371,11 +430,23 @@ def _assemble_go(prompt: str, source: str, tests: str, marker: str) -> str:
             kept.append(chunk.text)
     code = _join(kept)
     used = mask(code, "go") + "\n" + mask(tests, "go")
+    # The names used as `name.X`, in one pass rather than one search per import.
+    qualifiers = set(re.findall(r"(?<![\w.])(\w+)\s*\.", used))
+    # Default names that are not identifiers ("yaml.v2") are searched for one
+    # by one; past the first few (only a degenerate reply has more), they
+    # count as unused.
+    odd: dict[str, bool] = {}
     for alias, path in wanted:
         if path in imports:
             continue
         name = alias or _go_name(path)
-        if alias in ("_", ".") or re.search(rf"(?<![\w.]){re.escape(name)}\s*\.", used):
+        if re.fullmatch(r"\w+", name):
+            is_used = name in qualifiers
+        else:
+            if name not in odd and len(odd) < _GO_MAX_ODD_NAMES:
+                odd[name] = re.search(rf"(?<![\w.]){re.escape(name)}\s*\.", used) is not None
+            is_used = odd.get(name, False)
+        if alias in ("_", ".") or is_used:
             imports[path] = alias
     imports.setdefault("fmt", "")
     specs = "".join(f'\t{alias + " " if alias else ""}"{path}"\n' for path, alias in imports.items())
@@ -479,8 +550,10 @@ _CS_TYPE = re.compile(
     r"(class|struct|interface|enum|record(?:\s+class|\s+struct)?|delegate)\s+(\w+)"
 )
 _CS_USING = re.compile(
-    r"(?:global\s+)?using\s+(?!var\b)(?:static\s+)?[\w.]+\s*(?:=\s*[^;(]+)?;|extern\s+alias\b"
+    r"(?:global\s+)?using\s+(?!var\b)(?:static\s+)?[\w.]+\s*(?:=[^;(]+)?;|extern\s+alias\b"
 )
+# How deep _collect looks into nested C# namespaces.
+_MAX_NAMESPACES = 32
 # A loose C# piece that is a member (a method, a field), not a top-level statement.
 _CS_MEMBER = re.compile(
     r"(?:\[[^\]]*\]\s*)*(?:public|private|protected|internal|static|const|readonly)\b"
@@ -579,9 +652,19 @@ def _is_import(head: str, lang: str) -> bool:
 
 
 def _collect(
-    source: str, masked: str, lang: str, pieces: _Pieces, start: int = 0, end: int | None = None
+    source: str,
+    masked: str,
+    lang: str,
+    pieces: _Pieces,
+    start: int = 0,
+    end: int | None = None,
+    depth: int = 0,
 ) -> None:
-    """Sort a Java or C# answer's top-level pieces into imports, types and loose members."""
+    """Sort a Java or C# answer's top-level pieces into imports, types and loose members.
+
+    C# namespaces are looked into, down to `_MAX_NAMESPACES` deep: each level
+    reads its whole body again, and only a degenerate reply nests further.
+    """
     type_pattern = _JAVA_TYPE if lang == "java" else _CS_TYPE
     for chunk in chunks(source, lang, masked=masked, start=start, end=end):
         head = chunk.head
@@ -592,11 +675,11 @@ def _collect(
             continue
         namespace = re.match(r"namespace\s+[\w.]+\s*([{;])", head) if lang == "cs" else None
         if namespace:
-            if namespace.group(1) == "{":  # its body holds more pieces
+            if namespace.group(1) == "{" and depth < _MAX_NAMESPACES:  # its body holds more pieces
                 begin = chunk.start + _lead(chunk) + namespace.end() - 1
                 close = matching(masked, begin)
                 if close > begin:
-                    _collect(source, masked, lang, pieces, begin + 1, close)
+                    _collect(source, masked, lang, pieces, begin + 1, close, depth + 1)
             continue
         match = type_pattern.match(head)
         if match:
@@ -799,7 +882,7 @@ def _detect_py() -> Toolchain:
 
 
 def _node(minimum: tuple[int, ...], what: str) -> tuple[str, str]:
-    node = shutil.which("node")
+    node = codeexec.find_program("node")
     if not node:
         raise ToolchainMissing(
             f"{what} needs Node.js, which is not on PATH.",
@@ -821,7 +904,7 @@ def _detect_js() -> Toolchain:
 
 def _find_tsc() -> str | None:
     """The tsc.js behind a `tsc` on PATH (npm installs a shim that runs it)."""
-    shim = shutil.which("tsc")
+    shim = codeexec.find_program("tsc")
     if not shim:
         return None
     base = Path(shim).resolve().parent
@@ -848,7 +931,7 @@ def _detect_ts() -> Toolchain:
 
 def _detect_cs() -> Toolchain:
     hint = "Install the .NET 10 SDK: https://dotnet.microsoft.com/download"
-    dotnet = shutil.which("dotnet")
+    dotnet = codeexec.find_program("dotnet")
     if not dotnet:
         raise ToolchainMissing("C# needs the .NET SDK, which is not on PATH.", hint=hint)
     # Asked outside any folder whose global.json might pin an older SDK.
@@ -889,14 +972,15 @@ def _javatuples() -> str:
 def _detect_java() -> Toolchain:
     hint = "Install a JDK, 17 or later (for example Eclipse Temurin: https://adoptium.net)."
     exe = ".exe" if _WINDOWS else ""
-    javac = shutil.which("javac")
+    javac = codeexec.find_program("javac")
     home = os.environ.get("JAVA_HOME", "").strip()
-    if not javac and home and (Path(home) / "bin" / f"javac{exe}").is_file():
+    # Only an absolute JAVA_HOME: a relative one would name a folder under the current one.
+    if not javac and home and Path(home).is_absolute() and (Path(home) / "bin" / f"javac{exe}").is_file():
         javac = str(Path(home) / "bin" / f"javac{exe}")
     if not javac:
         raise ToolchainMissing("Java needs a JDK, and javac is neither on PATH nor in JAVA_HOME.", hint=hint)
     sibling = Path(javac).resolve().with_name(f"java{exe}")
-    java = str(sibling) if sibling.is_file() else shutil.which("java")
+    java = str(sibling) if sibling.is_file() else codeexec.find_program("java")
     if not java:
         raise ToolchainMissing(f"Found {javac}, but no java to run what it compiles.", hint=hint)
     found = re.search(r"javac\s+\S+", _probe([javac, "-version"]))
@@ -905,7 +989,7 @@ def _detect_java() -> Toolchain:
 
 
 def _detect_cpp() -> Toolchain:
-    cxx = shutil.which("g++") or shutil.which("clang++")
+    cxx = codeexec.find_program("g++") or codeexec.find_program("clang++")
     if not cxx:
         raise ToolchainMissing(
             "C++ needs g++ or clang++, and neither is on PATH.",
@@ -923,7 +1007,7 @@ def _detect_cpp() -> Toolchain:
 
 
 def _detect_go() -> Toolchain:
-    go = shutil.which("go")
+    go = codeexec.find_program("go")
     if not go:
         raise ToolchainMissing("Go needs the go command, which is not on PATH.", hint="Install Go: https://go.dev/dl/")
     version = _probe([go, "version"], env={**os.environ, **_GO_ENV}).strip()
@@ -931,7 +1015,7 @@ def _detect_go() -> Toolchain:
 
 
 def _detect_rs() -> Toolchain:
-    rustc = shutil.which("rustc")
+    rustc = codeexec.find_program("rustc")
     if not rustc:
         raise ToolchainMissing("Rust needs rustc, which is not on PATH.", hint="Install Rust: https://rustup.rs")
     version = _probe([rustc, "--version"]).strip()

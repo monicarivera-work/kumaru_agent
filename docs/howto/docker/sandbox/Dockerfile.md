@@ -10,14 +10,14 @@
 
 ## What it does
 
-A multi-stage build:
+A multi-stage build. Each base image is pinned by digest (its tag's multi-arch index on 2026-10-21), as is the `docker/dockerfile:1.7` syntax frontend:
 
-| Stage | Base image | What it contributes |
+| Stage | Base image (`ARG`) | What it contributes |
 |---|---|---|
-| `go` | `golang:1.25-bookworm` | `/usr/local/go` |
-| `rust` | `rust:1.90-slim-bookworm` | the toolchain itself (`rustc --print sysroot`), copied to `/opt/rust`, without rustup's proxies, which want a writable home |
-| `node` | `node:24-bookworm-slim` | `node`, and TypeScript 5.9.3 installed under `/opt/kumaru/typescript` |
-| final | `mcr.microsoft.com/dotnet/sdk:10.0-noble` (Ubuntu 24.04) | the .NET 10 SDK, plus `python3`, `g++` and `openjdk-21-jdk-headless` from Ubuntu; the stages above copied in |
+| `go` | `golang:1.25-bookworm@sha256:3b4a1151…` (`GO_IMAGE`) | `/usr/local/go` |
+| `rust` | `rust:1.90-slim-bookworm@sha256:64232e65…` (`RUST_IMAGE`) | the toolchain itself (`rustc --print sysroot`), copied to `/opt/rust`, without rustup's proxies, which want a writable home |
+| `node` | `node:24-bookworm-slim@sha256:55fb5f5a…` (`NODE_IMAGE`) | `node`, and TypeScript 5.9.3 (`TYPESCRIPT_VERSION`) installed under `/opt/kumaru/typescript` |
+| final | `mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:747cbade…` (`DOTNET_IMAGE`, Ubuntu 24.04) | the .NET 10 SDK, plus `python3`, `g++` and `openjdk-21-jdk-headless` from Ubuntu (not pinned: whatever the archive has at build time); the stages above copied in |
 
 Then it:
 
@@ -69,7 +69,7 @@ kumaru bench run humaneval multipl_e -c qwen36 --no-think --allow-code-exec --sa
 
 `KUMARU_SANDBOX_IMAGE` selects another image (a tag or an ID). The image's ID is part of the results fingerprint, so a rebuilt image starts a new run instead of resuming an old one.
 
-The version arguments can be changed at build time, for example `--build-arg GO_VERSION=1.24`. Different versions can grade differently ([`multipl_e.md`](../../src/kumaru/eval/benchmarks/multipl_e.md), differences from MultiPL-E).
+Each base image can be replaced at build time, with its tag and digest together so the pin stays a pin, for example `--build-arg GO_IMAGE=golang:1.24-bookworm@sha256:<digest>`; `docker buildx imagetools inspect golang:1.24-bookworm` prints the digest. `--build-arg TYPESCRIPT_VERSION=…` changes TypeScript. Different versions can grade differently ([`multipl_e.md`](../../src/kumaru/eval/benchmarks/multipl_e.md), differences from MultiPL-E).
 
 ## How to extend it
 
@@ -83,6 +83,7 @@ The version arguments can be changed at build time, for example `--build-arg GO_
 |---|---|---|
 | `Docker has no image 'kumaru-sandbox', or the Docker daemon is not running` | Not built yet, or Docker Desktop isn't running. | Start Docker, then build it (above). |
 | The build fails at `ADD --checksum` | Maven Central served a different file, or an old Docker without BuildKit. | Check the download; use a current Docker (BuildKit is the default). |
+| The build fails at `FROM` with `not found` for a `sha256:` digest | The registry no longer serves that pinned digest. | Move the pin: the same tag with its current digest (`docker buildx imagetools inspect <tag>`), passed as `--build-arg` or edited in the file. |
 | The build fails at the final version checks | A stage changed its layout (e.g. a new base image). | Read which tool failed and fix its `COPY` or `PATH`. |
 | `Sandbox setup step 'cp -R /opt/gocache /tmp/gocache' failed` | The image lacks the warm Go cache. | Rebuild from this file. |
 | Every C# answer fails or times out in the sandbox | `dotnet build` tries to reach the network or a writable folder that isn't there (untested). | Check `HOME` and `DOTNET_CLI_HOME` (both `/tmp/home`) and the `#:property` lines in `multipl_e.py`, then run `check_graders.py multipl_e_cs --sandbox docker`. |

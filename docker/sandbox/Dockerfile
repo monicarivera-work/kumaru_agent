@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 #
 # Kumaru's code sandbox: the image `kumaru bench run --sandbox docker` grades
 # HumanEval and MultiPL-E in.
@@ -30,23 +30,30 @@
 # /opt/kumaru/typescript/node_modules/typescript/lib/tsc.js; the javatuples
 # jar at /opt/kumaru/javatuples-1.2.jar; a warm Go build cache at /opt/gocache.
 
-ARG GO_VERSION=1.25
-ARG RUST_VERSION=1.90
-ARG NODE_VERSION=24
+# The base images, pinned by digest: each tag's multi-arch index as its
+# registry listed it on 2026-10-21, so a rebuild gets the same toolchains
+# until a pin is moved. Move the tag and the digest together (`docker buildx
+# imagetools inspect node:24-bookworm-slim` prints the digest), or override
+# one at build time: --build-arg NODE_IMAGE=node:24-bookworm-slim@sha256:...
+# The Ubuntu packages below (python3, g++, OpenJDK) are not pinned.
+ARG GO_IMAGE=golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437
+ARG RUST_IMAGE=rust:1.90-slim-bookworm@sha256:64232e656c058f4468e8d024e990acff04f0fd5a5c0a88a574dc37773d7325c9
+ARG NODE_IMAGE=node:24-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
+ARG DOTNET_IMAGE=mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:747cbade5bfd918a175ac32f8f1d931edec2c7d0d5397a3de72eaef1ac1f66d2
 ARG TYPESCRIPT_VERSION=5.9.3
 
-FROM golang:${GO_VERSION}-bookworm AS go
+FROM ${GO_IMAGE} AS go
 
 # The toolchain itself, not rustup's proxies, which want a writable home.
-FROM rust:${RUST_VERSION}-slim-bookworm AS rust
+FROM ${RUST_IMAGE} AS rust
 RUN cp -r "$(rustc --print sysroot)" /opt/rust
 
-FROM node:${NODE_VERSION}-bookworm-slim AS node
+FROM ${NODE_IMAGE} AS node
 ARG TYPESCRIPT_VERSION
 RUN npm install --prefix /opt/kumaru/typescript --no-audit --no-fund "typescript@${TYPESCRIPT_VERSION}"
 
 # .NET 10 builds MultiPL-E's C# (Ubuntu 24.04, which also has OpenJDK 21).
-FROM mcr.microsoft.com/dotnet/sdk:10.0-noble
+FROM ${DOTNET_IMAGE}
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 g++ openjdk-21-jdk-headless \

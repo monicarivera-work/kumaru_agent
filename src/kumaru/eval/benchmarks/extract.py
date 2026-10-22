@@ -21,8 +21,8 @@ NUMBER = re.compile(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|-?\.\d+")
 # "Answer:", "**Answer:**", "Final answer:" — the format the prompts ask for.
 _ANSWER_TAG = re.compile(r"answer[\s*_]*[:：]", re.IGNORECASE)
 _ANSWER_IS = re.compile(r"answer\s+is\b", re.IGNORECASE)
-_FENCE = re.compile(r"```[ \t]*([\w+-]*)[^\n]*\n(.*?)```", re.DOTALL)
-_OPEN_FENCE = re.compile(r"```[ \t]*[\w+-]*[^\n]*\n(.*)$", re.DOTALL)
+# A code fence's language tag: the start of its opening line.
+_FENCE_TAG = re.compile(r"[ \t]*([\w+-]*)")
 
 
 def _normalize_math(text: str) -> str:
@@ -149,6 +149,43 @@ def extract_choice(text: str, letters: str = "ABCDEFGHIJ") -> tuple[str | None, 
     return None, "none"
 
 
+def fences(text: str, tag: re.Pattern[str] = _FENCE_TAG) -> list[tuple[str, str]]:
+    """`(tag, body)` for each closed code fence in `text`, in order.
+
+    A fence opens with ``` and the rest of that line, whose start `tag`
+    reads (its group 1), and closes at the next ```. This is a scan, not a
+    regex: a regex retries from every ``` when no fence closes, which takes
+    quadratic time on a long reply.
+    """
+    blocks: list[tuple[str, str]] = []
+    pos = 0
+    while True:
+        start = text.find("```", pos)
+        line_end = text.find("\n", start + 3) if start >= 0 else -1
+        close = text.find("```", line_end + 1) if line_end >= 0 else -1
+        if close < 0:  # then no later fence closes either
+            return blocks
+        found = tag.match(text, start + 3, line_end)
+        blocks.append((found.group(1) if found else "", text[line_end + 1 : close]))
+        pos = close + 3
+
+
+def open_fence(text: str) -> str | None:
+    """What follows the first fence's opening line, for a reply cut off before
+    the fence closes; None without one."""
+    start = text.find("```")
+    line_end = text.find("\n", start + 3) if start >= 0 else -1
+    return text[line_end + 1 :] if line_end >= 0 else None
+
+
+def defines_python(code: str, name: str) -> bool:
+    """Does `code` define a function `name` (`def` or `async def`, at any indent)?"""
+    # [^\S\n] rather than \s: a \s* that crosses newlines makes the search
+    # quadratic on a reply of blank lines, and finds nothing more.
+    pattern = rf"^[^\S\n]*(?:async\s+)?def\s+{re.escape(name)}\s*\("
+    return re.search(pattern, code, re.MULTILINE) is not None
+
+
 def extract_code(text: str, entry_point: str | None = None) -> str:
     """The Python code in a reply.
 
@@ -157,16 +194,15 @@ def extract_code(text: str, entry_point: str | None = None) -> str:
     yields the code after it; unfenced replies are returned whole.
     """
     text = text or ""
-    blocks = [(lang.lower(), body) for lang, body in _FENCE.findall(text)]
+    blocks = [(lang.lower(), body) for lang, body in fences(text)]
     if not blocks:
-        match = _OPEN_FENCE.search(text)
-        return match.group(1) if match else text
+        code = open_fence(text)
+        return text if code is None else code
 
     python = [body for lang, body in blocks if lang in ("", "python", "py", "python3")]
     candidates = python or [body for _, body in blocks]
     if entry_point:
-        pattern = re.compile(rf"^\s*(?:async\s+)?def\s+{re.escape(entry_point)}\s*\(", re.MULTILINE)
-        defining = [body for body in candidates if pattern.search(body)]
+        defining = [body for body in candidates if defines_python(body, entry_point)]
         if defining:
             return max(defining, key=len)
     return max(candidates, key=len)

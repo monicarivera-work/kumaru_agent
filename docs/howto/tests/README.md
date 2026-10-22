@@ -1,6 +1,6 @@
 # `tests/`
 
-> The offline regression suite. 675 tests, no GPU, no downloads, under a minute.
+> The offline regression suite. 727 tests, no GPU, no downloads, under a minute.
 
 **Read this when:** you have changed something and want to know whether you broke it, or you are adding a feature and need to know where its test belongs.
 
@@ -51,12 +51,12 @@ $env:KUMARU_TEST_TOOLCHAINS = '1'; .\.venv\Scripts\python.exe -m pytest tests\te
 | `test_server.py` | API shape changing; SSE framing breaking; auth being bypassable; error responses losing their shape |
 | `test_cli.py` | Flag handling, one-shot chat, `config` and the `bench` commands breaking; every command runs in-process on the echo backend |
 | `test_llamacpp_server.py` | llama-server model resolution, command line, request payload and failure handling regressing; no process is started and nothing is downloaded |
-| `test_bench_codeexec.py` | A model-written program passing without printing the marker after its last test, outliving its time limit, leaving processes or its temporary folder behind, or seeing environment variables it wasn't given; the Windows memory cap or the worker limit not holding; a missing compiler being scored instead of reported; the Docker path losing `--network none`, its read-only root or a limit (Docker itself is faked) |
-| `test_bench_codeparse.py` | Braces in strings or comments read as code, or an answer cut in the wrong place (a JavaScript or Go statement at a line break, the `{}` of Go's `interface{}`, an `import { … } from` list), which turns a right answer into a compile error |
-| `test_bench_extract.py` | Answer extraction misreading a reply, which silently corrupts every benchmark score |
+| `test_bench_codeexec.py` | A model-written program passing without printing the marker after its last test, outliving its time limit, leaving processes or its temporary folder behind, starting more than 512 processes, or seeing environment variables it wasn't given; the Windows memory cap or the worker limit not holding; a missing compiler being scored instead of reported; a toolchain or Docker found in the current folder or a relative `PATH` entry; the Docker path losing `--network none`, its read-only root or a limit (Docker itself is faked) |
+| `test_bench_codeparse.py` | Braces in strings or comments read as code, or an answer cut in the wrong place (a JavaScript or Go statement at a line break, the `{}` of Go's `interface{}`, an `import { … } from` list), which turns a right answer into a compile error; a long, repetitive reply (`@@@@…`, `/[/[…`, deep `${` holes) taking quadratic time or a `RecursionError` |
+| `test_bench_extract.py` | Answer extraction misreading a reply, which silently corrupts every benchmark score; a long reply of backquotes, fences or blank lines taking quadratic time |
 | `test_bench_graders.py` | Question sampling or a grader deciding right vs wrong incorrectly, including a shipped golden format row accepting a reply its prompt rules out |
 | `test_bench_ifeval.py` | IFEval's instruction checks, strict/loose readings or its four metrics drifting |
-| `test_bench_multipl_e.py` | The wrong code block taken from a chat answer; a whole answer or a bare function body not becoming one program whose hidden tests run last, in any of the eight languages (stray imports, a second `main`, the model's own tests, a C++ `NDEBUG`); the languages asking different problems; a toolchain that fails its canary being used; the grader self-check excusing a difference from MultiPL-E it doesn't document |
+| `test_bench_multipl_e.py` | The wrong code block taken from a chat answer; a whole answer or a bare function body not becoming one program whose hidden tests run last, in any of the eight languages (stray imports, a second `main`, the model's own tests, a C++ `NDEBUG`); the languages asking different problems; a toolchain that fails its canary being used; the grader self-check excusing a difference from MultiPL-E it doesn't document; a long, repetitive reply taking more than moments to grade in any language |
 | `test_bench_runner.py` | The files a run leaves behind, exact resume, refusing to mix settings (another compiler version counts), surviving bad requests and graders, a language without its toolchain skipped and listed instead of scored, and the paired comparison of two runs |
 | `test_bench_stats.py` | Wilson intervals, McNemar's test, the paired bootstrap or Holm's correction drifting from hand-checked values |
 | `test_train_data.py` | **Loss masking regressing** — the highest-consequence silent bug in the project; collator padding labels with a real token id; corpus packing changing the `tokens.bin` format, holding the whole corpus in RAM, or leaving a partial file behind |

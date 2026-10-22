@@ -31,6 +31,10 @@
   2. **Decides how to read it** (`solution_source`): if the code defines the function itself, it is used as written (`mode: whole`). Otherwise it is taken as a function body that continues the prompt, as MultiPL-E's base-model completions are (`mode: continuation`): the prompt goes first, and any braces still open are closed.
   3. **Assembles one program** (`assemble`): the language's assembler keeps the answer's imports and helpers, drops what would clash with the hidden tests, and adds the tests (table below).
   4. **Compiles and runs it** through `codeexec.run`, with 120 s to compile and 15 s to run. It passes only if every step exits with 0 and the program prints a random marker placed after its last test.
+- **Grading takes time linear in the reply's length.** Steps 1 to 3 run before step 4's time limits, and a reply that degenerates into repetition can reach 30,000 to 100,000 characters within the 8,192-token budget. Reading and assembling 100,000 characters of repetition takes at most 0.7 s of CPU in any language, and twice the length takes twice the time. The slowest piece found is a run of stray `)` or `]` in Java, since each stray closer is a piece of its own; C# comes next, at 0.5 s. Before, a fifth of that length took C# 13 s and JavaScript and TypeScript 2 s, and a reply of 20,000 `@` took C# 148 s. Three limits that only a degenerate reply reaches keep it linear:
+  - C# namespaces are looked into down to 32 deep (`_MAX_NAMESPACES`). A namespace nested deeper is dropped, with what it holds.
+  - Go checks the use of at most 64 import names that aren't identifiers, such as `gopkg.in/yaml.v2`'s `yaml.v2` (`_GO_MAX_ODD_NAMES`). Further ones count as unused.
+  - Interpolation holes nest at most 32 deep ([`codeparse.md`](codeparse.md#time-linear-in-the-texts-length)).
 
 ### How each language's program is assembled
 
@@ -181,14 +185,14 @@ kumaru bench compare runs\bench\<baseline> runs\bench\<run>
 
 ### Install the toolchains
 
-Kumaru finds tools on `PATH` and never installs them itself. Install the ones for the languages you want; the others are skipped.
+Kumaru finds tools in `PATH`'s absolute folders (`codeexec.find_program`), never in the current folder or a relative `PATH` entry, and runs them by absolute path. It never installs them itself. Install the ones for the languages you want; the others are skipped.
 
 | Language | What to install | Notes |
 |---|---|---|
 | JavaScript | [Node.js](https://nodejs.org) 18+ | |
 | TypeScript | Node.js 22.7+; for type checking, also `npm install -g typescript` | Without `tsc`, types are stripped and not checked, so an answer with a type error can still pass. The fingerprint records which (`checker`), and runs with and without `tsc` don't mix. |
 | C# | [.NET 10 SDK](https://dotnet.microsoft.com/download) | Builds single-file apps (`dotnet build program.cs`). Each answer takes a few seconds to build. |
-| Java | a JDK, 17+ (e.g. [Eclipse Temurin](https://adoptium.net)), and the javatuples jar the tests import | Kumaru checks the jar's SHA-256 but never downloads it. Get it once: `curl.exe -L --create-dirs -o "$HOME\.cache\kumaru\javatuples-1.2.jar" https://repo1.maven.org/maven2/org/javatuples/javatuples/1.2/javatuples-1.2.jar`, or point `KUMARU_JAVATUPLES_JAR` at a copy. `javac` is found on `PATH` or in `JAVA_HOME`. |
+| Java | a JDK, 17+ (e.g. [Eclipse Temurin](https://adoptium.net)), and the javatuples jar the tests import | Kumaru checks the jar's SHA-256 but never downloads it. Get it once: `curl.exe -L --create-dirs -o "$HOME\.cache\kumaru\javatuples-1.2.jar" https://repo1.maven.org/maven2/org/javatuples/javatuples/1.2/javatuples-1.2.jar`, or point `KUMARU_JAVATUPLES_JAR` at a copy. `javac` is found on `PATH` or in `JAVA_HOME` (an absolute one). |
 | C++ | GCC: on Windows [WinLibs](https://winlibs.com) or MSYS2's MinGW-w64; on Linux `build-essential` | The tests include `<bits/stdc++.h>`, which only GCC's standard library has. On Windows, programs are linked statically with Linux's 8 MB stack. |
 | Go | [Go](https://go.dev/dl/) | Runs offline (`GOPROXY=off`, `GOTOOLCHAIN=local`). The first programs are slower while Go compiles the standard library into its cache. |
 | Rust | [rustup](https://rustup.rs) (`rustc`) | Windows builds get Linux's 8 MB stack too. |
@@ -228,13 +232,13 @@ If a new language lacks a problem the others have, `load` fails with `Expected 1
 
 **MBPP.** MultiPL-E also translates MBPP (`mbpp-<lang>` configs). A second suite could reuse the assemblers and toolchains.
 
-Pinned behaviour: `tests\test_bench_multipl_e.py`: answer reading, entry points, each assembler, the problem set, the suite, the sandbox, and the agreement sampling. Ten tests compile and run real programs; they need `KUMARU_TEST_TOOLCHAINS=1` and skip a language whose toolchain is missing.
+Pinned behaviour: `tests\test_bench_multipl_e.py`: answer reading, entry points, each assembler, the problem set, the suite, the sandbox, the agreement sampling, and the time a long, repetitive reply takes to grade (`test_a_degenerate_reply_is_graded_in_moments`). Ten tests compile and run real programs; they need `KUMARU_TEST_TOOLCHAINS=1` and skip a language whose toolchain is missing.
 
 ## Failure modes
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `skipped multipl_e_<lang>: … needs …, which is not on PATH.` | That language's toolchain isn't installed, or isn't on `PATH` for the shell that runs Kumaru. | Install it (table above), or ignore it: the other languages still run. |
+| `skipped multipl_e_<lang>: … needs …, which is not on PATH.` | That language's toolchain isn't installed, or isn't on `PATH` for the shell that runs Kumaru, or only through a relative `PATH` entry or the current folder, which Kumaru doesn't search. | Install it (table above), or ignore it: the other languages still run. |
 | `MultiPL-E's Java tests use org.javatuples, and javatuples-1.2.jar is not at …` | The jar isn't downloaded. | Run the `curl` command in the hint, or set `KUMARU_JAVATUPLES_JAR`. |
 | `… is not Maven Central's javatuples-1.2.jar: its SHA-256 is …` | A different or damaged file. | Download it again. |
 | `The <language> toolchain (…) failed Kumaru's self-test: a right answer failed` | The toolchain is broken or too unlike what the assembler expects: a compiler without GCC's `<bits/stdc++.h>`, an SDK older than .NET 10, a damaged install. The error shows the canary's output. | Check that the toolchain works by itself; or leave the language out. |
@@ -245,6 +249,7 @@ Pinned behaviour: `tests\test_bench_multipl_e.py`: answer reading, entry points,
 | `Expected 152 <language> problems, found N.` | The dataset changed, or a cached copy is incomplete. | Kumaru pins the revisions; clear the cached dataset (`%USERPROFILE%\.cache\huggingface\hub\datasets--nuprl--MultiPL-E`) and retry. |
 | `Could not find the function a <language> prompt asks for.` | A prompt in an unexpected shape. | A dataset problem; report the item. |
 | `timeout` at the `compile` stage | A shared CPU: compilers are slowed by a model running on the CPU, a game, or too many programs at once. | Lower `KUMARU_CODE_WORKERS` ([`codeexec.md`](codeexec.md)). |
+| Grading one answer takes seconds or more, the CPU busy in Kumaru rather than in a compiler | Reading or assembling went quadratic on a long, repetitive reply. | Profile `grade` on the item's `output` (`python -m cProfile`). Fix the scan ([`codeparse.md`](codeparse.md)) or regex, and add the reply to `test_a_degenerate_reply_is_graded_in_moments`. |
 | `The results folder was made with other settings` when resuming | A compiler was updated, TypeScript gained or lost `tsc`, or the sandbox changed: each is part of the fingerprint. | Start a new run (`--out` elsewhere). |
 
 ## Related files

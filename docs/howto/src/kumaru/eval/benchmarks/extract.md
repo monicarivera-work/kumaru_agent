@@ -61,10 +61,18 @@ A model can be right and still be scored wrong because the grader misread `1{,}0
 
 **`extract_code(text, entry_point=None)`**:
 
-1. Collects fenced blocks (```` ```lang ... ``` ````).
+1. Collects the closed fenced blocks (```` ```lang ... ``` ````) with `fences`. A fence opens with ``` and the rest of its line, whose start is the tag, and closes at the next ```.
 2. Keeps the Python ones (language tag `""`, `python`, `py`, `python3`). If there are none, it keeps all blocks.
-3. Prefers blocks that `def` / `async def` the entry point, and picks the longest of those. Otherwise it picks the longest candidate.
-4. With no closed fence, it returns the code after an opening fence (the output was cut off). Otherwise it returns the whole text.
+3. Prefers blocks that `def` / `async def` the entry point (`defines_python`), and picks the longest of those. Otherwise it picks the longest candidate.
+4. With no closed fence, it returns what follows the first fence's opening line (`open_fence`; the output was cut off). With no fence at all, it returns the whole text.
+
+These take time linear in the reply's length, which can be tens of thousands of characters when a model repeats itself:
+
+- `fences` and `open_fence` are scans. The regexes they replaced retried from every ``` when no fence closed: 100,000 backquotes took 10.5 s.
+- `defines_python` matches at most one line's indent, `^[^\S\n]*`. The `^\s*` it replaced crossed blank lines, so 20,000 blank lines in a fence took 8 s. Both find a definition in the same code.
+- On 3,000 random replies, `fences` and `open_fence` find what the regexes found (`test_the_fence_scans_find_what_the_regexes_they_replaced_found`).
+
+`multipl_e.extract_answer` reads its fences with the same two scans, passing its own tag pattern.
 
 There is no `method` for code. HumanEval and MultiPL-E record the test outcome (`passed`, `failed`, `timeout`, and for MultiPL-E `compile_error`) in `detail["status"]` instead, and the report prints those counts on a `tests:` line rather than `answers found by:`.
 
@@ -79,6 +87,9 @@ There is no `method` for code. HumanEval and MultiPL-E record the test outcome (
 | `numbers_equal` | `numbers_equal(a, b, rel_tol: float = 0.0) -> bool` | Numeric equality, exact by default; `False` if either side is unparseable. |
 | `extract_choice` | `extract_choice(text: str, letters: str = "ABCDEFGHIJ") -> tuple[str \| None, str]` | `(letter, method)`. |
 | `extract_code` | `extract_code(text: str, entry_point: str \| None = None) -> str` | The program text to execute. |
+| `fences` | `fences(text: str, tag: re.Pattern[str] = _FENCE_TAG) -> list[tuple[str, str]]` | `(tag, body)` for each closed fence, in order. `tag` is matched at the start of the opening line, and its group 1 is the tag. |
+| `open_fence` | `open_fence(text: str) -> str \| None` | What follows the first fence's opening line, or `None` without one. |
+| `defines_python` | `defines_python(code: str, name: str) -> bool` | Whether a line of `code` starts, after any indent, with `def name(` or `async def name(`. |
 
 ## How to use it
 
@@ -139,6 +150,7 @@ Get-Content runs\bench\<run>\gsm8k\items.jsonl | ForEach-Object { $_ | ConvertFr
   - Give the new rule its own method name so it shows up in the report.
 - **Changing an existing extractor changes old scores.** Re-grading isn't automatic. Records store the verdict, and resuming reuses verdicts whose question key matches; the run fingerprint covers settings, not code, so a resume won't notice the change. Re-run into a new directory and say so in [`docs\BENCHMARKS.md`](../../../../../BENCHMARKS.md).
 - **Pin the change in `tests\test_bench_extract.py`.** It has a class per extractor: `TestExtractFinalNumber`, `TestLastBoxed`, `TestNumbers`, `TestExtractChoice` and `TestExtractCode`. Add both the case you fixed and a case that must not change.
+- **Keep it linear.** A regex whose parts can match the same characters (a tag pattern followed by `[^\n]*`, or `^\s*` across lines), or one retried from every occurrence of a delimiter that never closes, takes quadratic time on a long reply. `requires-python` is 3.10, which has no possessive quantifiers or atomic groups, so anchor to a line or scan by hand. Add a long case to `test_a_long_reply_is_read_in_linear_time`.
 
 ## Failure modes
 
@@ -154,7 +166,8 @@ Get-Content runs\bench\<run>\gsm8k\items.jsonl | ForEach-Object { $_ | ConvertFr
 ## Related files
 
 - `src\kumaru\eval\benchmarks\gsm8k.py`, `mmlu_pro.py`, `humaneval.py`, `golden.py` — the callers ([`gsm8k.md`](gsm8k.md), [`mmlu_pro.md`](mmlu_pro.md), [`humaneval.md`](humaneval.md), [`golden.md`](golden.md)).
+- `src\kumaru\eval\benchmarks\multipl_e.py` — `extract_answer` reads fences with `fences` and `open_fence` ([`multipl_e.md`](multipl_e.md)).
 - `src\kumaru\eval\benchmarks\runner.py` — `summarize` builds the `extraction` counts ([`runner.md`](runner.md)).
-- `tests\test_bench_extract.py` — pins every rule above, e.g. `test_answer_tag_only_looks_three_lines_ahead`, `test_latex_thousands_separators_are_normalized`, `test_answer_is_outranks_a_later_answer_tag`, `test_letters_outside_the_option_range_are_ignored` and `test_numbers_equal_is_exact_near_large_values_unless_asked`.
+- `tests\test_bench_extract.py` — pins every rule above, e.g. `test_answer_tag_only_looks_three_lines_ahead`, `test_latex_thousands_separators_are_normalized`, `test_answer_is_outranks_a_later_answer_tag`, `test_letters_outside_the_option_range_are_ignored`, `test_numbers_equal_is_exact_near_large_values_unless_asked` and `test_a_long_reply_is_read_in_linear_time`.
 - `scripts\check_graders.py` — runs these extractors over every gold answer of the full datasets, and caught the near-miss bug above ([`check_graders.py.md`](../../../../scripts/check_graders.py.md)).
 - [`docs\BENCHMARKS.md`](../../../../../BENCHMARKS.md) — results, and the grader-validation section ("Are the graders right?") that compares these verdicts with the official scripts.

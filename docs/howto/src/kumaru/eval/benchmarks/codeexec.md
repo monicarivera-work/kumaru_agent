@@ -56,9 +56,10 @@ Program{files, steps, marker}
 | Windows, if a job can't be created | As above, but without a job. | `taskkill /F /T` on the process tree. |
 | Linux, macOS | The process leads a new session (`start_new_session`), so it and its children share a process group. | `killpg(SIGKILL)` on the group. A child that starts its own session escapes it; Docker doesn't have that gap. |
 
-The job object also carries two limits:
+The job object also carries three limits:
 
 - **Memory:** the job may commit at most `KUMARU_CODE_MEMORY_MB` (default 4096) across all its processes. Past that, allocations fail, so a runaway program crashes (a failure) instead of paging the machine to a standstill. `0` turns the cap off. The cap covers compile steps too, so don't set it far below the default.
+- **Processes:** at most `MAX_PROCESSES` (512, as Docker's `--pids-limit`) may run at once. Past that, starting another fails with `ERROR_NOT_ENOUGH_QUOTA` (1816), so a fork bomb stops there instead of filling the machine.
 - **No crash dialogs** (`DIE_ON_UNHANDLED_EXCEPTION`): a crashing program exits at once instead of opening Windows Error Reporting, which would hold it until the timeout.
 
 ### What protects you, and what doesn't
@@ -68,7 +69,7 @@ The job object also carries two limits:
 | Opt-in `--allow-code-exec` | yes | yes |
 | Time limit per step, everything started killed | yes (job object or process group) | yes (`timeout -k 2` per step, the container removed at the end) |
 | Memory cap | Windows: 4 GB per step (`KUMARU_CODE_MEMORY_MB`); Linux and macOS: none | 2 GB per container, no swap |
-| CPU and process limits | none (the runner's `-j` and `max_workers` bound how many programs run) | 2 CPUs, 512 processes |
+| CPU and process limits | Windows: 512 processes at once per step; no CPU limit (the runner's `-j` and `max_workers` bound how many programs run) | 2 CPUs, 512 processes |
 | Environment variables withheld (API keys, tokens) | yes | yes: the container gets only the variables the language needs |
 | Your files | readable and writable with your rights; relative paths land in the temp folder | invisible: the container sees only its image and its own files; the root is read-only, and only `/work` and `/tmp` (in memory) are writable |
 | Network | open | none (`--network none`) |
@@ -85,15 +86,25 @@ The job object also carries two limits:
 | `Status`, `Stage` | `Literal["passed", "failed", "timeout", "compile_error"]`, `Literal["setup", "compile", "run"]` | |
 | `ToolchainMissing` | `KumaruError` subclass, `http_status = 400` | A compiler, runtime or Docker image isn't available. The runner turns it into a skipped language inside a suite ([`runner.md`](runner.md)). Its `why` property gives the message and then the hint as two sentences, for lists of what did not run; `str(exc)` would wrap the hint in parentheses, and hints such as Java's contain their own. |
 | `new_marker` | `new_marker() -> str` | `kumaru-finished-` plus 16 random hex digits. |
+| `find_program` | `find_program(name: str) -> str \| None` | The absolute path of `name` in a `PATH` folder, or `None`. Every toolchain and `docker` is found with it (see [Finding programs](#finding-programs)). |
 | `max_workers`, `set_max_workers` | `max_workers() -> int`, `set_max_workers(n: int) -> None` | Programs at once: `KUMARU_CODE_WORKERS`, else half the CPU cores, between 1 and 4. `set_max_workers` resizes the pool; call it before grading starts. |
 | `child_env` | `child_env(program: Program, workdir: Path) -> dict[str, str]` | The environment a local step sees. |
 | `memory_limit_mb` | `memory_limit_mb() -> int` | `KUMARU_CODE_MEMORY_MB`, else 4096. |
 | `docker_image` | `docker_image() -> str` | `KUMARU_SANDBOX_IMAGE`, else `kumaru-sandbox`. |
-| `check_docker` | `check_docker(image: str \| None = None) -> str` | The image's ID. Raises `ToolchainMissing`, with a hint that gives the `docker build` command, when Docker isn't installed, isn't running or lacks the image. |
-| `docker_command` | `docker_command(image: str, name: str, env: dict[str, str], script: str) -> list[str]` | The `docker run` argv (limits listed in [Run it in Docker](#run-it-in-docker)). |
+| `check_docker` | `check_docker(image: str \| None = None) -> str` | The image's ID. Raises `ToolchainMissing`, with a hint that gives the `docker build` command, when Docker isn't installed (not in a `PATH` folder), isn't running or lacks the image. |
+| `docker_command` | `docker_command(docker: str, image: str, name: str, env: dict[str, str], script: str) -> list[str]` | The `docker run` argv, starting with `docker`, the docker program's absolute path from `find_program` (limits listed in [Run it in Docker](#run-it-in-docker)). |
 | `docker_script` | `docker_script(program: Program, token: str) -> str` | The `/bin/sh` script a container runs. |
 | `parse_docker_output` | `parse_docker_output(stdout: str, token: str, program: Program) -> Outcome` | The script's records back into an `Outcome`. A step that exits with 124 or 137 after at least 95% of its limit timed out. |
-| Constants | `SANDBOXES = ("none", "docker")`, `TAIL_BYTES = 65536`, `DEFAULT_MEMORY_MB = 4096`, `DEFAULT_IMAGE = "kumaru-sandbox"`, `DOCKERFILE = "docker/sandbox/Dockerfile"`, `EARLY_EXIT_NOTE`, `ENV_BASE` | `ENV_BASE` is `PATH`, `PATHEXT`, `SYSTEMROOT`, `SYSTEMDRIVE`, `WINDIR`, `COMSPEC`, `HOME`, `USERPROFILE`, `LANG`, `LC_ALL`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE` and `OS`. |
+| Constants | `SANDBOXES = ("none", "docker")`, `TAIL_BYTES = 65536`, `DEFAULT_MEMORY_MB = 4096`, `MAX_PROCESSES = 512`, `DEFAULT_IMAGE = "kumaru-sandbox"`, `DOCKERFILE = "docker/sandbox/Dockerfile"`, `EARLY_EXIT_NOTE`, `ENV_BASE` | `ENV_BASE` is `PATH`, `PATHEXT`, `SYSTEMROOT`, `SYSTEMDRIVE`, `WINDIR`, `COMSPEC`, `HOME`, `USERPROFILE`, `LANG`, `LC_ALL`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE` and `OS`. |
+
+### Finding programs
+
+`find_program(name)` is `shutil.which` without the current folder. On Windows, `which` looks in the current folder before `PATH` (unless `NoDefaultCurrentDirectoryInExePath` is set), so a `node.cmd` left in the folder Kumaru was started from would run, with your whole environment, as soon as Kumaru asked Node.js for its version. `find_program`:
+
+- walks only the absolute folders in `PATH`, in order. It skips empty and relative entries (`.`, `bin`), which also mean the current folder; on Windows it also skips `\bin` and `C:bin`, which depend on the current drive or on drive C:'s current folder. Quotes around an entry are removed on Windows, as `cmd` does;
+- on Windows, tries `name` plus each `PATHEXT` extension (default `.COM;.EXE;.BAT;.CMD`), or `name` alone if it already ends with one; never an extensionless file, which Windows can't run;
+- on Linux and macOS, wants a file you may execute;
+- returns that absolute path. The toolchains and Docker run by it, never by a bare name.
 
 ## How to use it
 
@@ -132,7 +143,7 @@ docker build -t kumaru-sandbox -f docker/sandbox/Dockerfile .
 kumaru bench run humaneval multipl_e -c qwen36 --allow-code-exec --sandbox docker
 ```
 
-Each program then runs as:
+Each program then runs as (`docker` being the absolute path `find_program` found):
 
 ```
 docker run --rm -i --pull never --name kumaru-<random> --network none --read-only
@@ -155,7 +166,7 @@ The script unpacks the files from stdin, runs each step as `timeout -k 2 <limit>
 - **Another isolation** (a VM, a remote runner) would be a third value in `SANDBOXES` and a `_run_<name>` that returns the same `Outcome`s. Keep the pass rule (exit 0 and the marker) and the per-stage statuses.
 - **A setup step** (`stage="setup"`) prepares the folder, e.g. the Go cache copy in Docker. Its failure raises instead of failing the answer, because the answer never ran.
 
-Pinned behaviour: `tests\test_bench_codeexec.py` (the pass rule, stages, a timeout that kills a grandchild process, secrets withheld, the folder removed, the output tail, the memory cap, the worker limit, and the Docker command, script, record parsing and failure handling, with Docker faked).
+Pinned behaviour: `tests\test_bench_codeexec.py` (the pass rule, stages, a timeout that kills a grandchild process, secrets withheld, the folder removed, the output tail, the memory and process caps, the worker limit, `find_program` passing over decoys in the current folder and in relative `PATH` entries, and the Docker command, script, record parsing and failure handling, with Docker faked).
 
 ## Failure modes
 
@@ -164,6 +175,8 @@ Pinned behaviour: `tests\test_bench_codeexec.py` (the pass rule, stages, a timeo
 | `timeout` on code that looks right | An endless loop, a slow solution, or a shared CPU: a model or a game next to the graders, or more programs at once than the cores can take. | Read the answer. If it is slow rather than stuck, lower `KUMARU_CODE_WORKERS` (or `-j`). A `timeout` at the `compile` stage (limit 120 s) means heavy contention. |
 | `failed` with `exited with code 0 before the tests finished (an early exit?)` | The program exited with 0 before its last test, so the marker never printed. | Expected: the tests didn't run. Read the answer. |
 | `failed` with an out-of-memory error (`MemoryError`, `std::bad_alloc`, `OutOfMemoryError`, `memory allocation of N bytes failed`) | The program hit the memory cap: usually a runaway loop that keeps allocating. | Expected for such loops. If a compile step hits it, raise `KUMARU_CODE_MEMORY_MB`. |
+| `failed` with `[WinError 1816]` or `Not enough quota` | The program had 512 processes running at once (`MAX_PROCESSES`): a fork bomb. | Expected. |
+| A toolchain is "not on PATH", but `where node` finds it | `where` and `shutil.which` also search the current folder and relative `PATH` entries; Kumaru doesn't. | Put the toolchain's folder in `PATH` as an absolute path. |
 | `Could not start <path>: [WinError 2] ...` | A step's executable doesn't exist (removed, or a wrong path in a toolchain). | Reinstall the toolchain, or check `PATH`. |
 | `Sandbox setup step 'cp -R /opt/gocache /tmp/gocache' failed ...` | The image lacks what a setup step copies. | Rebuild the image from `docker/sandbox/Dockerfile`. |
 | `--sandbox docker needs Docker, which is not installed.` / `Docker has no image 'kumaru-sandbox', or the Docker daemon is not running` | No Docker, Docker stopped, or the image isn't built. | Follow the hint: start Docker, then `docker build -t kumaru-sandbox -f docker/sandbox/Dockerfile .` |
