@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from kumaru.agent.untrusted import neutralize_control_tokens
 from kumaru.agent.workspace import (
     EditFileTool,
     ListFilesTool,
@@ -519,6 +520,66 @@ def test_edit_file_refusals(ws: Workspace, root: Path) -> None:
     for path, old, new, message in cases:
         with pytest.raises(ToolError, match=message):
             ws.plan_edit(path, old, new)
+
+
+# Tool results show chat control tokens escaped (kumaru.agent.untrusted), and the
+# model copies old_text from what it read.
+RESTORED = (
+    "(old_text matched once its escaped chat control tokens, as tool results show them, "
+    "were read as the real characters; new_text is written the same way)"
+)
+TEMPLATE = 'PROMPT = "<|im_start|>{role}\\n{content}<|im_end|>\\n"\n'
+PAGE = "<p><s>$10</s> $8</p>\n<p>Write &lt;s&gt; to strike text through.</p>\n"
+
+
+async def test_edit_file_takes_old_text_copied_with_escaped_control_tokens(ws: Workspace, root: Path) -> None:
+    (root / "data.py").write_bytes(TEMPLATE.encode())
+    line = TEMPLATE.rstrip("\n")
+    shown = neutralize_control_tokens(line)
+    assert shown == 'PROMPT = "&lt;|im_start|&gt;{role}\\n{content}&lt;|im_end|&gt;\\n"'
+    action = ws.plan_edit("data.py", shown, shown.replace("{content}", "{content}{stop}"))
+    # The note and the diff show what will be written: the real characters.
+    assert action.summary.splitlines() == [
+        "Edit data.py", RESTORED, "--- a/data.py", "+++ b/data.py", "@@ -1 +1 @@",
+        "-" + line, "+" + line.replace("{content}", "{content}{stop}"),
+    ]  # fmt: skip
+    await action.apply()
+    assert (root / "data.py").read_bytes() == TEMPLATE.replace("{content}", "{content}{stop}").encode()
+
+
+async def test_text_that_matches_as_it_is_is_never_read_another_way(ws: Workspace, root: Path) -> None:
+    (root / "page.html").write_bytes(PAGE.encode())
+    # The page writes "&lt;s&gt;" itself, so it stays exactly as sent, entities and all.
+    action = ws.plan_edit("page.html", "Write &lt;s&gt; to", "Write &lt;s&gt; or &lt;del&gt; to")
+    assert RESTORED not in action.summary
+    await action.apply()
+    assert (root / "page.html").read_bytes() == PAGE.replace("&lt;s&gt; to", "&lt;s&gt; or &lt;del&gt; to").encode()
+    # A real tag, copied as read_file shows it, or typed with its real characters.
+    await ws.plan_edit("page.html", "&lt;s&gt;$10&lt;/s&gt;", "&lt;s&gt;$12&lt;/s&gt;").apply()
+    assert (root / "page.html").read_bytes().startswith(b"<p><s>$12</s> $8</p>\n")
+    action = ws.plan_edit("page.html", "<s>$12</s>", "<s>$11</s>")
+    assert RESTORED not in action.summary
+
+
+def test_edit_file_refusals_with_control_tokens(ws: Workspace, root: Path) -> None:
+    (root / "data.py").write_bytes((TEMPLATE * 2 + "END = '<|im_end|>'\n").encode())
+    hint = (
+        r"Chat control tokens, which read_file shows escaped \(such as &lt;s&gt;\), "
+        r"may be copied as shown or with their real characters\.$"
+    )
+    cases = [
+        ("&lt;|im_end|&gt; nowhere", "x", r"^old_text was not found in 'data\.py'\. Read the file again.* " + hint),
+        ("<|im_end|> nowhere", "x", r"^old_text was not found in 'data\.py'\. Read the file again.* " + hint),
+        ("&lt;s&gt; nowhere", "<s> nowhere", r"^old_text was not found in 'data\.py'"),
+        ("{content}&lt;|im_end|&gt;", "x", r"^old_text occurs 2 times in 'data\.py'"),
+        ("'&lt;|im_end|&gt;'", "'<|im_end|>'", r"^old_text and new_text are the same once their escaped chat"),
+    ]
+    for old, new, message in cases:
+        with pytest.raises(ToolError, match=message):
+            ws.plan_edit("data.py", old, new)
+    with pytest.raises(ToolError) as plain:
+        ws.plan_edit("data.py", "nowhere", "x")
+    assert "control tokens" not in str(plain.value)
 
 
 # -- changing: the file must still be as it was shown ----------------------------------

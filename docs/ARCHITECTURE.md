@@ -288,6 +288,7 @@ Having both is the point: one file to learn from, one file to work with.
 - **No approver, no such tools.** Only the terminal can ask. The server, the web UI, `eval` and `bench` build `ChatAgent` without an approver, so it withholds every tool that changes something or uses the project folder.
 - **One folder.** Every path must be provably inside the folder. `..`, absolute paths, other drives and UNC paths, links and junctions, alternate data streams, device names and `.git` are refused.
 - **No shell.** A command is an argv list for a program named in `agent.workspace.allowed_commands`, and shells and launchers are refused when the config loads. It runs with a reduced environment, so API keys stay out. At its time limit, everything it started is stopped: a Job Object on Windows (as in Decision 13), a process group elsewhere.
+- **Results are data.** Before the model reads a result, its chat control tokens are escaped (`agent/untrusted.py`): llama-server would otherwise read `<|im_end|>` and `<|im_start|>system` in a file as a real turn. Only what the model reads changes, never the files.
 
 **What it is not.** The folder confines the file tools, not the programs. An approved `python` or `npm` command runs with your permissions and can do anything they can. File contents and command output are untrusted text, so read each request before you answer `y`. For code you do not trust, use a container or a VM.
 

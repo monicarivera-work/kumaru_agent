@@ -34,7 +34,7 @@ Precedence bugs in configuration are miserable to debug during serving and train
 Precedence, from lowest to highest (later wins). Verified with `load_config` and `kumaru config`.
 
 1. **Field defaults** in this file. Always valid, so Kumaru runs with zero setup.
-2. **YAML** — a file path, or a bare profile name resolved to `configs\<name>.yaml`. This is the reproducible, commit-to-git layer.
+2. **YAML** — a bare profile name, always resolved to `configs\<name>.yaml`, or a file path: a value with a folder in it or a `.yaml`/`.yml` suffix (`config_file`). A bare name never reads a file in the current folder, which may be a cloned project you run `kumaru chat --workspace` in. This is the reproducible, commit-to-git layer.
 3. **Environment** — `KUMARU_<SECTION>__<FIELD>[__<SUBFIELD>...]`. The deployment layer.
 4. **Explicit overrides** — a nested dict, normally built from CLI flags. The "just this once" layer.
 
@@ -89,7 +89,8 @@ With `generation.thinking: null` (the model's default) the preset is **not** app
 | `KumaruConfig.dump_yaml` | `dump_yaml(self) -> str` | The fully resolved config as YAML (`sort_keys=False`), for bug reports and run records. It does not redact anything: `backend.api_key` and `server.api_key` appear in plain text. |
 | `deep_merge` | `deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]` | New dict; nested dicts merge, everything else (lists included) is replaced. |
 | `env_overrides` | `env_overrides(environ: dict[str, str] \| None = None) -> dict[str, Any]` | `KUMARU_*` variables as a nested dict (`os.environ` when `environ` is `None`). |
-| `load_config` | `load_config(path: str \| Path \| None = None, *, overrides: dict[str, Any] \| None = None, use_env: bool = True) -> KumaruConfig` | Build and validate the final config; raises `ConfigError`. |
+| `load_config` | `load_config(path: str \| Path \| None = None, *, overrides: dict[str, Any] \| None = None, use_env: bool = True) -> KumaruConfig` | Build and validate the final config; raises `ConfigError`. `path` is read through `config_file`. |
+| `config_file` | `config_file(path: str \| Path) -> Path` | The file `load_config` reads for `path`. A bare name, with no folder and no `.yaml`/`.yml` suffix, is always `CONFIG_DIR / "<name>.yaml"`, even when the current folder holds a file of that name: such a file, in a cloned project, could otherwise point `base_url` at another server or set the `llama_server.binary` that starts before anything asks you. Anything else is a path: `./qwen36`, `my.yaml`, `C:\cfg\x.yaml`. |
 | `list_profiles` | `list_profiles() -> list[str]` | Sorted stems of `configs\*.yaml`: `cpu-only`, `default`, `local-gpu`, `low-vram`, `qwen25-7b-gguf`, `qwen36`, `test`, `vllm`. |
 
 ### Field notes that are not obvious from the types
@@ -126,7 +127,7 @@ The flag mapping is in `docs\howto\src\kumaru\backends\llamacpp_server.md`.
 
 - `kumaru chat --workspace DIR` sets `workspace.root` and adds the five project-folder tools to `enabled_tools`. Only `kumaru chat` can ask before a change, so every other interface withholds the tools that change things and the project-folder tools (`agent\tools.md`).
 - `max_tool_iterations` counts the rounds of tool calls one message may run before the agent stops and asks to continue (`agent\chat.md`, "The tool loop").
-- `allowed_commands` takes bare names, normalized by `program_name()`. A path, a space, or a shell or launcher (`cmd`, `powershell`, `pwsh`, `bash`, `sh`, `wsl`, `env`, `start`, …) fails validation at load, because one approved argv could then run anything. What an allowed program may still do is in `agent\commands.md`.
+- `allowed_commands` takes bare names, normalized by `program_name()`. A path, a space, or a shell or launcher (`cmd`, `powershell`, `pwsh`, `bash`, `sh`, `wsl`, `env`, `start`, and programs that run a command given to them, such as `xargs`, `nohup`, `timeout`, `su`, `schtasks`, `wmic` or `wt`) fails validation at load, because one approved argv could then run anything. That list (`_SHELLS`) is best-effort: no list knows every program that starts others, so approval, not the list, decides what runs. What an allowed program may still do is in `agent\commands.md`.
 
 **Reserved fields, declared but not read by v0.2 code**
 
@@ -232,6 +233,7 @@ A new generation knob belongs on `GenerationParams`; see `docs\howto\src\kumaru\
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `Config file not found: <name>` with `hint: Available profiles: ...` | No such path, and no `configs\<name>.yaml`. | Use a listed profile or a real path; `kumaru info` lists profiles too. |
+| `Config file not found: my-profile`, though the current folder holds `my-profile` | A bare name is always a profile in `configs\`, never a file in the current folder (`config_file`). | Write a path: `-c .\my-profile`, or name the file `my-profile.yaml`. |
 | `hint: Available profiles: (none)` | `CONFIG_DIR` is `REPO_ROOT\configs`, which exists only in a source checkout or editable install. | Pass a file path, or install with `pip install -e .`. |
 | An API key shows up in a pasted `kumaru config` dump | `dump_yaml` serialises every field verbatim, including `backend.api_key` and `server.api_key`. (Bench run records are different: the runner redacts credential-like keys before saving the config.) | Redact `api_key:` lines before sharing a dump. |
 | `must contain a YAML mapping at the top level` | The YAML's top level is a list or scalar. | Make it a mapping (`backend: ...`). An empty file is fine. |

@@ -41,7 +41,7 @@ model asks for a tool call
 - **Who approves.** Only `kumaru chat` passes an approver (`_approve` in `src\kumaru\cli.py`), which shows the summary and asks `Allow this? [y/N]`. The HTTP server, the web UI, `kumaru eval` and `kumaru bench` pass none, so they offer only read-only tools such as `current_time`.
 - **The summary is the contract.** `prepare()` must describe what `apply` will really do: the diff, or the exact program and folder. It must not repeat the model's own description. The user approves the summary, so a tool whose summary hides an effect breaks the safety property.
 - **Errors are text.** Timeouts, `ToolError`s and unexpected exceptions all come back as `ERROR: ...` strings the model reads and can correct, rather than exceptions that end the conversation.
-- **The caps are safety, not polish.** The loop is driven by a sampler. `agent.max_tool_iterations` bounds the rounds per message (default 10), each tool has a `timeout_s`, and each result is cut to `agent.workspace.max_output_chars`.
+- **The caps are safety, not polish.** The loop is driven by a sampler. `agent.max_tool_iterations` bounds the rounds per message (default 10), at most 16 calls of one reply run (the rest get `NOT RUN`), each tool has a `timeout_s`, and each result is cut to `agent.workspace.max_output_chars`.
 
 ## Public API
 

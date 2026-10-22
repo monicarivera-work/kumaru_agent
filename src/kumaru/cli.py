@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -168,12 +168,14 @@ def _visible(text: str) -> str:
 
     What the model sends is untrusted: an escape sequence or a right-to-left
     override in a file's content could hide or disguise lines of the approval
-    prompt itself. Tabs and line breaks stay as they are.
+    prompt itself. Tabs and ``\\n`` stay as they are; every other line break
+    (``\\r``, ``\\x85``, U+2028, U+2029, ...) is spelled out, so the only lines
+    the prompt shows are the ones the summary was built with.
     """
     import unicodedata
 
     return "".join(
-        ch if ch in "\t\n" or unicodedata.category(ch) not in ("Cc", "Cf")
+        ch if ch in "\t\n" or unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp")
         else f"\\x{ord(ch):02x}" if ord(ch) < 0x100 else f"\\u{ord(ch):04x}"
         for ch in text
     )
@@ -242,10 +244,13 @@ async def _approve(request: Any) -> bool:
             style = "red"
         elif line.startswith("@@"):
             style = "cyan"
+        elif line.startswith("$ "):
+            style = "bold"  # so a long command that wraps cannot pass for the lines below it
         body.append(line + "\n", style=style)
     body.rstrip()
     console.print(Panel(body, title=f"[bold]{escape(request.tool)}[/]", title_align="left",
                         border_style="yellow"))
+    _discard_type_ahead()
     try:
         # Blocking on purpose: nothing else may run while you decide.
         answer = console.input(escape("Allow this? [y/N] "))
@@ -253,6 +258,34 @@ async def _approve(request: Any) -> bool:
         console.print()
         return False
     return answer.strip().lower() in ("y", "yes")
+
+
+def _discard_type_ahead() -> None:
+    """Drop the keys typed before the approval prompt appeared.
+
+    While the model streams you may answer its prose ("Shall I go ahead?"), and
+    that "y" and Enter, read by the prompt, would approve a change before you
+    had seen it. Only an interactive terminal is flushed: piped answers, as in
+    tests and scripts, are meant for the prompts, in order.
+    """
+    stdin = sys.stdin
+    try:
+        if stdin is None or not stdin.isatty():
+            return
+    except (AttributeError, OSError, ValueError):  # replaced or closed
+        return
+    if sys.platform == "win32":
+        import msvcrt
+
+        for _ in range(65_536):  # bounded, in case a console keeps reporting a key
+            if not msvcrt.kbhit():
+                break
+            msvcrt.getwch()
+    else:
+        import termios
+
+        with suppress(termios.error, OSError, ValueError):
+            termios.tcflush(stdin.fileno(), termios.TCIFLUSH)
 
 
 async def _chat_loop(cfg: Any, single_prompt: str | None, overrides: dict[str, Any]) -> None:

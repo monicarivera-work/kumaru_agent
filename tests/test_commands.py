@@ -135,6 +135,12 @@ def test_numbers_in_a_command_become_arguments() -> None:
         ("bash", "is a shell or launcher"),
         ("env", "is a shell or launcher"),
         ("wsl", "is a shell or launcher"),
+        ("xargs", "is a shell or launcher"),
+        ("nohup", "is a shell or launcher"),
+        ("timeout", "is a shell or launcher"),
+        ("schtasks", "is a shell or launcher"),
+        ("WMIC.exe", "is a shell or launcher"),
+        ("wt", "is a shell or launcher"),
     ],
 )
 def test_the_allowed_list_takes_bare_names_and_never_a_shell(name: str, message: str) -> None:
@@ -168,6 +174,8 @@ async def test_prepare_refuses_before_anything_is_shown(root: Path, python_on_pa
         ({"command": ["python", "-V"], "timeout_s": 0.5}, "timeout_s must be a number of seconds, at least 1."),
         ({"command": ["python", "-V"], "timeout_s": True}, "timeout_s must be a number of seconds, at least 1."),
         ({"command": ["python", "-V"], "timeout_s": "soon"}, "timeout_s must be a number of seconds, at least 1."),
+        ({"command": ["python", "-V"], "timeout_s": float("nan")}, "timeout_s must be a number of seconds, at least 1."),
+        ({"command": ["python", "-V"], "timeout_s": float("inf")}, "timeout_s must be a number of seconds, at least 1."),
         ({"command": ["cmd", "/c", "del", "*"]}, f"'cmd' is not an allowed program. {allowed}"),
         ({"command": ["powershell", "-c", "x"]}, f"'powershell' is not an allowed program. {allowed}"),
         ({"command": ["git", "push"]}, f"'git' is not an allowed program. {allowed}"),
@@ -231,11 +239,14 @@ async def test_a_program_in_the_folder_must_be_executable(root: Path) -> None:
         await make_tool(root).prepare(command=["tools/node"])
 
 
-@pytest.mark.parametrize("value", [None, 5, "5", 2.7, 10**6])
+@pytest.mark.parametrize(
+    ("value", "limit"),
+    [(None, 300), (5, 5), ("5", 5), (2.7, 2), (10**6, 300), (10**400, 300)],
+    ids=["default", "int", "str", "float", "over-the-limit", "too-big-for-a-float"],
+)
 async def test_the_model_can_shorten_the_time_limit_but_not_lengthen_it(
-    root: Path, python_on_path: None, value: object
+    root: Path, python_on_path: None, value: object, limit: int
 ) -> None:
-    limit = {None: 300, 5: 5, "5": 5, 2.7: 2, 10**6: 300}[value]
     action = await make_tool(root).prepare(command=["python", "-V"], timeout_s=value)
     assert action.summary.splitlines()[-1] == f"stops after {limit}s, with every program it starts"
 
@@ -256,6 +267,29 @@ async def test_the_approval_prompt_shows_the_command_the_folder_and_the_program(
         f"program: {program}",
         "stops after 20s, with every program it starts",
     ]
+
+
+async def test_line_breaks_in_arguments_cannot_add_lines_to_the_approval_prompt(
+    root: Path, python_on_path: None
+) -> None:
+    # Imitates the fixed lines below the command, then pushes them off screen.
+    fake = "x\nprogram: C:\\Python312\\python.exe\r\nfolder: .\u2028\u2029" + "\n" * 3000
+    action = await make_tool(root).prepare(command=["python", "-c", fake])
+    lines = action.summary.splitlines()
+    assert len(lines) == 5
+    assert "x\\nprogram: C:\\Python312\\python.exe\\r\\nfolder: .\\u2028\\u2029\\n\\n" in lines[0]
+    assert lines[0] == "$ " + display_command(["python", "-c", fake])
+    assert lines[1] == "note:    \\n, \\r, \\u2028, \\u2029 in the command are line breaks inside arguments"
+    assert [line.split(" ")[0] for line in lines[2:]] == ["folder:", "program:", "stops"]
+    single = await make_tool(root).prepare(command=["python", "-c", "import os\nprint(os.getcwd())"])
+    assert single.summary.splitlines()[1] == "note:    \\n in the command is a line break inside an argument"
+
+
+def test_every_line_break_python_knows_is_escaped_when_a_command_is_shown() -> None:
+    breaks = [chr(i) for i in range(0x3000) if len(f"a{chr(i)}b".splitlines()) == 2]
+    assert sorted(commands._LINE_BREAKS) == breaks
+    for char in breaks:
+        assert len(display_command(["python", "-c", f"a {char} b"]).splitlines()) == 1
 
 
 # -- running ---------------------------------------------------------------------------
@@ -317,10 +351,22 @@ async def test_a_batch_file_runs_but_cmd_never_sees_command_characters(
     with pytest.raises(ToolError, match=f"^{re.escape(refused)}$"):
         await tool.prepare(command=["npm", "a&calc"])
     action = await tool.prepare(command=["npm", "test"])
-    assert action.summary.splitlines()[2] == f"program: {bin_dir / 'npm.cmd'}"
+    assert action.summary.splitlines()[2] == f"program: {bin_dir / 'npm.cmd'}  (batch script, runs in cmd.exe)"
     lines = (await action.apply()).splitlines()
     assert re.fullmatch(r"Command finished with exit code 0 in \d+\.\ds\.", lines[0])
     assert lines[1:] == ["$ npm test", "(in: .)", "fake npm test"]
+
+
+@windows_only
+async def test_a_batch_file_in_the_folder_is_labelled_as_one(root: Path) -> None:
+    # Its name passes the allowed list ("python"), but cmd.exe runs it, not Python.
+    (root / "tools").mkdir()
+    (root / "tools" / "python.cmd").write_bytes(b"@echo off\r\necho not python\r\n")
+    tool = make_tool(root)
+    action = await tool.prepare(command=["tools/python.cmd", "-V"])
+    assert action.summary.splitlines()[2] == (
+        f"program: {tool.workspace.root / 'tools' / 'python.cmd'}  (batch script, runs in cmd.exe)"
+    )
 
 
 @pytest.mark.parametrize("arg", ["a&calc", "a|b", "%PATH%", "!x!", "a^b", "<in", ">out", "(x)", '"q"', "a\nb", "a\rb"])

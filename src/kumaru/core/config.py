@@ -156,12 +156,16 @@ class ThinkingModeConfig(_Base):
 
 
 # Programs that would turn one approved argv into arbitrary commands: shells,
-# script hosts and launchers. `run_command` exists to avoid shell strings.
+# script hosts and launchers. `run_command` exists to avoid shell strings. This
+# list is best-effort: an allowed program can still run others (`python -c`,
+# npm scripts), so approval, not this list, is what decides what runs.
 _SHELLS = frozenset({
-    "bash", "busybox", "cmd", "command", "conhost", "csh", "cscript", "dash", "elvish",
-    "env", "explorer", "fish", "ksh", "mshta", "nu", "powershell", "powershell_ise",
-    "pwsh", "regsvr32", "rundll32", "runas", "sh", "start", "sudo", "tcsh", "wscript",
-    "wsl", "xonsh", "zsh",
+    "at", "bash", "busybox", "chroot", "cmd", "command", "conhost", "crontab", "csh",
+    "cscript", "dash", "doas", "elvish", "env", "explorer", "fish", "forfiles", "ionice",
+    "ksh", "mshta", "nice", "nohup", "nu", "pkexec", "powershell", "powershell_ise",
+    "pwsh", "regsvr32", "rundll32", "runas", "runuser", "schtasks", "setsid", "sh",
+    "start", "stdbuf", "su", "sudo", "taskset", "tcsh", "timeout", "wmic", "wscript",
+    "wsl", "wt", "xargs", "xonsh", "zsh",
 })  # fmt: skip
 _PROGRAM_NAME = re.compile(r"[a-z0-9][a-z0-9._+-]*")
 _PROGRAM_SUFFIXES = (".exe", ".com", ".cmd", ".bat")
@@ -357,8 +361,10 @@ def load_config(
     Parameters
     ----------
     path:
-        YAML file, or a bare profile name resolved against ``configs/``
-        (``load_config("local-gpu")`` -> ``configs/local-gpu.yaml``).
+        A bare profile name, always resolved against ``configs/``
+        (``load_config("local-gpu")`` -> ``configs/local-gpu.yaml``), or a YAML
+        file: a path with a folder in it or a ``.yaml``/``.yml`` suffix. See
+        `config_file`.
     overrides:
         Highest-precedence nested dict, normally built from CLI flags.
     use_env:
@@ -367,13 +373,12 @@ def load_config(
     data: dict[str, Any] = {}
 
     if path is not None:
-        resolved = Path(path)
-        if not resolved.exists() and resolved.suffix == "":
-            resolved = CONFIG_DIR / f"{path}.yaml"
-        if not resolved.exists():
+        resolved = config_file(path)
+        if not resolved.is_file():
             raise ConfigError(
                 f"Config file not found: {path}",
-                hint=f"Available profiles: {', '.join(list_profiles()) or '(none)'}",
+                hint=f"Available profiles: {', '.join(list_profiles()) or '(none)'}. A file "
+                "outside configs/ needs a folder or a .yaml suffix, e.g. ./my-profile.yaml",
             )
         loaded = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
         if not isinstance(loaded, dict):
@@ -390,6 +395,23 @@ def load_config(
         return KumaruConfig(**data)
     except Exception as exc:
         raise ConfigError(f"Invalid configuration: {exc}") from exc
+
+
+def config_file(path: str | Path) -> Path:
+    """The file `load_config` reads for `path`.
+
+    A bare name (no folder, no ``.yaml``/``.yml`` suffix) is always a profile in
+    ``configs/``, never a file in the current folder: ``kumaru chat --workspace``
+    makes running Kumaru inside a cloned project normal, and a file named
+    ``qwen36`` there could otherwise point ``base_url`` at another server or set
+    the ``llama_server.binary`` that starts before anything asks you. To read a
+    file in the current folder, write ``./qwen36`` or ``qwen36.yaml``.
+    """
+    raw = str(path)
+    candidate = Path(raw)
+    if candidate.name == raw and candidate.suffix.lower() not in (".yaml", ".yml"):
+        return CONFIG_DIR / f"{raw}.yaml"
+    return candidate
 
 
 def list_profiles() -> list[str]:

@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import os
 import re
 import shlex
@@ -81,6 +82,14 @@ _MAX_BATCH_CHARS = 8_000  # cmd.exe reads at most 8191 characters per line
 _BATCH = (".bat", ".cmd")
 _BATCH_UNSAFE = re.compile(r'["%!^&|<>()\r\n]')
 _EXECUTABLE = (".com", ".exe", ".bat", ".cmd")
+# Every character str.splitlines() breaks a line at. Inside an argument it is
+# shown escaped, so a command stays on its "$" line and cannot draw lines of
+# its own in the approval prompt, such as a fake "program:" line.
+_LINE_BREAKS = {
+    "\n": "\\n", "\r": "\\r", "\v": "\\v", "\f": "\\f", "\x1c": "\\x1c", "\x1d": "\\x1d",
+    "\x1e": "\\x1e", "\x85": "\\x85", "\u2028": "\\u2028", "\u2029": "\\u2029",
+}  # fmt: skip
+_SHOW_LINE_BREAKS = str.maketrans(_LINE_BREAKS)
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
 # Variables a build needs, and none of the rest: no tokens, keys or passwords
 # that happen to be in your environment.
@@ -182,22 +191,34 @@ class RunCommandTool(Tool):
         if value is not None:
             if isinstance(value, str) and value.strip().isdigit():
                 value = int(value)
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 1:
+            # JSON also allows NaN and Infinity, which int() cannot convert.
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or (isinstance(value, float) and not math.isfinite(value))
+                or value < 1
+            ):
                 raise ToolError("timeout_s must be a number of seconds, at least 1.")
             limit = min(int(value), self.limit_s)
 
         env = build_env(self.workspace.root)
         program = self._program(argv[0], env["PATH"])
-        if program.suffix.lower() in _BATCH:
+        batch = program.suffix.lower() in _BATCH
+        if batch:
             _check_batch_arguments(argv)
         shown = display_command(argv)
         where = "." if cwd_shown == "." else cwd_shown
-        summary = "\n".join([
-            f"$ {shown}",
+        lines = [f"$ {shown}"]
+        breaks = [escape for char, escape in _LINE_BREAKS.items() if any(char in arg for arg in argv)]
+        if breaks:
+            what = "is a line break inside an argument" if len(breaks) == 1 else "are line breaks inside arguments"
+            lines.append(f"note:    {', '.join(breaks)} in the command {what}")
+        lines += [
             f"folder:  {where}  ({cwd})",
-            f"program: {program}",
+            f"program: {program}" + ("  (batch script, runs in cmd.exe)" if batch and os.name == "nt" else ""),
             f"stops after {limit}s, with every program it starts",
-        ])
+        ]
+        summary = "\n".join(lines)
         full = [str(program), *argv[1:]]
 
         async def apply() -> str:
@@ -279,8 +300,13 @@ def _not_allowed(raw: str, allowed: list[str]) -> str:
 
 
 def display_command(argv: list[str]) -> str:
-    """The command as you would type it in this system's terminal."""
-    return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+    """The command as you would type it in this system's terminal, on one line.
+
+    Line breaks inside arguments are written as ``\\n``, ``\\r``, ``\\u2028`` and
+    so on (`_LINE_BREAKS`), so the command cannot add lines to the approval prompt.
+    """
+    joined = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+    return joined.translate(_SHOW_LINE_BREAKS)
 
 
 def build_env(root: Path) -> dict[str, str]:

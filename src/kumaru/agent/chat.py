@@ -2,8 +2,9 @@
 
 Its job, in order: normalize the system prompt, fit the history into the context
 budget, call the backend, run the tools the model calls (asking the approver
-first whenever one would change something), and measure what happened. It owns
-*policy*; the backend owns *mechanism*.
+first whenever one would change something, and escaping the chat control tokens
+in what they return), and measure what happened. It owns *policy*; the backend
+owns *mechanism*.
 
 Statelessness is a design decision, not an omission
 ---------------------------------------------------
@@ -30,6 +31,7 @@ from kumaru.agent.knowledge import load_pack, reference_context
 from kumaru.agent.memory import TokenCounter, get_policy
 from kumaru.agent.prompt import build_system_prompt, ensure_system_message
 from kumaru.agent.tools import Approver, ToolBelt
+from kumaru.agent.untrusted import CONTROL_TOKEN, neutralize_control_tokens
 from kumaru.backends.base import Backend
 from kumaru.core.config import KumaruConfig
 from kumaru.core.errors import ContextLengthExceededError
@@ -216,8 +218,9 @@ class ChatAgent:
         stream then also carries each round's calls (`tool_calls`) and each
         result (`tool_result`) between the text, and exactly one final chunk
         carries the finish reason: "tool_calls" if ``agent.max_tool_iterations``
-        stopped the loop. `transcript`, when given, receives every message the
-        turn adds, in order.
+        stopped the loop. Every call gets a result, but at most
+        `_MAX_CALLS_PER_REPLY` of one reply run. `transcript`, when given,
+        receives every message the turn adds, in order.
         """
         started = time.perf_counter()
         ttft_ms: float | None = None
@@ -289,8 +292,12 @@ class ChatAgent:
                     yield StreamChunk(finish_reason="tool_calls", usage=usage)
                     break
                 rounds += 1
-                for call in calls:
-                    result = await self._run_call(call)
+                for index, call in enumerate(calls):
+                    result = (
+                        await self._run_call(call)
+                        if index < _MAX_CALLS_PER_REPLY
+                        else _tool_message(call, _TOO_MANY)
+                    )
                     record(result)
                     yield StreamChunk(tool_result=result)
 
@@ -303,17 +310,23 @@ class ChatAgent:
         )
 
     async def _run_call(self, call: dict[str, Any]) -> Message:
-        """Run one call and return its result; failures become text for the model."""
+        """Run one call and return its result, as the model will read it.
+
+        Failures become text for the model. Every result is untrusted, since a
+        file or a program's output may hold anything, so `_for_the_model`
+        escapes the chat control tokens in it before it is bounded.
+        """
         name = call["function"]["name"]
         arguments = _parse_arguments(name, call["function"]["arguments"])
         if isinstance(arguments, str):
-            return _tool_message(call, arguments)
-        try:
-            content = await self.tools.invoke(name, arguments)
-        except Exception as exc:  # noqa: BLE001 - reported to the model, like any tool failure
-            logger.exception("tool call %s failed", name)
-            content = f"ERROR: tool '{name}' failed: {type(exc).__name__}: {exc}"
-        return _tool_message(call, _clip(content, self.config.agent.workspace.max_output_chars))
+            content = arguments
+        else:
+            try:
+                content = await self.tools.invoke(name, arguments)
+            except Exception as exc:  # noqa: BLE001 - reported to the model, like any tool failure
+                logger.exception("tool call %s failed", name)
+                content = f"ERROR: tool '{name}' failed: {type(exc).__name__}: {exc}"
+        return _tool_message(call, _for_the_model(content, self.config.agent.workspace.max_output_chars))
 
     async def _gather(
         self,
@@ -366,6 +379,20 @@ class ChatAgent:
 _NOT_RUN = (
     "NOT RUN: this request already used its {rounds} (agent.max_tool_iterations), "
     "so nothing was done. The user can reply 'continue' to allow more."
+)
+# Each change asks you first, so a reply with hundreds of calls would mean
+# hundreds of prompts; the calls past this many get _TOO_MANY instead.
+_MAX_CALLS_PER_REPLY = 16
+_TOO_MANY = (
+    f"NOT RUN: at most {_MAX_CALLS_PER_REPLY} tool calls run per reply, so nothing was done "
+    "for this one. Call it again in your next reply if you still need it."
+)
+_ESCAPED = (
+    "(Kumaru: chat control tokens in this result, such as {example}, are shown escaped, "
+    "with &lt; &gt; &#91; &#93; in place of < > [ ], so they cannot act as instructions. "
+    "The files and output themselves are unchanged. To change lines that hold them, copy "
+    "the lines into edit_file's old_text as shown: edit_file then reads old_text and "
+    "new_text with the real characters. write_file writes exactly what you send.)"
 )
 
 
@@ -455,6 +482,14 @@ def _parse_arguments(name: str, raw: str) -> dict[str, Any] | str:
             f"ERROR: the arguments for {name} are not valid JSON ({exc.msg}, at character "
             f"{exc.pos}). Nothing was run. Send them again as one JSON object."
         )
+    except (ValueError, RecursionError):
+        # What Python's JSON reader gives up on before it can judge the text: an
+        # integer thousands of digits long, or thousands of nested brackets. Any
+        # model reply must end in a result, never in a crash that loses the chat.
+        return (
+            f"ERROR: the arguments for {name} could not be read: a number in them is too "
+            "long, or they nest too deeply. Nothing was run. Send them again as one JSON object."
+        )
     if not isinstance(value, dict):
         return f"ERROR: the arguments for {name} must be a JSON object ({{...}}). Nothing was run."
     return value
@@ -464,6 +499,19 @@ def _tool_message(call: dict[str, Any], content: str) -> Message:
     return Message(
         role=Role.TOOL, content=content, tool_call_id=call["id"], name=call["function"]["name"]
     )
+
+
+def _for_the_model(content: str, limit: int) -> str:
+    """A tool result with its chat control tokens escaped, then bounded.
+
+    When anything was escaped, a last line says so, and how to write it back:
+    `edit_file` maps escaped tokens back to the real ones itself.
+    """
+    first = CONTROL_TOKEN.search(content)
+    if first is None:
+        return _clip(content, limit)
+    example = neutralize_control_tokens(first.group())
+    return _clip(neutralize_control_tokens(content), limit) + "\n" + _ESCAPED.format(example=example)
 
 
 def _clip(text: str, limit: int) -> str:

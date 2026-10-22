@@ -43,6 +43,7 @@ One page per file. Each page answers the same seven questions: what it does, why
 | `agent/tools.py` | [page](src/kumaru/agent/tools.md) | **Adding a capability the model can call** |
 | `agent/workspace.py` | [page](src/kumaru/agent/workspace.md) | The project folder: what the agent may list, read, create and edit |
 | `agent/commands.py` | [page](src/kumaru/agent/commands.md) | Which programs the agent may run, and how they are contained |
+| `agent/untrusted.py` | [page](src/kumaru/agent/untrusted.md) | Tool results show `&lt;\|im_end\|&gt;`; escaping chat control tokens in untrusted text |
 
 ## Server — the HTTP surface
 

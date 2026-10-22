@@ -32,7 +32,7 @@ At startup four layers are merged, and the later one wins:
 
 `deep_merge` merges mappings key by key and replaces everything else whole. A list in a higher layer replaces the lower list and is never appended to it. That matters for `generation.stop`, `server.cors_origins`, `agent.enabled_tools`, `agent.workspace.allowed_commands` and `backend.llama_server.extra_args`.
 
-`-c` takes a file path or a profile name. A value that is not an existing path and has no extension becomes `<repo>\configs\<value>.yaml`, so profile names work from any directory. A path with an extension resolves against the current directory.
+`-c` takes a profile name or a file path. A bare name, with no folder and no `.yaml` or `.yml` suffix, always becomes `<repo>\configs\<value>.yaml`, even when the current directory holds a file of that name. So profile names work from any directory, and a file in a project you run Kumaru in cannot pose as one. Any other value is a path, resolved against the current directory: `.\my-profile`, `my-profile.yaml`.
 
 Each request then resolves the decoding parameters once more (`ChatAgent.resolve_params` in `src\kumaru\agent\chat.py`):
 
@@ -204,7 +204,7 @@ A sampling preset that is applied over `generation` only while thinking is on. R
 | `workspace.root` | `null` | The project folder for the file and command tools; `kumaru chat --workspace DIR` sets it. The file tools refuse every path outside it ([workspace.md](../src/kumaru/agent/workspace.md)). |
 | `workspace.allowed_commands` | `[python, node, npm, npx, dotnet]` | Programs `run_command` may start, by bare name. Case and `.exe`, `.com`, `.cmd` or `.bat` are ignored, and duplicates dropped. A list replaces the default whole, so repeat the names you keep ([commands.md](../src/kumaru/agent/commands.md)). |
 | `workspace.command_timeout_s` | `300` | Time limit per command. At the limit the program and everything it started are stopped. The model can ask for less, never more. |
-| `workspace.max_output_chars` | `16000` | Most characters one tool call returns to the model. Longer command output keeps its start and end; `read_file` stops there and says which `offset` continues. |
+| `workspace.max_output_chars` | `16000` | Most characters one tool call returns to the model. Longer command output keeps its start and end; `read_file` stops there and says which `offset` continues. A result whose chat control tokens were escaped gets a note of about 400 characters after that ([untrusted.md](../src/kumaru/agent/untrusted.md)). |
 | `workspace.max_file_bytes` | `262144` | Largest file `read_file` reads or `write_file` and `edit_file` write (256 KB). |
 | `workspace.max_list_entries` | `500` | Most entries per `list_files` call. |
 

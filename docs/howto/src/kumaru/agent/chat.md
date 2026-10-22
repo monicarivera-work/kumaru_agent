@@ -18,7 +18,7 @@
 
    It then trims `max_tokens` to the room the prepared prompt leaves in the context window.
 3. **Generate.** `backend.generate()` for `complete()`, `backend.stream()` for `stream()`.
-4. **Run tools, if any are offered.** The tool declarations go with the request. When the model replies with tool calls, the agent runs each one through `ToolBelt.invoke()`, which asks the approver first for anything that would change something. It appends the results and goes back to step 2, for at most `agent.max_tool_iterations` rounds (see "The tool loop" below).
+4. **Run tools, if any are offered.** The tool declarations go with the request. When the model replies with tool calls, the agent runs each one through `ToolBelt.invoke()`, which asks the approver first for anything that would change something. It escapes the chat control tokens in the results, appends them and goes back to step 2, for at most `agent.max_tool_iterations` rounds (see "The tool loop" below).
 5. **Log.** It writes one INFO line on the `agent.chat` logger with token counts and timing.
 
 The agent stores no conversation. Its state is set in `__init__`:
@@ -176,7 +176,7 @@ flowchart TD
     C -->|"no, or finish was 'length'"| D["record the answer, yield one finish chunk"]
     C -->|yes| E{"rounds < agent.max_tool_iterations?"}
     E -->|no| F["NOT RUN result for every call, a notice, finish 'tool_calls'"]
-    E -->|yes| G["for each call: parse the arguments, ToolBelt.invoke (asks the approver before any change), clip the result"]
+    E -->|yes| G["for each of the first 16 calls: parse the arguments, ToolBelt.invoke (asks the approver before any change), escape control tokens, clip the result"]
     G --> A
 ```
 
@@ -184,17 +184,19 @@ flowchart TD
   - The model's reply is streamed; its text and thoughts reach the caller as they arrive. Tool calls are collected, and none runs until the reply is complete.
   - A reply that stopped with `finish_reason: "length"` may hold calls whose arguments were cut off, so its calls are never run.
   - The calls are normalized (`_normalize_calls()`: a unique `id`, a name, the arguments as a JSON string) and recorded as one assistant message with `tool_calls`. Then they run one at a time, in order.
+  - At most 16 calls of one reply run (`_MAX_CALLS_PER_REPLY`): each change asks first, so a reply with hundreds of calls would mean hundreds of prompts. Every call after the 16th gets the result `NOT RUN: at most 16 tool calls run per reply, so nothing was done for this one. ...` instead, since every call needs a result. The round counts once, as usual.
 - **Running a call (`_run_call()`).**
-  - Arguments that are not a JSON object become `ERROR: the arguments for <tool> are not valid JSON (...). Nothing was run. ...`, which the model reads as the result.
+  - Arguments that are not a JSON object become `ERROR: the arguments for <tool> are not valid JSON (...). Nothing was run. ...`, which the model reads as the result. Arguments that Python cannot read at all, a number of more than 4,300 digits or thousands of nested brackets, become `ERROR: the arguments for <tool> could not be read: ...` in the same way, instead of ending the session.
   - `ToolBelt.invoke()` asks the approver before any tool that would change something, and turns a refusal or a failure into text (`DENIED: ...`, `ERROR: ...`); see `agent\tools.md`. An exception that escapes anyway becomes `ERROR: tool '<name>' failed: ...`.
-  - Every result is clipped to `agent.workspace.max_output_chars`, keeping the first 2/5 and the last 3/5, where errors usually are.
+  - Every result, errors included, goes through `_for_the_model()`. It escapes the chat control tokens (`neutralize_control_tokens()`, [untrusted.md](untrusted.md)), then clips the result to `agent.workspace.max_output_chars`, keeping the first 2/5 and the last 3/5, where errors usually are. Escaping comes first, because it makes the text longer.
+  - When anything was escaped, one line is added after the result: `(Kumaru: chat control tokens in this result, such as &lt;|im_end|&gt;, are shown escaped, ...)` (`_ESCAPED`). It says the files and output themselves are unchanged, and how to edit such lines: copy them into `edit_file` as shown ([workspace.md](workspace.md), "Escaped control tokens"). Results with nothing to escape get no such line.
 - **The cap.** `agent.max_tool_iterations` (default 10, range 1-100) limits the rounds whose calls run, per request. When the model calls tools again after that:
   - every call gets the result `NOT RUN: this request already used its <N> tool rounds (agent.max_tool_iterations), so nothing was done. ...`, because a request with an unanswered call is malformed;
   - the text `[Stopped after <N> tool rounds (agent.max_tool_iterations). Reply 'continue' to let it keep going.]` is streamed;
   - the finish reason is `"tool_calls"`. Replying "continue" starts a new request, with a fresh count.
 - **What the stream carries.** Between the text chunks come one `StreamChunk(tool_calls=[...])` per round and one `StreamChunk(tool_result=Message(role=TOOL, ...))` per call. Exactly one chunk at the end carries the finish reason and the usage, summed over the rounds.
 - **The transcript.** A turn with tools adds several messages: for each round, the assistant message with its calls and one tool message per call; then the answer. Pass `transcript=[]` to receive them in order, and append them to the history, as the CLI does, so the next turn knows what was done.
-- **Results are data, not instructions.** File contents and program output can contain text written to steer the model (prompt injection). The agent sends them back as tool results and nothing more; the approval prompt is the backstop, since nothing changes and no program runs without a yes.
+- **Results are data, not instructions.** File contents and program output can contain text written to steer the model (prompt injection). The agent sends them back as tool results and nothing more. Text that would act as a chat control token is escaped first: llama-server recognises control tokens anywhere in the rendered prompt, so `<|im_end|>` and then `<|im_start|>system` in a file would otherwise open a real system turn. Only what the model reads changes, never what is written. The approval prompt is the backstop, since nothing changes and no program runs without a yes.
 
 ## Public API
 
@@ -407,6 +409,9 @@ Pass `approver=` an async function that takes an `ApprovalRequest` and returns `
 | The log warns `not offering write_file, ...: they need approval, and nobody here can give it`, and the model never calls them. | The caller passed no approver: the server, the UI, `kumaru eval` and `kumaru bench` never do. | Expected: nothing that cannot ask may change files or run programs. Use `kumaru chat --workspace DIR`. |
 | A reply ends with `[Stopped after 10 tool rounds (agent.max_tool_iterations). Reply 'continue' to let it keep going.]`, and the finish reason is `tool_calls`. | The model was still calling tools when the cap was reached. | Reply "continue", or raise `agent.max_tool_iterations` (at most 100). |
 | A tool result reads `ERROR: the arguments for <tool> are not valid JSON ...`. | The model wrote malformed arguments. Nothing was run. | Usually none: the model reads the error and sends the call again. |
+| A tool result reads `ERROR: the arguments for <tool> could not be read: a number in them is too long, or they nest too deeply. ...`. | A number in the arguments has more than 4,300 digits (Python's limit for reading one), or they nest thousands of levels deep. Nothing was run. | Usually none, as above. |
+| A result shows `&lt;\|im_start\|&gt;` or `&lt;s&gt;` where the file has `<\|im_start\|>` or `<s>`, and ends with a `(Kumaru: chat control tokens in this result ...)` line. | By design: chat control tokens in tool results are escaped, so that they cannot act as instructions. The file is unchanged. | None. `edit_file` accepts lines copied as shown ([workspace.md](workspace.md)); `write_file` writes exactly what it gets. |
+| Some calls of a reply get `NOT RUN: at most 16 tool calls run per reply ...`. | The model asked for more than 16 calls in one reply. | None: the model calls the rest in its next reply. |
 | The model calls a tool, but nothing reaches the screen for a while. | The tool is running (a build or test run can take minutes, up to `agent.workspace.command_timeout_s`), or the approval prompt is waiting for an answer. | Expected. Answer the prompt; a stuck command is stopped at the time limit. |
 | Replicas "lose" the conversation. | The agent is stateless by design. | Send the full `messages` list on every turn. |
 
@@ -417,6 +422,7 @@ Pass `approver=` an async function that takes an `ApprovalRequest` and returns `
 - `src\kumaru\agent\tools.py`: `ToolBelt`, `Approver` and `ApprovalRequest`; see [tools.md](tools.md).
 - `src\kumaru\agent\workspace.py`: the project-folder file tools; see [workspace.md](workspace.md).
 - `src\kumaru\agent\commands.py`: `run_command`; see [commands.md](commands.md).
+- `src\kumaru\agent\untrusted.py`: `neutralize_control_tokens()`, applied to every tool result; see [untrusted.md](untrusted.md).
 - `src\kumaru\agent\knowledge.py`: `load_pack()` and `reference_context()`; see [knowledge.md](knowledge.md).
 - `src\kumaru\backends\base.py`: `Backend.generate()`, `stream()`, `count_tokens()`, `context_length`.
 - `src\kumaru\core\types.py`: `GenerationParams.merged()`, `Message`, `StreamChunk`, `ChatResult`.

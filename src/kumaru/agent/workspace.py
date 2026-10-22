@@ -39,6 +39,13 @@ mixes Windows and Unix endings, the lines a change leaves alone keep theirs,
 and new or changed lines get the more common one. A file with other names
 (hard links) gets a new file under this name; the others keep the old content.
 
+The model reads every tool result with its chat control tokens escaped (see
+`kumaru.agent.untrusted`), so it may send ``&lt;|im_start|&gt;`` as `old_text`
+where the file holds ``<|im_start|>``. When `old_text` is not found as it is
+but is once its escaped tokens are turned back, `edit_file` uses that, turns
+`new_text` back the same way, and says so above the diff, which shows the real
+characters. `write_file` writes exactly what it is given.
+
 What this does not protect against
 ----------------------------------
 Another program changing the folder at the same moment as an approved write
@@ -64,6 +71,7 @@ from pathlib import Path
 from typing import Any
 
 from kumaru.agent.tools import Action, Tool
+from kumaru.agent.untrusted import CONTROL_TOKEN, restore_control_tokens
 from kumaru.core.config import WorkspaceConfig
 from kumaru.core.errors import ConfigError, ToolError
 
@@ -297,12 +305,32 @@ class Workspace:
                 "Replace the whole file with write_file if you must change it."
             )
         found = current.text.count(old_text)
+        note = ""
+        real = restore_control_tokens(old_text)
+        if not found and real != old_text and real in current.text:
+            # Copied from a tool result, where control tokens are shown escaped.
+            old_text, new_text = real, restore_control_tokens(new_text)
+            if old_text == new_text:
+                raise ToolError(
+                    "old_text and new_text are the same once their escaped chat control "
+                    "tokens are read as the real characters; there is nothing to change."
+                )
+            found = current.text.count(old_text)
+            note = (
+                "(old_text matched once its escaped chat control tokens, as tool results "
+                "show them, were read as the real characters; new_text is written the same way)"
+            )
         if not found:
             hint = (
                 "Leave out the line numbers that read_file adds."
                 if _LINE_NUMBER.match(old_text)
                 else "Read the file again and copy the text exactly, including indentation."
             )
+            if real != old_text or CONTROL_TOKEN.search(old_text):
+                hint += (
+                    " Chat control tokens, which read_file shows escaped (such as &lt;s&gt;), "
+                    "may be copied as shown or with their real characters."
+                )
             raise ToolError(f"old_text was not found in '{shown}'. {hint}")
         if found > 1:
             raise ToolError(
@@ -310,7 +338,9 @@ class Workspace:
                 "surrounding lines so that it matches exactly once."
             )
         new = current.text.replace(old_text, new_text, 1)
-        return self._plan(raw, shown, current, current.text, new, _fingerprint(data), f"Edit {shown}")
+        return self._plan(
+            raw, shown, current, current.text, new, _fingerprint(data), f"Edit {shown}", note=note
+        )
 
     def _plan(
         self,
@@ -321,6 +351,8 @@ class Workspace:
         new: str,
         before: tuple[int, str] | None,
         head: str,
+        *,
+        note: str = "",
     ) -> Action:
         try:
             text = (
@@ -336,7 +368,7 @@ class Workspace:
                 f"the new '{shown}' would be {_size(len(data))}, over the "
                 f"{_size(self.config.max_file_bytes)} limit (agent.workspace.max_file_bytes)."
             )
-        notes = []
+        notes = [note] if note else []
         if fmt.raw is not None and old is not None:
             kind = "Windows" if fmt.newline == "\r\n" else "Unix"
             notes.append(

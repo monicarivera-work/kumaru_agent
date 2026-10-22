@@ -42,7 +42,8 @@ Giving a model a file system is also the most direct way for it to do damage. A 
   3. writes a temporary file beside the target and renames it over the target, so a failure never leaves half a file.
 - **Files keep their format.** Existing files keep their encoding (UTF-8 with or without BOM, UTF-16 LE/BE) and their line endings (CRLF or LF). In a file that mixes the two, the lines a change leaves alone keep their own ending, and new and changed lines get the more common one; the approval prompt says so. New files are UTF-8 with LF, except `.bat` and `.cmd`, which get CRLF. On POSIX a replaced file keeps its permissions, such as the executable bit.
 - **Bounded output.** A file larger than `max_file_bytes` (256 KB) is neither read nor written. `read_file` stops before `max_output_chars` (16,000) and says which `offset` continues. `list_files` stops after `max_list_entries` (500), and lists generated folders (`node_modules`, `.venv`, `bin`, `obj`, `dist`, `build`, `target`, ...) without expanding them unless asked by path.
-- **File contents are data.** A file can contain text written to steer the model. The tool descriptions tell the model so, but the real backstop is the approval: you see the actual diff, not the model's description of it.
+- **File contents are data.** A file can contain text written to steer the model. The tool descriptions tell the model so, but the real backstop is the approval: you see the actual diff, not the model's description of it. Before the model reads any result, `ChatAgent` escapes the chat control tokens in it ([untrusted.md](untrusted.md)): `<|im_start|>` reaches it as `&lt;|im_start|&gt;`, so a file cannot open a conversation turn of its own.
+- **Escaped control tokens.** The model therefore sees `<s>` in an HTML file, or `<|im_end|>` in a chat template, as `&lt;s&gt;` and `&lt;|im_end|&gt;`, and copies them that way into `old_text`. `plan_edit` first looks for `old_text` exactly as sent. Only when it is not found, but is once its escaped tokens are read as the real characters (`restore_control_tokens()`), does it replace that text, with `new_text` read the same way. The approval prompt then says so on the line after `Edit <path>`, and the diff shows the real characters that will be written. Text found as sent is never read another way, so a page that writes `&lt;s&gt;` itself is edited exactly as asked. `write_file` writes exactly what it gets.
 
 ## Public API
 
@@ -55,7 +56,7 @@ Giving a model a file system is also the most direct way for it to do damage. A 
 | `Workspace.list_files` | `list_files(raw: Any = ".", depth: Any = 2) -> str` | The folder listing the model reads. `depth` is 1–8. |
 | `Workspace.read_file` | `read_file(raw: Any, offset: Any = 1, limit: Any = None) -> str` | Numbered lines (`{n:6}\t{line}`), from `offset`, at most `limit` lines and `max_output_chars - 300` characters. Binary files are refused; bytes that are not valid UTF-8 show as U+FFFD, with a note saying so. |
 | `Workspace.plan_write` | `plan_write(raw: Any, content: Any) -> Action` | Prepare creating or replacing a whole file. Refuses binary targets and content identical to the file. |
-| `Workspace.plan_edit` | `plan_edit(raw: Any, old_text: Any, new_text: Any) -> Action` | Prepare replacing the one occurrence of `old_text`. Refuses zero or several matches, and files that are not valid UTF-8 (UTF-16 files with a BOM are fine). |
+| `Workspace.plan_edit` | `plan_edit(raw: Any, old_text: Any, new_text: Any) -> Action` | Prepare replacing the one occurrence of `old_text`. Refuses zero or several matches, and files that are not valid UTF-8 (UTF-16 files with a BOM are fine). When `old_text` is not found as sent but is with its escaped chat control tokens read as the real characters, replaces that, reads `new_text` the same way, and says so in the summary. |
 | `ListFilesTool`, `ReadFileTool` | `Tool` subclasses, `read_only = True`, `needs_workspace = True` | `run()` calls the method above in a worker thread. |
 | `WriteFileTool`, `EditFileTool` | `Tool` subclasses, `read_only = False`, `needs_workspace = True` | `prepare()` calls `plan_write` / `plan_edit`. `run()` refuses: these tools act only through approval. |
 
@@ -193,6 +194,9 @@ class CountLinesTool(_WorkspaceTool):
 | `ERROR: 'x' changed after the change was shown, so nothing was written.` | The file changed (you saved it in an editor, or a build rewrote it) between the diff and your yes. | Expected: the model reads it again and makes the change from the current content. |
 | `ERROR: old_text was not found in 'x'. Leave out the line numbers that read_file adds.` | The model copied `read_file` output with its line numbers. | Nothing to do; the hint tells the model. |
 | `ERROR: old_text occurs N times in 'x'` | The text to replace is not unique. | Nothing to do; the model includes more surrounding lines. |
+| `ERROR: old_text was not found in 'x'. ... Chat control tokens, which read_file shows escaped (such as &lt;s&gt;), may be copied as shown or with their real characters.` | `old_text` holds control tokens, escaped or real, and matches the file neither way. | Nothing to do; the model reads the file again. |
+| `ERROR: old_text and new_text are the same once their escaped chat control tokens are read as the real characters; ...` | The model changed only how a token is written, such as `&lt;s&gt;` to `<s>`. The file already holds the real characters. | Nothing to do. |
+| `ERROR: '&#91;INST&#93;.md' does not exist.` | File names are escaped like any result: `list_files` shows `[INST].md` that way. Paths are taken as sent, never read back. | Nothing to do: the note under the listing says which characters were replaced, and the model can send the real name. On Windows only `[ ]` names are affected, since `< >` are not allowed in file names. |
 | `ERROR: 'x' is 300.0 KB, over the 256.0 KB limit...` | A large or generated file. | Raise `agent.workspace.max_file_bytes` (up to 8 MB), or leave that file out of the task. |
 | `ERROR: cannot write 'x': Access is denied. It may be open in another program, or read-only.` | Windows locks files that are open in some programs (a running `.exe`, Excel). | Close the program, or stop the build that holds the file. |
 | A hard-linked file elsewhere did not get the change | Writes rename a new file over the name, which replaces the link rather than writing through it. | Expected; the other names keep the old content. |
@@ -207,7 +211,8 @@ class CountLinesTool(_WorkspaceTool):
 ## Related files
 - `src\kumaru\agent\tools.py` — `Tool`, `Action`, `ApprovalRequest`, `ToolBelt` (which builds one `Workspace` for all folder tools), and the lazy registrations.
 - `src\kumaru\agent\commands.py` — `run_command`, which uses `Workspace.resolve` for its `cwd` and for programs run by path.
-- `src\kumaru\agent\chat.py` — the tool loop that calls these tools.
+- `src\kumaru\agent\chat.py` — the tool loop that calls these tools, and escapes their results.
+- `src\kumaru\agent\untrusted.py` — `neutralize_control_tokens()` and `restore_control_tokens()`; see [untrusted.md](untrusted.md).
 - `src\kumaru\cli.py` — `kumaru chat --workspace`, and the approval prompt.
 - `src\kumaru\core\config.py` — `WorkspaceConfig`.
-- `tests\test_workspace.py` — every refused path spelling (including junctions, symlinks and 8.3 names), encodings and line endings kept (mixed ones too), stale writes refused, atomic writes, and the size and listing limits.
+- `tests\test_workspace.py` — every refused path spelling (including junctions, symlinks and 8.3 names), encodings and line endings kept (mixed ones too), stale writes refused, atomic writes, the size and listing limits, and edits copied with escaped control tokens.
