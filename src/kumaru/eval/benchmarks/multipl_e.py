@@ -43,6 +43,13 @@ stack Linux gives them; and whole-function answers may bring their own
 imports, which completions cannot (Go keeps only those the code still uses,
 because Go refuses to compile an unused import).
 
+Fixed tests. The pinned dataset predates one fix MultiPL-E has made to its
+translator since: its C# tests compared List and Dictionary results with
+`.Equals`, which .NET answers by reference, so 43 of the 152 C# problems
+could not be passed (nuprl/MultiPL-E#71). `fix_tests` rewrites those
+assertions as the fixed translator writes them, and loading fails unless
+exactly those problems change. Kumaru applies only fixes MultiPL-E has made.
+
 Sources: Cassano et al., 2023, "MultiPL-E: A Scalable and Polyglot Approach to
 Benchmarking Neural Code Generation" (IEEE TSE); dataset `nuprl/MultiPL-E`
 (MIT licence), configs `humaneval-<language>`, split `test`. Python: Chen et
@@ -87,6 +94,20 @@ HUMANEVAL_REVISION = "7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544"
 # them out everywhere keeps every language on the same 152 problems.
 EXCLUDED = frozenset({12, 22, 32, 38, 50, 90, 103, 125, 128, 137, 148, 162})
 N_PROBLEMS = 152
+# Defects in the pinned tests that MultiPL-E has fixed since, in its translator
+# but not in its dataset: per language, the issue and the problems whose tests
+# `fix_tests` rewrites. Loading fails unless exactly these problems change.
+TEST_FIXES: dict[str, tuple[str, frozenset[int]]] = {
+    # The C# problems whose function returns a List or a Dictionary.
+    "cs": (
+        "nuprl/MultiPL-E#71",
+        frozenset({
+            1, 5, 6, 7, 9, 14, 17, 21, 25, 26, 29, 30, 33, 34, 37, 42, 58, 62, 68, 70, 74, 81,
+            87, 88, 96, 100, 101, 104, 105, 106, 111, 113, 116, 117, 120, 123, 129, 130, 145,
+            149, 152, 159, 163,
+        }),
+    ),
+}
 
 RUN_TIMEOUT_S = 15.0
 COMPILE_TIMEOUT_S = 120.0
@@ -209,6 +230,59 @@ def entry_point(prompt: str, lang: str) -> str:
     if not names:
         raise KumaruError(f"Could not find the function a {LANGUAGES[lang].name} prompt asks for.")
     return names[-1]
+
+
+# -- fixing the tests -----------------------------------------------------------
+
+
+def fix_tests(lang: str, prompt: str, tests: str, entry: str) -> str:
+    """`tests` with the defects in `TEST_FIXES` fixed, as MultiPL-E now writes them.
+
+    nuprl/MultiPL-E#71: the C# tests check a List or Dictionary result with
+    `.Equals`, which .NET answers by reference, so no answer can pass them. The
+    translator has compared Lists with `SequenceEqual`, and Dictionaries by
+    `Count` and `Except`, since January 2026 (commit 85833ac); the dataset on
+    the Hub predates that. When the function returns a List or a Dictionary,
+    each assertion `Debug.Assert(F(...).Equals(expected));` is rewritten as the
+    fixed translator writes it, and one that is not of that form is an error.
+    Any other problem's tests are kept as published.
+    """
+    if lang != "cs":
+        return tests
+    signature = next((line for line in reversed(mask(prompt, lang).splitlines()) if line.strip()), "")
+    returns = re.search(rf"\bstatic\s+(List|Dictionary)<[^(]*\s{re.escape(entry)}\s*\(", signature)
+    if not returns:
+        return tests
+    masked = mask(tests, lang)
+    call = re.compile(rf"{re.escape(entry)}\s*\(")
+    pieces: list[str] = []
+    done = 0
+    for match in re.finditer(r"\bDebug\.Assert\(", masked):
+        opened = match.end() - 1
+        closed = matching(masked, opened)
+        found = call.match(masked, opened + 1)
+        called = matching(masked, found.end() - 1) if found else -1
+        compared = called + len(".Equals(")
+        rewritable = (
+            called >= 0
+            and closed >= 0
+            and masked.startswith(".Equals(", called + 1)
+            and matching(masked, compared) == closed - 1
+        )
+        if not rewritable:
+            assertion = tests[match.start() :].split("\n", 1)[0][:200]
+            raise KumaruError(
+                f"Could not rewrite a C# test as {TEST_FIXES[lang][0]} does: {assertion}",
+                hint=f"Has the dataset changed? Kumaru pins {DATASET} at revision {DATASET_REVISION}.",
+            )
+        left, right = tests[opened + 1 : called + 1], tests[compared + 1 : closed - 1]
+        if returns.group(1) == "List":
+            check = f"{left}.SequenceEqual({right})"
+        else:
+            check = f"{left}.Count == {right}.Count && !{left}.Except({right}).Any()"
+        pieces += [tests[done : opened + 1], check]
+        done = closed
+    return "".join(pieces) + tests[done:]
 
 
 # -- shared assembly helpers ----------------------------------------------------
@@ -1308,6 +1382,9 @@ class MultiPLE(Benchmark):
         extra = {"sandbox": self.sandbox, "toolchain": self.toolchain.version}
         if self.toolchain.checker:
             extra["checker"] = self.toolchain.checker
+        if self.lang in TEST_FIXES:
+            # Results graded on the tests as published are not resumed with fixed ones.
+            extra["test_fixes"] = TEST_FIXES[self.lang][0]
         return extra
 
     def generation_overrides(self) -> dict[str, Any]:
@@ -1327,9 +1404,13 @@ class MultiPLE(Benchmark):
                 n = int(row["name"].split("_")[1])
                 problems.append((n, row["name"], row["prompt"], row["tests"], entry_point(row["prompt"], self.lang)))
         items = []
-        for n, name, prompt, tests, entry in sorted(problems):
+        fixed: set[int] = set()
+        for n, name, prompt, published, entry in sorted(problems):
             if n in EXCLUDED:
                 continue
+            tests = fix_tests(self.lang, prompt, published, entry)
+            if tests != published:
+                fixed.add(n)
             shown = prompt if prompt.endswith("\n") else prompt + "\n"
             items.append(
                 BenchItem(
@@ -1341,6 +1422,13 @@ class MultiPLE(Benchmark):
         if len(items) != N_PROBLEMS:
             raise KumaruError(
                 f"Expected {N_PROBLEMS} {language.name} problems, found {len(items)}.",
+                hint=f"Has the dataset changed? Kumaru pins {DATASET} at revision {DATASET_REVISION}.",
+            )
+        issue, expected = TEST_FIXES.get(self.lang, ("", frozenset()))
+        if fixed != expected:
+            raise KumaruError(
+                f"Fixing the {language.name} tests ({issue}) changed {len(fixed)} problems, "
+                f"not the {len(expected)} expected: {sorted(fixed ^ expected)} differ.",
                 hint=f"Has the dataset changed? Kumaru pins {DATASET} at revision {DATASET_REVISION}.",
             )
         return items

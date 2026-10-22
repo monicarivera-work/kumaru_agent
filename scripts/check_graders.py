@@ -23,14 +23,17 @@ completions that MultiPL-E's authors already ran and graded with their own
 harness (nuprl/MultiPL-E-completions, pinned): StarCoder2-15B's, and for
 Python replit-code-v1-3b's, the newest run with Python in it. Kumaru grades
 each through `kumaru bench`'s own path (extraction, assembly, compile, run)
-and must reach the same verdict. A sample of `--sample` completions per
-language (default 200) is spread across problems: half passed, half failed in
-each way MultiPL-E saw (wrong answer, exception, compile error; at most 10
-timeouts, which cost 15 s each). `multipl_e` checks every language whose
-toolchain is installed and reports the others as skipped. These are
-model-written programs and run on this machine, as `kumaru bench run` runs
-them without `--sandbox docker`. `--workers` (default: KUMARU_CODE_WORKERS or
-half the cores, at most 4) caps how many programs run at once.
+and must reach the same verdict. Like with like: the completions are graded
+on the tests as MultiPL-E published them, which gave its verdicts, not with
+the fixes `kumaru bench` applies (multipl_e.TEST_FIXES). A sample of
+`--sample` completions per language (default 200) is spread across problems:
+half passed, half failed in each way MultiPL-E saw (wrong answer, exception,
+compile error; at most 10 timeouts, which cost 15 s each). `multipl_e`
+checks every language whose toolchain is installed and reports the others as
+skipped. These are model-written programs and run on this machine, as
+`kumaru bench run` runs them without `--sandbox docker`. `--workers`
+(default: KUMARU_CODE_WORKERS or half the cores, at most 4) caps how many
+programs run at once.
 
 `--sandbox docker` runs every check's programs (HumanEval's too) in the
 sandbox image instead, which is how to check that image before trusting it:
@@ -332,6 +335,8 @@ def check_multipl_e_language(lang: str, *, skip_missing: bool = False) -> list[s
         return [] if skip_missing else [f"{bench.name}: {exc.why}"]
     rows = completion_rows(lang)
     replays = sample_replays(rows, SETTINGS.sample)
+    # The tests as published, not as `load` fixes them (multipl_e.TEST_FIXES):
+    # MultiPL-E's verdicts come from these.
     items = {
         row["problem"]: BenchItem(
             id=row["problem"],

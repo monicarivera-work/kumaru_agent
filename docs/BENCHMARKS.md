@@ -371,6 +371,8 @@ All 8 disagreements are differences between toolchains, not grader errors:
 - **C#, 1.** An answer to `HumanEval_94` timed out under MultiPL-E's 5 s limit on Mono. On .NET 10 it takes about 4 s and passes.
 - **Go, 2.** An answer to `HumanEval_114` calls `min`, which has been built into Go since version 1.21; MultiPL-E's older Go rejected it. An answer to `HumanEval_136` timed out under MultiPL-E's 30 s limit, which covers building as well as running; here it builds and passes.
 
+The check grades each answer on the tests as MultiPL-E published them, because those gave its verdicts, so the comparison is like with like. `kumaru bench run` grades C# on fixed tests instead (below); on the published ones, MultiPL-E and Kumaru fail a right List or Dictionary result alike.
+
 Agreement compares verdicts, pass or fail. The kind of failure can differ without changing a verdict. Of the 10 C# timeouts sampled, for example, Kumaru reports 7 as plain failures: 4 programs stop at their first failed `Debug.Assert`, where Mono's carries on, and 3 runaway loops hit the 4 GB memory cap before the time limit.
 
 **What the check does not cover.** MultiPL-E's answers continue its prompt, as base models do, so they rarely bring the extras a chat model's answer does. How the assemblers handle those is covered by unit tests and by each language's self-test, not by this agreement. The check caught one assembler bug: Go's `[]interface{}` was taken for a block, which cut functions in two. Tests of whole answers caught two more: a JavaScript `import { … } from` was cut at its `}`, and a Java or C# `void main` was missed, which left two `main`s. All three are fixed and pinned by unit tests. Once a chat model has been run, read a few of each language's `compile_error`s in its `items.jsonl` before believing a low score: each keeps its `mode`, its `stage` and the compiler's output.
@@ -382,8 +384,18 @@ Agreement compares verdicts, pass or fail. The kind of failure can differ withou
 - Rust compiles as edition 2021 with warnings allowed, instead of 2015.
 - TypeScript is type-checked only when `tsc` is installed.
 - On Windows, C++ and Rust get the 8 MB stack Linux gives them, and C++ links statically.
+- C#'s tests of a List or Dictionary result are fixed, as MultiPL-E has since fixed its translator (below).
 
 The full table is in [`multipl_e.md`](howto/src/kumaru/eval/benchmarks/multipl_e.md#differences-from-multipl-es-own-harness).
+
+**Defects in the dataset.** The pinned dataset (revision 28441b6, July 2025, still the newest on the Hub) has tests that no answer can pass. Kumaru applies only fixes MultiPL-E has made itself, and only when they treat every language alike:
+
+- **Fixed: C#'s List and Dictionary results, 43 of the 152 problems** ([nuprl/MultiPL-E#71](https://github.com/nuprl/MultiPL-E/issues/71)). The tests compare them with `.Equals`, which .NET (and Mono) answers by reference, so a right answer fails: `new List<long>().Equals(new List<long>())` is false. MultiPL-E fixed its translator in January 2026 (commit 85833ac) but has not regenerated the dataset. Kumaru rewrites each of those assertions as the fixed translator writes them (`SequenceEqual` for a List; `Count` and `Except` for a Dictionary), and refuses to load unless exactly those 43 problems change. Unfixed, an answer can pass at most 107 of C#'s 152 problems; fixed, 150, on a par with the other languages. C# results graded before the fix can't be resumed with it.
+- **Not fixed: `HumanEval_92` (`any_int`), in all 7 translations.** The answer turns on telling `3` from `3.0`, which Python can and the translations can't, so each asks for the same call to be both true and false: JavaScript and TypeScript have one number type, C#, Java, C++ and Go pass floating-point numbers, and Rust asserts `candidate(3.0, 4.0, 7.0)` both ways. MultiPL-E's fix ([#142](https://github.com/nuprl/MultiPL-E/issues/142)) drops contradictory assertions only when they are written alike, which only Rust's are. Kumaru doesn't apply it: Rust alone would gain a problem that the other six can't pass, whereas 92 unsolvable in all seven favours none of them. #71, by contrast, puts C# back on a par with the rest.
+- **Not fixed: `HumanEval_136` (`largest_smallest_integers`), in C#.** The function returns `Tuple<Nullable<long>,Nullable<long>>`, but the tests expect values such as `Tuple.Create((Nullable<long>)null, 1L)`, a `Tuple<Nullable<long>,long>`, and tuples of different types are never equal. MultiPL-E hasn't fixed it.
+- **Not fixed: `HumanEval_51` (`remove_vowels`), in JavaScript.** A test string holds a raw line break, a syntax error in JavaScript.
+
+So with all 152 problems, the best possible score is 152 in Python, 151 in TypeScript, Java, C++, Go and Rust, and 150 in JavaScript and C#.
 
 ### 11.5 Results
 

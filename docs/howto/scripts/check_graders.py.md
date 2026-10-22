@@ -88,6 +88,8 @@ The first line gives the toolchain, the agreement, how many problems the sample 
 
 The sample is fixed (seed 0): half passes, and the rest shared evenly between the ways MultiPL-E saw answers fail, at most 10 of them timeouts, each spread one per problem per round so that no problem dominates.
 
+Each answer is graded on the tests as MultiPL-E published them, because those gave its verdicts: like with like. `kumaru bench run` grades C# on fixed tests instead (`multipl_e.TEST_FIXES`, [nuprl/MultiPL-E#71](https://github.com/nuprl/MultiPL-E/issues/71)), where a right List or Dictionary result passes; on the published tests, MultiPL-E and Kumaru fail it alike. So the check measures the grader, not the fix, which `tests/test_bench_multipl_e.py` pins with a real .NET build.
+
 Three kinds of disagreement are excused and listed as `expected difference(s)`, because Kumaru is right and differs from MultiPL-E by design:
 
 - **TypeScript without `tsc`.** MultiPL-E's `tsc` rejected the answer for its types, but with the types stripped it runs and passes. Install `tsc` to check types as well ([`multipl_e.md`](../src/kumaru/eval/benchmarks/multipl_e.md)).
@@ -123,5 +125,5 @@ A new MultiPL-E language joins the replay by itself (`CHECKS` has an entry per `
 - `src/kumaru/eval/benchmarks/extract.py`: the answer extractors under test
 - `src/kumaru/eval/benchmarks/gsm8k.py`, `mmlu_pro.py`, `humaneval.py`, `multipl_e.py`: the graders under test
 - `src/kumaru/eval/benchmarks/codeexec.py`: runs the programs and enforces `--workers` and `--sandbox`
-- `tests/test_bench_extract.py`, `tests/test_bench_graders.py`, `tests/test_bench_multipl_e.py`: the unit tests for edge cases; the last also pins this script's MultiPL-E sampling
+- `tests/test_bench_extract.py`, `tests/test_bench_graders.py`, `tests/test_bench_multipl_e.py`: the unit tests for edge cases; the last also pins this script's MultiPL-E sampling, and that it grades on the tests as published
 - `docs/BENCHMARKS.md` §5: the results

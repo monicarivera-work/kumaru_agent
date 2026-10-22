@@ -25,6 +25,7 @@
 
   Each name also answers to `multipl-e-<lang>`. **`multipl_e`** (or `multipl-e`) is a *suite*: it runs all eight, Python first.
 - **The same problems in every language.** MultiPL-E couldn't translate 12 of HumanEval's 164 problems into every language. Kumaru leaves those 12 (`EXCLUDED`) out everywhere and keeps the other 152 in HumanEval's order. Item ids are MultiPL-E's names (`HumanEval_116_sort_array`), and a `-n` sample with the same seed asks every language the same problems.
+- **C#'s List and Dictionary tests are fixed as MultiPL-E fixed them** (`fix_tests`). The pinned dataset's C# tests compare a List or Dictionary result with `.Equals`, which .NET answers by reference, so no answer could pass 43 of the 152 C# problems ([nuprl/MultiPL-E#71](https://github.com/nuprl/MultiPL-E/issues/71)). MultiPL-E fixed its translator in January 2026 (commit 85833ac) but hasn't regenerated the dataset. `load` rewrites each of those assertions as the fixed translator writes it: `Debug.Assert(F(x).SequenceEqual(expected));` for a List, `Debug.Assert(F(x).Count == expected.Count && !F(x).Except(expected).Any());` for a Dictionary. Loading fails unless exactly the 43 problems in `TEST_FIXES` change, and an assertion in another form is an error, not a test left as it was. Kumaru applies only fixes MultiPL-E has made; the defects it hasn't fixed are listed under [Problems no answer can pass](#problems-no-answer-can-pass).
 - **A language whose toolchain is missing is skipped, not scored 0.** Before any model loads, each language finds its toolchain and grades a canary problem with it: a right answer must pass and a wrong one must fail. In the suite, a language that fails this check is left out with a yellow note (`skipped multipl_e_go: Go needs the go command, which is not on PATH. Install Go: https://go.dev/dl/`), recorded under `skipped` in `run.json`, and listed again at the end as `not run`. A language named directly fails the run instead. If no language is left, the run fails with the first language's error.
 - **For each answer** (`grade`):
   1. **Reads the code** (`extract_answer`): the fenced block that defines the function; else the longest block tagged with this language or untagged; else the longest block. An answer cut off inside its block keeps what it wrote, and a reply without a fence is used whole.
@@ -134,7 +135,7 @@ As with HumanEval, presence and repetition penalties are turned off (`generation
 | `note` | E.g. `exited with code 0 before the tests finished (an early exit?)`. |
 | `stderr` | For a failure: the last 800 characters of the step's error output, or of its standard output when that is empty (`dotnet` and `tsc` report compile errors on standard output). |
 
-**What makes a run reproducible.** Besides the usual settings, the results fingerprint holds each language's `sandbox` and toolchain version (`node v24.17.0`, `.NET SDK 10.0.301`, `go version go1.27.3 windows/amd64`, `docker image 1a2b3c4d5e6f`…), and for TypeScript whether types were checked (`checker`: `tsc` or `strip`). Resuming a run with another compiler is refused, because the scores could differ. The datasets are pinned to fixed revisions.
+**What makes a run reproducible.** Besides the usual settings, the results fingerprint holds each language's `sandbox` and toolchain version (`node v24.17.0`, `.NET SDK 10.0.301`, `go version go1.27.3 windows/amd64`, `docker image 1a2b3c4d5e6f`…), for TypeScript whether types were checked (`checker`: `tsc` or `strip`), and for C# the test fix (`test_fixes`: `nuprl/MultiPL-E#71`). Resuming a run with another compiler is refused, because the scores could differ, and so is resuming C# results graded on the tests as published. The datasets are pinned to fixed revisions.
 
 ## Public API
 
@@ -146,8 +147,8 @@ As with HumanEval, presence and repetition penalties are turned off (`generation
 | `MultiPLE.configure` | `configure(*, sandbox: str = "none") -> None` | Choose `none` or `docker`; forgets the toolchain found for the other. An unknown sandbox raises `KumaruError`. |
 | `MultiPLE.toolchain` | property → `Toolchain` | Found on first use (`detect_toolchain`). Raises `ToolchainMissing` with an install hint. |
 | `MultiPLE.preflight` | `preflight() -> None` | Finds the toolchain and grades the language's canary: a fenced whole answer must pass and a wrong continuation must fail, else `ToolchainMissing` ("... failed Kumaru's self-test: ..."). |
-| `MultiPLE.fingerprint_extra` | `fingerprint_extra() -> dict` | `{"sandbox", "toolchain"}`, plus `"checker"` for TypeScript. |
-| `MultiPLE.load` | `load() -> list[BenchItem]` | The 152 problems; `meta` = `prompt`, `tests`, `entry_point`, `language`, `problem` (HumanEval's number). Raises if the dataset doesn't give exactly 152. |
+| `MultiPLE.fingerprint_extra` | `fingerprint_extra() -> dict` | `{"sandbox", "toolchain"}`, plus `"checker"` for TypeScript and `"test_fixes"` for C#. |
+| `MultiPLE.load` | `load() -> list[BenchItem]` | The 152 problems, their tests fixed by `fix_tests`; `meta` = `prompt`, `tests`, `entry_point`, `language`, `problem` (HumanEval's number). Raises if the dataset doesn't give exactly 152, or if the fixes don't change exactly the problems in `TEST_FIXES`. |
 | `MultiPLE.grade` | `grade(item, output) -> Grade` | Steps 1 to 4 above. Blocks for up to 135 s (compile plus run). |
 | `LANGUAGES` | `dict[str, Language]` | `Language(key, name, fence, aliases)`: `name` is shown to the model, `fence` is the prompt's code-fence tag, `aliases` are the fence tags that count as this language. |
 | `PROMPT` | `str` | The instruction (above). |
@@ -155,12 +156,13 @@ As with HumanEval, presence and repetition penalties are turned off (`generation
 | `solution_source` | `solution_source(prompt, code, entry, lang) -> tuple[str, str]` | The source, and `"whole"` or `"continuation"` (step 2). |
 | `defines_entry` | `defines_entry(code, entry, lang) -> bool` | Whether `code` defines the function. |
 | `entry_point` | `entry_point(prompt: str, lang: str) -> str` | The function a MultiPL-E prompt asks for: the last one it opens. |
+| `fix_tests` | `fix_tests(lang, prompt, tests, entry) -> str` | The tests with the defects in `TEST_FIXES` fixed, as MultiPL-E's translator now writes them; other tests unchanged. Raises `KumaruError` ("Could not rewrite a C# test as nuprl/MultiPL-E#71 does: …") on an assertion it should fix but can't. |
 | `assemble` | `assemble(lang, prompt, source, tests, marker, entry) -> str` | The program's text (step 3). |
 | `build_program` | `build_program(lang, toolchain, text, marker, *, local=True) -> Program` | The files and steps for `codeexec.run`. `local=False` builds for the Linux sandbox. |
 | `Toolchain` | `Toolchain(tools, version, env={}, keep_env=frozenset(), checker="", flags=(), jar="", setup=())` | The executables (absolute paths, or plain names inside the image), the version recorded in the fingerprint, the variables a step gets, extra compiler flags, the javatuples jar, and setup steps. |
 | `detect_toolchain` | `detect_toolchain(lang: str, sandbox: str = "none") -> Toolchain` | This machine's tools, or the sandbox image's. |
 | `javatuples_jar` | `javatuples_jar() -> Path` | `KUMARU_JAVATUPLES_JAR`, else `~/.cache/kumaru/javatuples-1.2.jar`. |
-| Constants | `DATASET = "nuprl/MultiPL-E"`, `DATASET_REVISION`, `HUMANEVAL`, `HUMANEVAL_REVISION`, `EXCLUDED`, `N_PROBLEMS = 152`, `RUN_TIMEOUT_S = 15.0`, `COMPILE_TIMEOUT_S = 120.0`, `STDERR_TAIL = 800`, `JAVATUPLES_URL`, `JAVATUPLES_SHA256` | |
+| Constants | `DATASET = "nuprl/MultiPL-E"`, `DATASET_REVISION`, `HUMANEVAL`, `HUMANEVAL_REVISION`, `EXCLUDED`, `N_PROBLEMS = 152`, `TEST_FIXES` (language → the upstream issue and the problems its fix changes), `RUN_TIMEOUT_S = 15.0`, `COMPILE_TIMEOUT_S = 120.0`, `STDERR_TAIL = 800`, `JAVATUPLES_URL`, `JAVATUPLES_SHA256` | |
 
 ## How to use it
 
@@ -201,7 +203,7 @@ Kumaru finds tools in `PATH`'s absolute folders (`codeexec.find_program`), never
 
 - A low score with many `compile_error`s means the model writes code the compiler rejects: wrong types, missing imports, syntax from another language. Many `failed` means code that compiles but computes the wrong answer. `kumaru bench report` shows each answer's `stderr`.
 - Compare languages within one run: they answer the same problems. Compare a language across models with `kumaru bench compare`.
-- Before trusting a language's grader, `python scripts\check_graders.py multipl_e_<lang>` replays MultiPL-E's own graded answers through it and reports the agreement ([`check_graders.py.md`](../../../../scripts/check_graders.py.md); the measured agreement is in [`BENCHMARKS.md`](../../../../../BENCHMARKS.md)).
+- Before trusting a language's grader, `python scripts\check_graders.py multipl_e_<lang>` replays MultiPL-E's own graded answers through it and reports the agreement ([`check_graders.py.md`](../../../../scripts/check_graders.py.md); the measured agreement is in [`BENCHMARKS.md`](../../../../../BENCHMARKS.md)). It grades them on the tests as published, which gave MultiPL-E's verdicts, not on the fixed C# tests.
 
 ### Differences from MultiPL-E's own harness
 
@@ -214,6 +216,19 @@ Kumaru finds tools in `PATH`'s absolute folders (`codeexec.find_program`), never
 | TypeScript | always type-checked with `tsc` | `tsc` when installed, else types stripped |
 | Windows | (Linux only) | C++ and Rust get Linux's 8 MB stack; C++ links statically |
 | Go | the Go in MultiPL-E's container, older than 1.21 | the installed Go, offline. Newer Go accepts code that older Go rejected, such as the built-in `min` and `max` (Go 1.21). |
+| C# tests of a List or Dictionary result | `.Equals`, by reference: no answer passes ([#71](https://github.com/nuprl/MultiPL-E/issues/71); fixed in the translator since, not in the dataset) | rewritten as the fixed translator writes them (`SequenceEqual`; `Count` and `Except`) |
+
+### Problems no answer can pass
+
+Kumaru applies only fixes MultiPL-E has made. These defects of the pinned dataset remain, so some languages can't score every problem:
+
+| Problem | Languages | Why |
+|---|---|---|
+| `HumanEval_92` (`any_int`) | all 7 translations | The answer turns on telling `3` from `3.0`, which Python can and the translations can't: each asks for the same call to be both true and false. JavaScript and TypeScript have one number type; C#, Java, C++ and Go pass floating-point numbers; Rust asserts `candidate(3.0, 4.0, 7.0)` both ways. MultiPL-E's fix ([#142](https://github.com/nuprl/MultiPL-E/issues/142)) drops contradictory assertions only when they are written alike, which only Rust's are. Kumaru doesn't apply it: Rust alone would gain a problem the other six can't pass, whereas leaving 92 unsolvable in all seven favours none. (#71, by contrast, puts C# back on a par with the others.) |
+| `HumanEval_136` (`largest_smallest_integers`) | C# | The function returns `Tuple<Nullable<long>,Nullable<long>>`, but the tests expect values such as `Tuple.Create((Nullable<long>)null, 1L)`, a `Tuple<Nullable<long>,long>`. Tuples of different types are never equal, so only the 2 of its 11 assertions that expect two nulls can pass. MultiPL-E hasn't fixed it. |
+| `HumanEval_51` (`remove_vowels`) | JavaScript | A test string holds a raw line break, a syntax error in JavaScript. |
+
+So with all 152 problems, the best score is 152 in Python, 151 in TypeScript, Java, C++, Go and Rust, and 150 in JavaScript and C#.
 
 ## How to extend it
 
@@ -230,9 +245,11 @@ Kumaru finds tools in `PATH`'s absolute folders (`codeexec.find_program`), never
 
 If a new language lacks a problem the others have, `load` fails with `Expected 152 … problems`. Then exclude that problem for every language (`EXCLUDED`, `N_PROBLEMS`), which changes the problem set and so needs a fresh baseline.
 
+**Apply a fix MultiPL-E has made.** When MultiPL-E fixes a translator but not the dataset on the Hub, teach `fix_tests` to rewrite the tests exactly as the fixed translator writes them, and list the issue and the problems it changes in `TEST_FIXES`. `load` then fails if the fix changes any other problem, and the fingerprint keeps results graded on the old tests from being resumed with the new ones. Fix only what MultiPL-E has fixed, and only when the fix doesn't favour one language: see [Problems no answer can pass](#problems-no-answer-can-pass). When the Hub's dataset is regenerated, pin the new revision and drop the fix.
+
 **MBPP.** MultiPL-E also translates MBPP (`mbpp-<lang>` configs). A second suite could reuse the assemblers and toolchains.
 
-Pinned behaviour: `tests\test_bench_multipl_e.py`: answer reading, entry points, each assembler, the problem set, the suite, the sandbox, the agreement sampling, and the time a long, repetitive reply takes to grade (`test_a_degenerate_reply_is_graded_in_moments`). Ten tests compile and run real programs; they need `KUMARU_TEST_TOOLCHAINS=1` and skip a language whose toolchain is missing.
+Pinned behaviour: `tests\test_bench_multipl_e.py`: answer reading, entry points, each assembler, the problem set, the C# test fix (the exact rewrite, the problems it changes, and a real .NET run), the suite, the sandbox, the agreement sampling (graded on the tests as published), and the time a long, repetitive reply takes to grade (`test_a_degenerate_reply_is_graded_in_moments`). Eleven tests compile and run real programs; they need `KUMARU_TEST_TOOLCHAINS=1` and skip a language whose toolchain is missing.
 
 ## Failure modes
 
@@ -247,10 +264,11 @@ Pinned behaviour: `tests\test_bench_multipl_e.py`: answer reading, entry points,
 | Exit code 134 (C++) | The program aborted: an uncaught exception, or a library check. | A failure; read `stderr`. |
 | `compile_error` on nearly every answer in one language | The toolchain differs from the ones the grader was checked with, rather than the model being weak. | Run `scripts\check_graders.py multipl_e_<lang>`: a low agreement points at the grader. |
 | `Expected 152 <language> problems, found N.` | The dataset changed, or a cached copy is incomplete. | Kumaru pins the revisions; clear the cached dataset (`%USERPROFILE%\.cache\huggingface\hub\datasets--nuprl--MultiPL-E`) and retry. |
+| `Fixing the C# tests (nuprl/MultiPL-E#71) changed N problems, not the 43 expected: [...] differ.` or `Could not rewrite a C# test as nuprl/MultiPL-E#71 does: …` | The C# tests aren't the pinned revision's, so the fix might rewrite them wrongly. | As above: clear the cached dataset. If a new revision is pinned on purpose, check whether it still needs the fix (`TEST_FIXES`). |
 | `Could not find the function a <language> prompt asks for.` | A prompt in an unexpected shape. | A dataset problem; report the item. |
 | `timeout` at the `compile` stage | A shared CPU: compilers are slowed by a model running on the CPU, a game, or too many programs at once. | Lower `KUMARU_CODE_WORKERS` ([`codeexec.md`](codeexec.md)). |
 | Grading one answer takes seconds or more, the CPU busy in Kumaru rather than in a compiler | Reading or assembling went quadratic on a long, repetitive reply. | Profile `grade` on the item's `output` (`python -m cProfile`). Fix the scan ([`codeparse.md`](codeparse.md)) or regex, and add the reply to `test_a_degenerate_reply_is_graded_in_moments`. |
-| `The results folder was made with other settings` when resuming | A compiler was updated, TypeScript gained or lost `tsc`, or the sandbox changed: each is part of the fingerprint. | Start a new run (`--out` elsewhere). |
+| `The results folder was made with other settings` when resuming | A compiler was updated, TypeScript gained or lost `tsc`, the sandbox changed, or C# results were graded before its tests were fixed: each is part of the fingerprint. | Start a new run (`--out` elsewhere). |
 
 ## Related files
 

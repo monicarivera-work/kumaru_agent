@@ -628,6 +628,99 @@ def test_a_changed_dataset_is_an_error_not_a_smaller_benchmark(monkeypatch: pyte
         multipl_e.MultiPLERust().load()
 
 
+def cs_problem(signature: str, *asserts: str) -> tuple[str, str]:
+    """A C# prompt and its tests, written the way MultiPL-E writes them."""
+    prompt = f"{multipl_e._CS_USINGS}class Problem {{\n    // Does something.\n    public static {signature} {{\n"
+    tests = "    }\n    public static void Main(string[] args) {\n"
+    return prompt, tests + "".join(f"    {line}\n" for line in asserts) + "    }\n\n}\n"
+
+
+LIST_TEST = 'Debug.Assert(Split(("a b")).Equals((new List<string>(new string[]{(string)"a", (string)"b"}))));'
+# A string that looks like the end of the call and the comparison.
+TRICKY_TEST = 'Debug.Assert(Split((")).Equals((")).Equals((new List<string>(new string[]{(string)")).Equals(("}))));'
+DICT_TEST = 'Debug.Assert(Count(("a")).Equals((new Dictionary<string,long>(){{"a", 1L}})));'
+
+
+def test_csharp_compares_list_and_dictionary_results_as_multipl_e_now_does() -> None:
+    # nuprl/MultiPL-E#71: .Equals compares a List or a Dictionary by reference.
+    prompt, tests = cs_problem("List<string> Split(string s)", LIST_TEST, TRICKY_TEST)
+    assert multipl_e.fix_tests("cs", prompt, tests, "Split").splitlines()[2:4] == [
+        '    Debug.Assert(Split(("a b")).SequenceEqual((new List<string>(new string[]{(string)"a", (string)"b"}))));',
+        '    Debug.Assert(Split((")).Equals((")).SequenceEqual((new List<string>(new string[]{(string)")).Equals(("}))));',
+    ]
+    prompt, tests = cs_problem("Dictionary<string,long> Count(string s)", DICT_TEST)
+    assert multipl_e.fix_tests("cs", prompt, tests, "Count").splitlines()[2] == (
+        '    Debug.Assert(Count(("a")).Count == (new Dictionary<string,long>(){{"a", 1L}}).Count'
+        ' && !Count(("a")).Except((new Dictionary<string,long>(){{"a", 1L}})).Any());'
+    )
+
+
+@pytest.mark.parametrize(
+    "signature",
+    ["Tuple<long, long> Split(string s)", "string Split(string s)", "long Split(List<long> xs)",
+     "Tuple<List<string>, long> Split(string s)"],
+)
+def test_other_results_and_other_languages_keep_their_tests_as_published(signature: str) -> None:
+    prompt, tests = cs_problem(signature, LIST_TEST)
+    assert multipl_e.fix_tests("cs", prompt, tests, "Split") == tests
+    prompt, tests = cs_problem("List<string> Split(string s)", LIST_TEST)
+    assert multipl_e.fix_tests("java", prompt, tests, "Split") == tests
+
+
+def test_a_list_test_that_cannot_be_rewritten_exactly_is_an_error() -> None:
+    prompt, tests = cs_problem("List<string> Split(string s)", LIST_TEST, 'Debug.Assert(Split(("")).Count == 0);')
+    with pytest.raises(KumaruError, match=re.escape('as nuprl/MultiPL-E#71 does: Debug.Assert(Split(("")).Count')):
+        multipl_e.fix_tests("cs", prompt, tests, "Split")
+
+
+def test_csharp_fixes_exactly_the_problems_it_expects_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    issue, expected = multipl_e.TEST_FIXES["cs"]
+    lists = set(expected)
+
+    def rows(*args, **kwargs):
+        made = []
+        for n in range(164):
+            problem = cs_problem(f"{'List<string>' if n in lists else 'string'} Split(string s)", LIST_TEST)
+            made.append({"name": f"HumanEval_{n}_split", "prompt": problem[0], "tests": problem[1]})
+        return made
+
+    monkeypatch.setattr(multipl_e, "load_hf_rows", rows)
+    items = multipl_e.MultiPLECSharp().load()
+    fixed = {item.meta["problem"] for item in items if "SequenceEqual" in item.meta["tests"]}
+    assert fixed == expected and len(expected) == 43
+    lists.add(max(set(range(164)) - expected - multipl_e.EXCLUDED))  # one more than expected
+    with pytest.raises(KumaruError, match=r"Fixing the C# tests \(nuprl/MultiPL-E#71\) changed 44 problems"):
+        multipl_e.MultiPLECSharp().load()
+
+    cs, rs = multipl_e.MultiPLECSharp(), multipl_e.MultiPLERust()
+    cs._toolchain = rs._toolchain = Toolchain({}, "fake")
+    assert cs.fingerprint_extra()["test_fixes"] == issue  # runs graded on the old tests do not resume
+    assert "test_fixes" not in rs.fingerprint_extra()
+
+
+def test_dotnet_passes_a_right_list_or_dictionary_only_on_the_fixed_tests() -> None:
+    bench = installed("cs")
+    split = cs_problem("List<string> Split(string s)", LIST_TEST, TRICKY_TEST)
+    count = cs_problem("Dictionary<string,long> Count(string s)", DICT_TEST)
+
+    def graded(problem: tuple[str, str], entry: str, body: str, fixed: bool = True) -> str:
+        prompt, tests = problem
+        if fixed:
+            tests = multipl_e.fix_tests("cs", prompt, tests, entry)
+        signature = prompt.rstrip().splitlines()[-1].strip()
+        answer = f"```csharp\nclass Problem {{\n    {signature}\n        {body}\n    }}\n}}\n```"
+        item = BenchItem(id=entry, prompt="", meta={"prompt": prompt, "tests": tests, "entry_point": entry})
+        return bench.grade(item, answer).extracted
+
+    right = "return new List<string>(s.Split(' '));"
+    assert graded(split, "Split", right) == "passed"
+    assert graded(split, "Split", "return new List<string> { s };") == "failed"
+    assert graded(split, "Split", right, fixed=False) == "failed"  # as published: by reference
+    assert graded(count, "Count", "return new Dictionary<string,long> { { s, 1L } };") == "passed"
+    # As many entries, one value wrong.
+    assert graded(count, "Count", "return new Dictionary<string,long> { { s, 2L } };") == "failed"
+
+
 def test_the_suite_runs_every_language_python_first() -> None:
     names = tuple(f"multipl_e_{lang}" for lang in multipl_e.LANGUAGES)
     assert names[0] == "multipl_e_py"
@@ -887,3 +980,33 @@ def test_the_self_check_grades_in_the_sandbox_it_is_given(
     assert check_graders.check_multipl_e_language("rs") == ["multipl_e_rs: no docker here"]
     with pytest.raises(SystemExit):
         check_graders.main(["multipl_e_rs", "--sandbox", "vm"])
+
+
+def test_the_self_check_grades_on_the_tests_multipl_e_graded_with(
+    check_graders, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # MultiPL-E's verdicts come from the tests as published, so the self-check
+    # does not fix them (multipl_e.TEST_FIXES).
+    prompt, tests = cs_problem("List<string> Split(string s)", LIST_TEST)
+    row = {
+        "problem": "HumanEval_1_split",
+        "prompt": prompt,
+        "tests": tests,
+        "completions": ["        return new List<string>(s.Split(' '));\n"],
+        "statuses": ["Exception"],
+        "stderrs": [None],
+    }
+    graded: list[str] = []
+
+    def run(program, *, sandbox="none"):
+        graded.append(program.files["program.cs"])
+        return Outcome("failed", "run", 1, "", "Assertion failed.", 0.1)
+
+    monkeypatch.setattr(check_graders, "completion_rows", lambda lang: [row])
+    monkeypatch.setattr(check_graders, "SETTINGS", check_graders.Settings(workers=1, sample=1))
+    monkeypatch.setitem(multipl_e._DETECT, "cs", lambda: Toolchain({"dotnet": "dotnet"}, "fake"))
+    monkeypatch.setattr(multipl_e.MultiPLECSharp, "preflight", lambda self: None)
+    monkeypatch.setattr(codeexec, "run", run)
+    assert check_graders.check_multipl_e_language("cs") == []
+    [text] = graded
+    assert LIST_TEST in text and "SequenceEqual" not in text
