@@ -30,9 +30,9 @@ At startup four layers are merged, and the later one wins:
 | 3. Environment variables `KUMARU_<SECTION>__<FIELD>` | `$env:KUMARU_GENERATION__TEMPERATURE = '0.3'` |
 | 4. CLI flags that set config fields ([table below](#cli-flags)) | `kumaru serve -c qwen36 --context 65536` |
 
-`deep_merge` merges mappings key by key and replaces everything else whole. A list in a higher layer replaces the lower list and is never appended to it. That matters for `generation.stop`, `server.cors_origins`, `agent.enabled_tools` and `backend.llama_server.extra_args`.
+`deep_merge` merges mappings key by key and replaces everything else whole. A list in a higher layer replaces the lower list and is never appended to it. That matters for `generation.stop`, `server.cors_origins`, `agent.enabled_tools`, `agent.workspace.allowed_commands` and `backend.llama_server.extra_args`.
 
-`-c` takes a file path or a profile name. A value that is not an existing path and has no extension becomes `<repo>\configs\<value>.yaml`, so profile names work from any directory. A path with an extension resolves against the current directory.
+`-c` takes a profile name or a file path. A bare name, with no folder and no `.yaml` or `.yml` suffix, always becomes `<repo>\configs\<value>.yaml`, even when the current directory holds a file of that name. So profile names work from any directory, and a file in a project you run Kumaru in cannot pose as one. Any other value is a path, resolved against the current directory: `.\my-profile`, `my-profile.yaml`.
 
 Each request then resolves the decoding parameters once more (`ChatAgent.resolve_params` in `src\kumaru\agent\chat.py`):
 
@@ -57,6 +57,7 @@ Thinking is on when the request turns it on, or when the request leaves it unset
 | `--context` (≥ 512) | `backend.max_context_length` | `serve`, `chat`, `bench run` |
 | `--host`, `-p`/`--port` | `server.host`, `server.port` | `serve` |
 | `--log-level` | `telemetry.log_level` | `serve` |
+| `-w`, `--workspace` | `agent.workspace.root`, and appends the project-folder tools to the resolved `agent.enabled_tools` instead of replacing the list | `chat` |
 | `-t`/`--temperature`, `--max-tokens`, `--think`/`--no-think`, `--thinking-budget` | no config field: the request's `temperature`, `max_tokens`, `thinking`, `thinking_budget` | `chat`, `bench run` |
 
 The last row is request-level, as described above, so `kumaru config` cannot show it. Every other field is set by YAML or an environment variable.
@@ -77,11 +78,13 @@ Exceptions and gaps:
 - **Ranges are checked at load.**
   - `generation`: `max_tokens` 1–131,072, `temperature` 0–2, `top_p` 0–1, `top_k` ≥ 0, `repetition_penalty` 0.5–2, `min_p` 0–1, `presence_penalty` −2–2, `thinking_budget` ≥ 0. `thinking_mode` has the same ranges.
   - `llama_server`: `parallel` 1–64, `n_cpu_moe` ≥ 0, `batch_size`/`ubatch_size` ≥ 1, `startup_timeout_s` > 0.
+  - `agent`: `max_tool_iterations` 1–100. In `agent.workspace`: `command_timeout_s` 1–3,600, `max_output_chars` 1,000–200,000, `max_file_bytes` 1,024–8,388,608, `max_list_entries` 10–10,000. `allowed_commands` takes bare program names only, and refuses shells and launchers: `Value error, 'cmd' is a shell or launcher, which could run any command`.
 - **`telemetry.log_level` is checked at load.** It must be `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in any case and with any surrounding spaces; `WARN` becomes `WARNING` and `FATAL` becomes `CRITICAL`. Any other name fails before the server starts: `Invalid configuration: … telemetry.log_level  Input should be 'DEBUG', 'INFO', 'WARNING', 'ERROR' or 'CRITICAL'`. Earlier builds accepted any string, and `kumaru serve` then died inside uvicorn with `KeyError: 'warn'`. The bare `KUMARU_LOG_LEVEL` variable is not a config field and is not checked; an unknown name there falls back to INFO.
 - **An empty section fails.** A header whose keys are all commented out is YAML `null`, which fails with `Input should be a valid dictionary or instance of ThinkingModeConfig` (or the respective section class). Delete the header too.
 - **Some values are checked only when used:**
   - `backend.name`, when the backend is created. Names are case-sensitive (`error: Unknown backend: 'Echo'.`, followed by the list). Aliases: `hf` → `transformers`, `gguf` → `llamacpp`, `llama-server`/`llama_server` → `llamacpp_server`, `ollama`/`vllm`/`remote` → `openai_compat`.
-  - `agent.enabled_tools`, when the agent is built: `Unknown tool: 'x'. (Available tools: current_time)`.
+  - `agent.enabled_tools`, when the agent is built: `Unknown tool: 'x'. (Available tools: current_time, edit_file, list_files, read_file, run_command, write_file)`. A non-empty list also fails there on a backend that cannot call tools, which includes this profile's `transformers` (see the [`agent`](#agent) table).
+  - `agent.workspace.root`, when `kumaru chat` builds the agent: it must be an existing folder, not a whole drive, not one that contains your home folder, and not inside a `.git` folder.
   - `backend.dtype`, when transformers loads: `Unknown dtype 'x'`.
   - `agent.memory_policy` is never checked. An unknown name logs `unknown memory_policy 'x'; using sliding_window`.
 
@@ -193,11 +196,17 @@ A sampling preset that is applied over `generation` only while thinking is on. R
 
 | Field | Default | Effect and notes |
 |---|---|---|
-| `system_prompt` | `"You are Kumaru, a precise and helpful assistant. …"` | The first part of the system message. Kumaru always appends its operating rules (`QUALITY_DIRECTIVES` in `src\kumaru\agent\prompt.py`) and today's date, then the tool descriptions if tools are enabled. An empty prompt still gets the rules and the date. Every nonblank client system message is appended after all of this, in the order sent, separated by blank lines. |
-| `max_history_tokens` | `6144` | History budget per request: `min(max_history_tokens, max(512, context − min(max_tokens, context // 2) − 128))`, using the request's effective `max_tokens`. The reserve is capped at half the window because `max_tokens` is a ceiling, not a forecast. With the defaults that is `min(6144, 7040)` = 6,144. Tokens are counted by the backend: a real tokenizer for `transformers` and `llamacpp`, and a characters ÷ 3.6 estimate for the others. |
+| `system_prompt` | `"You are Kumaru, a precise and helpful assistant. …"` | The first part of the system message. Kumaru always appends its operating rules (`QUALITY_DIRECTIVES` in `src\kumaru\agent\prompt.py`) and today's date. Enabled tools are not listed here: their declarations go with each request, and the model's chat template renders them. An empty prompt still gets the rules and the date. Every nonblank client system message is appended after all of this, in the order sent, separated by blank lines. |
+| `max_history_tokens` | `6144` | History budget per request: `min(max_history_tokens, max(512, context − min(max_tokens, context // 2) − 128 − tools))`, using the request's effective `max_tokens`. `tools` estimates the tool declarations (their JSON length ÷ 3, plus 150), and is 0 with no tools enabled. The reserve is capped at half the window because `max_tokens` is a ceiling, not a forecast. With the defaults that is `min(6144, 7040)` = 6,144. Tokens are counted by the backend: a real tokenizer for `transformers` and `llamacpp`, and a characters ÷ 3.6 estimate for the others. |
 | `memory_policy` | `sliding_window` | What to drop when the budget is exceeded. `sliding_window` keeps the system message plus the newest messages that fit, and always at least the newest two. `drop_oldest` removes messages from the front with no floor, and can drop the current question. `none` fails the request with HTTP 413 (`Conversation needs N tokens but the budget is B.`). |
-| `enabled_tools` | `[]` | Tool names whose descriptions are added to the system prompt. The only built-in is `current_time`. Nothing executes tools yet: there is no tool-calling loop. |
-| `max_tool_iterations` | `4` | Reserved; nothing reads it. |
+| `enabled_tools` | `[]` | Tools the model may call. Built in: `current_time` (read-only) and the project-folder tools `list_files`, `read_file`, `write_file`, `edit_file` and `run_command`, which `kumaru chat --workspace DIR` adds for you. Their declarations go with each request and the agent runs the calls, so the backend must call tools: `llamacpp_server`, `openai_compat` or `echo`. On this profile's `transformers` (and on `llamacpp`) a non-empty list fails before the model loads: `The transformers backend cannot call tools, and tools are enabled (...)`. Only `kumaru chat` asks you before each change and command; `serve`, the web UI, `eval` and `bench` never offer the tools that change things or use the project folder ([tools.md](../src/kumaru/agent/tools.md)). |
+| `max_tool_iterations` | `10` | Rounds of tool calls per message, 1–100. Calls after the last round are not run, and the reply ends with `[Stopped after 10 tool rounds (agent.max_tool_iterations). Reply 'continue' to let it keep going.]`. |
+| `workspace.root` | `null` | The project folder for the file and command tools; `kumaru chat --workspace DIR` sets it. The file tools refuse every path outside it ([workspace.md](../src/kumaru/agent/workspace.md)). |
+| `workspace.allowed_commands` | `[python, node, npm, npx, dotnet]` | Programs `run_command` may start, by bare name. Case and `.exe`, `.com`, `.cmd` or `.bat` are ignored, and duplicates dropped. A list replaces the default whole, so repeat the names you keep ([commands.md](../src/kumaru/agent/commands.md)). |
+| `workspace.command_timeout_s` | `300` | Time limit per command. At the limit the program and everything it started are stopped. The model can ask for less, never more. |
+| `workspace.max_output_chars` | `16000` | Most characters one tool call returns to the model. Longer command output keeps its start and end; `read_file` stops there and says which `offset` continues. A result whose chat control tokens were escaped gets a note of about 400 characters after that ([untrusted.md](../src/kumaru/agent/untrusted.md)). |
+| `workspace.max_file_bytes` | `262144` | Largest file `read_file` reads or `write_file` and `edit_file` write (256 KB). |
+| `workspace.max_list_entries` | `500` | Most entries per `list_files` call. |
 
 ### `server`
 
@@ -209,7 +218,7 @@ A sampling preset that is applied over `generation` only while thinking is on. R
 | `max_concurrent_requests` | `8` | Generations admitted at once, through an asyncio semaphore around every completion and stream. Further requests wait; there is no 429. Keep it ≥ `llama_server.parallel`. It must be ≥ 1, but nothing enforces that: `0` makes every generation wait forever, and a negative value fails at startup. `bench run` uses `--concurrency` instead. |
 | `request_timeout_s` | `600` | Not read. The wait for a loading backend is fixed at 600 s, after which requests get 503 `Backend is still loading.` |
 | `serve_ui` | `true` | Serves the web UI at `/` and `/static`. Set `false` for an API-only server. |
-| `api_key` | `null` | When set, `POST /v1/chat/completions` and `POST /v1/backend` require `Authorization: Bearer <api_key>` and otherwise answer 401 `Invalid or missing API key.`. `GET /v1/models`, `/v1/info`, `/healthz` and `/metrics` stay open; `/v1/info` shows the `backend` (without its key), `generation`, `thinking_mode` and `agent` settings, the system prompt included. The bundled UI sends no key, so it stops working when a key is set. |
+| `api_key` | `null` | When set, `POST /v1/chat/completions` and `POST /v1/backend` require `Authorization: Bearer <api_key>` and otherwise answer 401 `Invalid or missing API key.`. `GET /v1/models`, `/v1/info`, `/healthz` and `/metrics` stay open; `/v1/info` shows the `backend` (without its key), `generation`, `thinking_mode` and `agent` settings, the system prompt and `agent.workspace` included. The bundled UI sends no key, so it stops working when a key is set. |
 
 ### `telemetry`
 
@@ -344,7 +353,10 @@ The web UI sends `thinking` with every message, plus `thinking_budget` when Thin
 | The model thinks, but with the non-thinking sampling | `generation.thinking: null`: the template thinks by default, but the preset needs an explicit `true` | Set `generation.thinking`, or send `thinking: true` |
 | `telemetry.log_level: DEBUG` changes nothing for `chat` or `bench run` | Only `kumaru serve` applies `telemetry` | `$env:KUMARU_LOG_LEVEL = 'DEBUG'` |
 | `Invalid configuration: … telemetry.log_level … Input should be 'DEBUG', 'INFO', 'WARNING', 'ERROR' or 'CRITICAL'` | A level name Kumaru doesn't know, such as `verbose`, in YAML, `KUMARU_TELEMETRY__LOG_LEVEL` or `--log-level` | One of the five names, in any case; `WARN` and `FATAL` also work |
-| `request_timeout_s`, `metrics_enabled`, `trace_file` or `max_tool_iterations` has no effect | Not implemented | — |
+| `request_timeout_s`, `metrics_enabled` or `trace_file` has no effect | Not implemented | — |
+| `The transformers backend cannot call tools, and tools are enabled (agent.enabled_tools, or kumaru chat --workspace).` | `agent.enabled_tools` or `--workspace` on a backend without tool calling: this profile's `transformers`, or `llamacpp` | `-c qwen36` (`llamacpp_server`), or `openai_compat` with a server that parses tool calls |
+| The log says `not offering write_file, ...: they need approval, and nobody here can give it` | `serve`, the web UI, `eval` and `bench` cannot ask you before a change or a command, so they withhold those tools | `kumaru chat --workspace DIR` |
+| `Value error, 'C:/tools/node.exe' is not a bare program name (no paths or spaces)`, or `... is a shell or launcher, which could run any command` | A path, a space or a shell in `agent.workspace.allowed_commands` | List each program by bare name (`node`), and never a shell |
 | HTTP 413 `Conversation needs N tokens but the budget is B.` | `memory_policy: none` and the history is over budget | `sliding_window`, or a larger budget |
 | HTTP 503 `Backend is still loading.` | The backend took more than 600 s to load, e.g. during the first download | Retry once it has loaded; the wait is fixed |
 | Every generation hangs, with nothing in the log | `server.max_concurrent_requests: 0` | ≥ 1, and ≥ `llama_server.parallel` |
@@ -358,7 +370,7 @@ The web UI sends `thinking` with every message, plus `thinking_budget` when Thin
 
 - `src\kumaru\core\config.py`: the schema, `load_config` and `env_overrides` ([config.md](../src/kumaru/core/config.md)).
 - `src\kumaru\core\types.py`: `GenerationParams` and its `merged()` ([types.md](../src/kumaru/core/types.md)).
-- `src\kumaru\agent\chat.py`: `resolve_params` and the history budget ([chat.md](../src/kumaru/agent/chat.md)). `memory.py` holds the policies ([memory.md](../src/kumaru/agent/memory.md)), `prompt.py` the system prompt ([prompt.md](../src/kumaru/agent/prompt.md)) and `tools.py` the tools ([tools.md](../src/kumaru/agent/tools.md)).
+- `src\kumaru\agent\chat.py`: `resolve_params` and the history budget ([chat.md](../src/kumaru/agent/chat.md)). `memory.py` holds the policies ([memory.md](../src/kumaru/agent/memory.md)), `prompt.py` the system prompt ([prompt.md](../src/kumaru/agent/prompt.md)), `tools.py` the tools ([tools.md](../src/kumaru/agent/tools.md)), `workspace.py` the project-folder tools ([workspace.md](../src/kumaru/agent/workspace.md)) and `commands.py` `run_command` ([commands.md](../src/kumaru/agent/commands.md)).
 - `src\kumaru\cli.py`: the flags ([cli.md](../src/kumaru/cli.md)).
 - `src\kumaru\server\app.py`, `routes_chat.py` and `schemas.py`: CORS, admission, auth and the request fields ([app.md](../src/kumaru/server/app.md), [routes_chat.md](../src/kumaru/server/routes_chat.md), [schemas.md](../src/kumaru/server/schemas.md)).
 - `src\kumaru\core\logging.py`: `KUMARU_LOG_LEVEL` and `KUMARU_LOG_FORMAT` ([logging.md](../src/kumaru/core/logging.md)).

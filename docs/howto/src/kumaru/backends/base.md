@@ -20,6 +20,8 @@
 
 v0.2 added a second channel to the contract. A `StreamChunk` carries `delta` (answer text), `reasoning` (thinking text), or both. `generate()` collects them into `Message.content` and `Message.reasoning`.
 
+Tool calling is an optional part of the contract. `stream(messages, params, tools=[...])` passes OpenAI-style function declarations; a backend that can send them to its model sets `supports_tools = True` and reports the model's calls on its final chunk. Every other backend refuses them with `check_tools()`. `ChatAgent` runs the calls (`agent\chat.md`, "The tool loop"); backends never run tools.
+
 ## Why it exists
 
 Kumaru can switch among transformers, llama.cpp (in-process or as a managed `llama-server`), OpenAI-compatible servers and echo without changing the agent, server or UI. Without this contract, every caller would need backend-specific branching for loading, streaming, cleanup, timing, stop sequences and usage accounting. The async interface also prevents a blocking `model.generate()` call from freezing the HTTP event loop.
@@ -37,6 +39,7 @@ Every backend normalises both into `StreamChunk.reasoning`. Everything above the
 3. `delta` and `reasoning` are increments, never accumulated text. A chunk can carry both.
 4. The final chunk carries `finish_reason`, and `usage` when the backend has it. The streaming server builds its final SSE frame (`latency_ms`, `completion_tokens`, `tokens_per_second`, `thinking_ms`) the moment it sees `finish_reason`, so usage sent after that chunk is missing from the stats.
 5. Adapters are opt-in. `supports_adapters` (default `False`) declares that `_load()` attaches `backend.adapter_path`. On every other backend, `load()` refuses an adapter with `ConfigError` before `_load()` runs: a backend that ignored it would quietly serve, or benchmark, the base model under the adapter's name. Only `transformers` sets it.
+6. Tool calling is opt-in too. `supports_tools` (default `False`) declares that `stream(..., tools=...)` sends the declarations to the model and reports the calls it makes, all on the final chunk: `StreamChunk(finish_reason="tool_calls", tool_calls=[...], usage=...)`. A backend without it calls `check_tools(tools)` first thing in `stream()`, and `ChatAgent` calls it when it is built, so enabled tools fail with `ConfigError` before the model loads instead of being silently dropped. `echo` (scripted calls) and `openai_compat`, and so `llamacpp_server`, set it.
 
 Reasoning invariants. The shipped backends keep them; a new backend must too.
 - **Stops apply to the answer only.** Feed only answer text into `StopSequenceTracker`. A stop string inside the reasoning must not end the reply. The shipped backends keep this locally, but they also forward `stop` to engines that match it on raw output, reasoning included; see Failure modes.
@@ -63,14 +66,16 @@ Thinking support in the shipped backends:
 | `Backend` | `class Backend(config: BackendConfig)` | Abstract inference engine. `__init__` only stores `self.config` and lifecycle state. |
 | `Backend.name` | `name: str = "base"` | Registry/logging name; subclasses override it. |
 | `Backend.supports_adapters` | `supports_adapters: bool = False` | Class attribute. `True` only if `_load()` attaches `backend.adapter_path`; only `TransformersBackend` sets it. |
+| `Backend.supports_tools` | `supports_tools: bool = False` | Class attribute. `True` only if `stream(..., tools=...)` sends the declarations to the model and yields its calls; `EchoBackend` and `OpenAICompatBackend` (so `LlamaServerBackend`) set it. |
+| `Backend.check_tools` | `def check_tools(self, tools: Sequence[dict[str, Any]] \| None) -> None` | Raises `ConfigError` (`The <name> backend cannot call tools, and tools are enabled (agent.enabled_tools, or kumaru chat --workspace).`) when `tools` is non-empty and `supports_tools` is `False`; otherwise does nothing. |
 | `Backend.load` | `async def load(self) -> None` | Idempotent and lock-serialised. Raises `ConfigError` if `adapter_path` is set and `supports_adapters` is `False`; otherwise calls `_load()` once and logs `backend '<name>' ready: <model> (<s>s)`. |
 | `Backend._load` | `async def _load(self) -> None` (abstract) | Hook for expensive subclass setup. |
 | `Backend.aclose` | `async def aclose(self) -> None` | Base version only marks the backend unloaded. Subclasses release resources and must reset `_loaded` too. |
 | `Backend.is_loaded` | `property -> bool` | Lifecycle state. |
 | `Backend.info` | `def info(self) -> BackendInfo` (abstract) | Self-description surfaced at `/v1/models`, `/v1/info` and in the UI. |
-| `Backend.count_tokens` | `def count_tokens(self, messages: Sequence[Message]) -> int` | Default heuristic: `int(Σ(len(content) + len(role) + 4) / 3.6) + 8`. Override with a real tokenizer. |
+| `Backend.count_tokens` | `def count_tokens(self, messages: Sequence[Message]) -> int` | Default heuristic: `int(Σ(len(content) + len(role) + 4 + len(json.dumps(tool_calls))) / 3.6) + 8`, where `tool_calls` counts only when a message has them. Override with a real tokenizer. |
 | `Backend.context_length` | `property -> int` | Returns `config.max_context_length`. The agent sizes the history budget from it. |
-| `Backend.stream` | `def stream(self, messages: Sequence[Message], params: GenerationParams) -> AsyncIterator[StreamChunk]` (abstract) | Implement as an `async def` generator that yields chunks. |
+| `Backend.stream` | `def stream(self, messages: Sequence[Message], params: GenerationParams, *, tools: Sequence[dict[str, Any]] \| None = None) -> AsyncIterator[StreamChunk]` (abstract) | Implement as an `async def` generator that yields chunks. `tools` are OpenAI-style function declarations; see `supports_tools`. |
 | `Backend.generate` | `async def generate(self, messages: Sequence[Message], params: GenerationParams) -> ChatResult` | Drains `stream()`. Returns `message=Message.assistant(text, reasoning=reasoning or None)` plus `finish_reason`, `usage`, `latency_ms` and `time_to_first_token_ms`. If the stream reported no usage, it estimates: prompt via `count_tokens`, completion `max(1, (len(text) + len(reasoning)) // 4)`. |
 | `Backend.apply_stop_sequences` | `@staticmethod apply_stop_sequences(text: str, stop: Iterable[str]) -> tuple[str, bool]` | Truncates complete text at the earliest stop. Returns `(text, hit)`. |
 | `StopSequenceTracker` | `class StopSequenceTracker(stop: Sequence[str])` | Streaming-safe stop detector. Empty strings are ignored. Public attributes: `stop`, `max_len`, `stopped`. |
@@ -82,7 +87,7 @@ Thinking support in the shipped backends:
 | `ReasoningSplitter.flush` | `def flush(self) -> tuple[str, str]` | Releases held-back text at the end. Unterminated reasoning stays reasoning. |
 | `chunks_from_text` | `def chunks_from_text(text: str, size: int = 4) -> Iterator[str]` | Splits text into fixed-size pieces for fake streaming. |
 
-`normalize_finish_reason(value: Any) -> FinishReason` lives in `kumaru.backends.openai_compat`, not here. It maps `stop`/`eos` to `stop` and keeps `length`, `error` and `cancelled`; anything else (`tool_calls`, `None`) becomes `stop`. `llamacpp_backend` imports it from there. Use it for any engine whose finish reasons fall outside `StreamChunk.finish_reason`'s `Literal["stop", "length", "error", "cancelled"]`; any other value fails validation mid-stream.
+`normalize_finish_reason(value: Any) -> FinishReason` lives in `kumaru.backends.openai_compat`, not here. It maps `stop`/`eos` to `stop`, `tool_calls` and the older `function_call` to `tool_calls`, and keeps `length`, `error` and `cancelled`; anything else (`None` included) becomes `stop`. `llamacpp_backend` imports it from there. Use it for any engine whose finish reasons fall outside `StreamChunk.finish_reason`'s `Literal["stop", "length", "tool_calls", "error", "cancelled"]`; any other value fails validation mid-stream.
 
 ### `ReasoningSplitter` rules
 
@@ -230,7 +235,7 @@ kumaru chat -c test --think --thinking-budget 2 -q "Short thought"  # reasoning 
 |---|---|---|
 | `queue_size` | `iterate_in_thread(..., queue_size=256)` | Higher lets a fast producer run farther ahead; lower applies backpressure earlier for slow clients. It also bounds the wasted work when a slow reader leaves: up to `queue_size` computed items are discarded. |
 | `backend.max_context_length` | `Backend.context_length` / config | Hard context cap for memory trimming and backend prompt budgets. |
-| `agent.max_history_tokens` | config | The agent clamps the history budget to `min(max_history_tokens, max(512, context_length − min(max_tokens, context_length // 2) − 128))`. `max_tokens` is the resolved value, including `thinking_mode` when thinking is on, so a long reply budget shrinks the history, but never reserves more than half the window. The agent then trims the request's `max_tokens` to the room left, `context_length − count_tokens(prompt)` (at least 1), because strict servers reject prompt plus `max_tokens` beyond the window. |
+| `agent.max_history_tokens` | config | The agent clamps the history budget to `min(max_history_tokens, max(512, context_length − min(max_tokens, context_length // 2) − 128 − tool_tokens))`, where `tool_tokens` estimates the tool declarations sent with the request (0 without tools). `max_tokens` is the resolved value, including `thinking_mode` when thinking is on, so a long reply budget shrinks the history, but never reserves more than half the window. The agent then trims the request's `max_tokens` to the room left, `context_length − count_tokens(prompt) − tool_tokens` (at least 1), because strict servers reject prompt plus `max_tokens` beyond the window. |
 | Final `StreamChunk.usage` | backend stream end | Accurate usage improves dashboards. If absent, `generate()` estimates prompt and completion tokens (reasoning included). |
 | Stop string length | `StopSequenceTracker` | The tracker holds back up to `max_len - 1` characters to catch split stop sequences. |
 | `start_in_reasoning` | `ReasoningSplitter(...)` | Must match the rendered prompt. If it is wrong in one direction, thinking leaks into the answer; in the other, the whole answer is hidden as reasoning. |
@@ -252,6 +257,7 @@ A complete minimal backend that honours the whole v0.2 contract can live in `src
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from typing import Any
 
 from kumaru.backends.base import Backend, StopSequenceTracker, chunks_from_text
 from kumaru.core.registry import BACKENDS
@@ -277,8 +283,13 @@ class ReverseBackend(Backend):
         )
 
     async def stream(
-        self, messages: Sequence[Message], params: GenerationParams
+        self,
+        messages: Sequence[Message],
+        params: GenerationParams,
+        *,
+        tools: Sequence[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamChunk]:
+        self.check_tools(tools)  # this toy cannot call tools, so it refuses them
         text = next((m.content for m in reversed(messages) if m.role.value == "user"), "")
         pieces: list[tuple[str, str]] = []  # (channel, piece); one piece = one "token"
         if params.thinking:  # None = the model's default, which is "off" for this toy
@@ -349,7 +360,8 @@ Checklist for a real backend:
 7. Map engine finish reasons with `normalize_finish_reason()`. End with one chunk that carries `finish_reason` and `usage`. Completion tokens include reasoning tokens.
 8. Make `info()` reflect the loaded state: real device, quantization, context length.
 9. Leave `supports_adapters = False` unless `_load()` attaches `self.config.adapter_path`. If it does, set it to `True` and update `test_transformers_is_the_backend_that_attaches_adapters` in `tests\test_backends.py`, which pins the list of adapter backends.
-10. Add tests modelled on `tests\test_backends.py`. Stub the engine so that CI needs no model.
+10. Leave `supports_tools = False`, and call `self.check_tools(tools)` first in `stream()`, unless the engine can take tool declarations. If it can: send `tools`, collect the model's calls in the OpenAI shape (`{"id", "type": "function", "function": {"name", "arguments": <JSON string>}}`), and put them on the final chunk with `finish_reason="tool_calls"`. Never run them; the agent does, after asking. `merge_tool_call_delta()` and `finish_tool_calls()` in `openai_compat.py` assemble streamed call fragments.
+11. Add tests modelled on `tests\test_backends.py`. Stub the engine so that CI needs no model.
 
 ## Failure modes
 
@@ -363,11 +375,12 @@ Checklist for a real backend:
 | `<think>`/`</think>` tags, or the model's thinking, show up in the answer | The engine returns thinking inline and the backend does not split it. Or the prompt already ends with `<think>` but the splitter was built with `start_in_reasoning=False`, so only a stray `</think>` appears. | Use `ReasoningSplitter(start_in_reasoning=prompt.rstrip().endswith("<think>"))`. |
 | Whole reply lands in reasoning; answer empty; `finish_reason == "length"` | The model used all of `max_tokens` before closing `</think>`. Unterminated reasoning stays reasoning by design. | Raise `max_tokens` (or `thinking_mode.max_tokens`), or set `thinking_budget` on a backend that enforces it (`llamacpp_server`). |
 | Thinking toggle has no effect | Backend ignores `params.thinking` (`llamacpp`; `openai_compat` with `strict_openai`; a model without a thinking template). | Use `llamacpp_server`, or check the thinking-support table above. |
-| `ValidationError` from `StreamChunk(finish_reason=...)` mid-stream | Engine-specific finish reason such as `"eos"` or `"tool_calls"` passed through unmapped. | Wrap it with `normalize_finish_reason()`. |
+| `ValidationError` from `StreamChunk(finish_reason=...)` mid-stream | Engine-specific finish reason such as `"eos"` or `"function_call"` passed through unmapped. | Wrap it with `normalize_finish_reason()`. |
 | Final SSE frame shows `completion_tokens: 0` and `tokens_per_second: 0.0` | `usage` was emitted after the `finish_reason` chunk, or was zero or never sent. | Put real `usage` on the final `finish_reason` chunk. |
 | Non-streaming results have rough usage | Final stream chunk omitted `Usage`, so `generate()` estimated it. | Emit `StreamChunk(finish_reason=..., usage=Usage(...))`. |
 | Prompt rejected as too long (`Prompt is N tokens but the context window is M.` from `transformers`, HTTP 400 from a server) | One message alone is over budget: `sliding_window` always keeps the two newest messages. Or, on a backend without a real tokenizer (`llamacpp_server`, `openai_compat`), the `count_tokens` heuristic (~3.6 characters per token, tuned for English) counted fewer tokens than the engine. | Shorten the message, lower `agent.max_history_tokens`, or raise `backend.max_context_length`. Override `count_tokens` with a real tokenizer where you have one. Lowering `max_tokens` does not help: it only enlarges the history budget. |
 | `The <name> backend cannot attach a LoRA adapter (backend.adapter_path is '<path>').` | `adapter_path` or `--adapter` is set, and the backend's `supports_adapters` is `False` | Serve the adapter with `transformers` and its base model (`-c default`); GGUF models need the adapter converted first (`docs\TRAINING.md`). |
+| `The <name> backend cannot call tools, and tools are enabled (agent.enabled_tools, or kumaru chat --workspace).` | Tools are enabled, and the backend's `supports_tools` is `False` (`transformers`, `llamacpp`). | Use `llamacpp_server` (for example `-c qwen36`) or `openai_compat` with a server that supports tool calls, or turn the tools off. |
 | `/v1/models` shows stale data | `info()` does not reflect the loaded model, device or config. | Populate `BackendInfo` from actual backend state after load. |
 | Memory grows for slow clients | Producer runs too far ahead of the consumer. | Keep the bounded queue; lower `queue_size` for high-concurrency services. |
 | `Unknown backend: '<name>'.` | Name neither registered, lazily registered, nor found in entry points. | Add the `register_lazy` line, or check the spelling against the hint's list. |
@@ -377,7 +390,8 @@ Checklist for a real backend:
 - `src\kumaru\core\types.py` — canonical `Message` (with `reasoning`), `GenerationParams`, `StreamChunk`, `Usage`, `ChatResult` and `BackendInfo`.
 - `src\kumaru\core\config.py` — `BackendConfig`, generation defaults and the `thinking_mode` preset consumed upstream of here.
 - `src\kumaru\core\registry.py` — resolves backend names to `Backend` subclasses.
-- `src\kumaru\core\errors.py` — `BackendError`, `DependencyMissingError`, and `ConfigError` (the adapter refusal in `load()`).
+- `src\kumaru\core\errors.py` — `BackendError`, `DependencyMissingError`, and `ConfigError` (the adapter refusal in `load()`, the tool refusal in `check_tools()`).
+- `src\kumaru\agent\chat.py` — the tool loop, which calls `stream(..., tools=...)` and runs the calls.
 - `src\kumaru\backends\echo.py` — simplest concrete backend; emulates thinking.
 - `src\kumaru\backends\transformers_backend.py` — local Hugging Face implementation; inline tags via `ReasoningSplitter`.
 - `src\kumaru\backends\llamacpp_backend.py` — in-process GGUF implementation.

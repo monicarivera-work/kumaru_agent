@@ -22,6 +22,7 @@ above this file changes. That is the whole point of the backend seam.
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -49,6 +50,8 @@ _FINISH_REASONS: dict[str, FinishReason] = {
     "stop": "stop",
     "eos": "stop",
     "length": "length",
+    "tool_calls": "tool_calls",
+    "function_call": "tool_calls",  # the pre-2023 OpenAI spelling
     "error": "error",
     "cancelled": "cancelled",
 }
@@ -58,11 +61,58 @@ def normalize_finish_reason(value: Any) -> FinishReason:
     return _FINISH_REASONS.get(str(value), "stop")
 
 
+def merge_tool_call_delta(calls: list[dict[str, Any]], fragment: dict[str, Any]) -> None:
+    """Fold one streamed `delta.tool_calls[]` fragment into `calls`, in place.
+
+    OpenAI streams a call as pieces keyed by `index`: the first carries the id
+    and name, the rest carry slices of the JSON arguments. Some servers omit the
+    index or send each call whole (all at index 0), and some send the arguments
+    as an object, so all of those shapes are accepted.
+    """
+    index = fragment.get("index")
+    fragment_id = fragment.get("id")
+    entry = None
+    if isinstance(index, int):
+        entry = next((c for c in reversed(calls) if c["_index"] == index), None)
+    elif calls:
+        entry = calls[-1]  # an index-less continuation of the previous call
+    if entry is not None and fragment_id and entry["id"] and fragment_id != entry["id"]:
+        entry = None  # a new id starts a new call, whatever its index
+    if entry is None:
+        entry = {"_index": index, "id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+        calls.append(entry)
+    if fragment.get("id"):
+        entry["id"] = str(fragment["id"])
+    function = fragment.get("function") or {}
+    if function.get("name") and not entry["function"]["name"]:
+        entry["function"]["name"] = str(function["name"])
+    arguments = function.get("arguments")
+    if isinstance(arguments, (dict, list)):
+        entry["function"]["arguments"] += json.dumps(arguments)
+    elif isinstance(arguments, str):
+        entry["function"]["arguments"] += arguments
+
+
+def finish_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The calls in OpenAI shape, each with an id (some servers send none)."""
+    return [
+        {
+            "id": call["id"] or f"call_{uuid.uuid4().hex[:12]}",
+            "type": "function",
+            "function": dict(call["function"]),
+        }
+        for call in calls
+    ]
+
+
 @BACKENDS.register("openai_compat", aliases=("ollama", "vllm", "remote"))
 class OpenAICompatBackend(Backend):
     """Delegate generation to a remote OpenAI-compatible HTTP endpoint."""
 
     name = "openai_compat"
+    # llama-server (with --jinja), vLLM (with a tool-call parser) and Ollama
+    # all parse tool calls out of the model's output into this protocol.
+    supports_tools = True
 
     def __init__(self, config: BackendConfig) -> None:
         super().__init__(config)
@@ -131,7 +181,12 @@ class OpenAICompatBackend(Backend):
         )
 
     def _payload(
-        self, messages: Sequence[Message], params: GenerationParams, *, stream: bool
+        self,
+        messages: Sequence[Message],
+        params: GenerationParams,
+        *,
+        stream: bool,
+        tools: Sequence[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.config.model,
@@ -141,6 +196,8 @@ class OpenAICompatBackend(Backend):
             "top_p": params.top_p,
             "stream": stream,
         }
+        if tools:
+            payload["tools"] = list(tools)
         if params.stop:
             payload["stop"] = params.stop[:4]  # most servers cap this at 4
         if params.seed is not None:
@@ -185,7 +242,11 @@ class OpenAICompatBackend(Backend):
         return fields
 
     async def stream(
-        self, messages: Sequence[Message], params: GenerationParams
+        self,
+        messages: Sequence[Message],
+        params: GenerationParams,
+        *,
+        tools: Sequence[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamChunk]:
         if not self._loaded:
             await self.load()
@@ -199,12 +260,15 @@ class OpenAICompatBackend(Backend):
         splitter = ReasoningSplitter()
         usage = Usage()
         finish_reason: FinishReason = "stop"
+        calls: list[dict[str, Any]] = []
 
         import httpx
 
         try:
             async with self._client.stream(
-                "POST", "/chat/completions", json=self._payload(messages, params, stream=True)
+                "POST",
+                "/chat/completions",
+                json=self._payload(messages, params, stream=True, tools=tools),
             ) as response:
                 if response.status_code >= 400:
                     body = (await response.aread()).decode("utf-8", "replace")[:500]
@@ -243,6 +307,9 @@ class OpenAICompatBackend(Backend):
                         safe = tracker.push(text) if text else ""
                         if thought or safe:
                             yield StreamChunk(delta=safe, reasoning=thought)
+                        for fragment in delta.get("tool_calls") or []:
+                            if isinstance(fragment, dict):
+                                merge_tool_call_delta(calls, fragment)
                         if choice.get("finish_reason"):
                             finish_reason = normalize_finish_reason(choice["finish_reason"])
                     if tracker.stopped:
@@ -256,7 +323,14 @@ class OpenAICompatBackend(Backend):
         tail = (tracker.push(text) if text else "") + tracker.flush()
         if thought or tail:
             yield StreamChunk(delta=tail, reasoning=thought)
-        yield StreamChunk(finish_reason=finish_reason, usage=usage)
+        if calls and finish_reason != "length":
+            # Some servers report "stop" even when the turn ends in tool calls.
+            finish_reason = "tool_calls"
+        yield StreamChunk(
+            finish_reason=finish_reason,
+            usage=usage,
+            tool_calls=finish_tool_calls(calls) or None,
+        )
 
     async def list_remote_models(self) -> list[str]:
         """Model ids the upstream server currently has loaded."""
