@@ -88,6 +88,15 @@ class Benchmark(ABC):
     def preflight(self) -> None:  # noqa: B027 - optional hook; most benchmarks need no checks
         """Raise before any model loads if something this benchmark needs is missing."""
 
+    def configure(self, *, sandbox: str = "none") -> None:  # noqa: B027 - optional hook
+        """Apply run options before `preflight`. `sandbox` says where code-executing
+        benchmarks run model-written programs (see `codeexec.SANDBOXES`)."""
+
+    def fingerprint_extra(self) -> dict[str, Any]:
+        """Settings beyond the run's own that change this benchmark's verdicts (say,
+        the compiler version). A resumed run reuses answers only if they match."""
+        return {}
+
     @abstractmethod
     def load(self) -> list[BenchItem]:
         """Return every item of the evaluation split, in a stable order."""
@@ -118,11 +127,15 @@ class Benchmark(ABC):
         return {}
 
 
-def load_hf_rows(path: str, name: str | None, split: str) -> list[dict[str, Any]]:
+def load_hf_rows(
+    path: str, name: str | None, split: str, revision: str | None = None
+) -> list[dict[str, Any]]:
     """Load a Hugging Face dataset split as a list of plain dicts.
 
     The first call downloads a few MB into the Hugging Face cache; later calls
-    are offline. Imported lazily because `datasets` takes seconds to import.
+    are offline. `revision` pins a commit, so that a dataset update cannot
+    silently change the questions. Imported lazily because `datasets` takes
+    seconds to import.
     """
     try:
         from datasets import load_dataset
@@ -130,7 +143,7 @@ def load_hf_rows(path: str, name: str | None, split: str) -> list[dict[str, Any]
         raise DependencyMissingError("datasets", extra="bench") from exc
 
     try:
-        dataset = load_dataset(path, name, split=split)
+        dataset = load_dataset(path, name, split=split, revision=revision)
     except Exception as exc:
         raise KumaruError(
             f"Could not load dataset '{path}' (split '{split}'): {exc}",

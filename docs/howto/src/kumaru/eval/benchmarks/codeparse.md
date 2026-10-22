@@ -1,0 +1,126 @@
+# `src\kumaru\eval\benchmarks\codeparse.py`
+
+> Finds the top-level pieces of JavaScript, TypeScript, Java, C#, C++, Go and Rust source (imports, functions, classes, statements) without a parser per language, so MultiPL-E can rebuild a chat model's answer into a program that compiles beside the hidden tests.
+
+**Read this when:** a MultiPL-E answer that looks right fails with `compile_error`, an assembled program has lost or duplicated a piece of the model's code, or you are adding a language to MultiPL-E.
+
+---
+
+## What it does
+
+Two functions do the work; the rest are helpers built on them.
+
+1. **`mask(text, lang)`** returns the text with every comment turned into spaces and every string or character literal turned into `0`s, character for character. A `}` inside a string or a comment can no longer pass for the end of a function, and every offset in the masked text is also an offset in the original, so code finds positions in the masked text and cuts the original. Comments keep their line breaks (lines still end where they did); literals lose theirs, so a multi-line string still reads as one complete expression.
+2. **`chunks(text, lang)`** cuts the text into top-level pieces (`Chunk`s). A piece ends:
+   - at a `;` outside any bracket;
+   - at the `}` that closes its top-level block, unless what follows continues the statement: `;` (taken into the piece), a token such as `,` `.` `=` (and `{` `|` `&` `?` `:` where the language allows), or a word such as `else`, `catch`, `finally`, `while`, `as`, `satisfies`, and in JavaScript and TypeScript `from` (`import { a } from "m"`);
+   - in JavaScript, TypeScript and Go, which insert semicolons at line ends, at a line break after a complete expression (one ending in a word, a literal, `)`, `]`, `}`, `++` or `--`), unless (JavaScript, TypeScript) the next line starts with an operator or a continuing word such as `else` or `extends`;
+   - a C++ or C# preprocessor line (`#include`, `#if`, following `\` continuations) and a Rust inner attribute (`#![...]`) are pieces of their own, and so is a stray closing bracket.
+
+   The comments and blank lines before a piece belong to it. Joined, the pieces give back the text, less any comments after the last one.
+
+The helpers:
+
+- `uncomment` blanks comments but keeps literals, for reading an import's path or a `use` line.
+- `matching` finds the bracket that closes an opener, in masked text.
+- `defines(code, name, lang)` says whether `code` defines a function called `name`: `function name(`, `const name = …` (JavaScript, TypeScript), `func name(` (Go), `fn name(` (Rust), or a typed definition `T name(…) {` (C++, Java, C#, via `find_definition`), so a call or a prototype doesn't count.
+
+### What the masking knows
+
+| Language | Literals and comments it recognizes |
+|---|---|
+| all | `//` and `/* */` comments; `"…"` and `'…'` with backslash escapes; an unterminated string ends at its line |
+| JavaScript, TypeScript | template literals, including `${…}` holes with strings, templates and braces inside; regular expressions (a `/` after an operator, `(`, or a word like `return` starts one, and it must close on the same line) |
+| Java | text blocks `"""…"""` |
+| C# | verbatim `@"…"` (`""` escapes a quote), interpolated `$"…{x}…"` with nested holes, raw `"""…"""` and `$"""…"""` |
+| C++ | raw strings `R"delim(…)delim"` with prefixes (`u8R`, `LR`, …), prefixed strings (`u8"…"`, `L'x'`), digit separators (`1'000'000` is a number, not a character) |
+| Go | raw strings `` `…` `` |
+| Rust | nested block comments, raw strings `r#"…"#` (and `br`, `cr`), byte and C strings, characters (`'a'`, `'\n'`) versus lifetimes and labels (`'a`, `'outer:`) |
+
+## Why it exists
+
+MultiPL-E's own grader pastes a base model's completion of a function body between the prompt and the tests. A chat model answers differently: it rewrites the whole function and adds imports, helpers, a `main`, example calls, sometimes its own tests or a namespace. Pasting that next to the hidden tests gives two `main`s, a namespace the tests can't see, duplicate imports, or a class the tests don't know. To keep the model's helpers and imports and drop the rest, `multipl_e.py` must know where each top-level piece starts and ends in seven languages.
+
+A real parser per language (tree-sitter grammars, or each compiler's own) would mean seven dependencies with native code, for a job that needs only the outline. Masking plus bracket depth gets far enough: chat answers are ordinary, conventionally formatted code, and code that confuses this module (unbalanced brackets, say) fails to compile anyway.
+
+## Mental model
+
+```
+text    = 'f("}") // }\nint g() { return 1; }'
+masked  = 'f(000)     \nint g() { return 1; }'
+chunks  -> ['f("}")', ' // }\nint g() { return 1; }']    (cut at the ";" of a statement? no ";": cut at the line break? not in C++)
+```
+
+In practice, for C++:
+
+```cpp
+#include <vector>              // piece 1: a preprocessor line
+using namespace std;           // piece 2: ends at ";"
+// Doubles each value.         // \
+vector<int> twice(vector<int> v) {   //  piece 3: the comment belongs to it, and it ends at the "}" that closes the body
+    for (auto& x : v) x *= 2;  //  /
+    return v;
+}
+int main() { twice({1}); }     // piece 4: multipl_e.py drops it, since the tests have their own main
+```
+
+`Chunk.head` is the piece's masked text, stripped: what callers classify (`import …`, `func Test…`, `#[cfg(test)]`, `int main(`).
+
+## Public API
+
+| Name | Signature | What it's for |
+|---|---|---|
+| `mask` | `mask(text: str, lang: str) -> str` | Comments to spaces, literals to `0`s, same length. Raises `ValueError` for a language not in `LANGUAGES`. |
+| `uncomment` | `uncomment(text: str, lang: str, *, masked: str \| None = None) -> str` | Comments to spaces, literals kept. |
+| `matching` | `matching(masked: str, i: int) -> int` | The index of the bracket closing `masked[i]` (`(`, `[` or `{`), or -1. |
+| `Chunk` | `Chunk(start, end, text, code)`, `.head` | One piece: its span, its original text and its masked text. |
+| `chunks` | `chunks(text, lang, *, masked=None, start=0, end=None) -> list[Chunk]` | The top-level pieces of `text[start:end]`. Pass `start` and `end` to cut the inside of a class body. |
+| `defines` | `defines(code: str, name: str, lang: str, *, masked: str \| None = None) -> bool` | Whether `code` defines function `name`. |
+| `find_definition` | `find_definition(masked: str, name: str) -> int` | C++, Java, C#: where `T name(...) {` (or `=> …`) starts, or -1. The word before `name` must be a type, not a keyword such as `return` or `new`. |
+| `LANGUAGES` | `("js", "ts", "java", "cs", "cpp", "go", "rs")` | |
+
+## How to use it
+
+```python
+from kumaru.eval.benchmarks.codeparse import chunks, defines
+
+code = 'import { a } from "m";\nfunction f() { return "}"; }\nconsole.log(f());\n'
+[c.head for c in chunks(code, "js")]
+# ['import { a } from "m";', 'function f() { return "000"; }', 'console.log(f());']
+defines(code, "f", "js")   # True
+```
+
+Callers in `multipl_e.py`:
+
+- JavaScript and TypeScript keep declarations and imports, and drop other top-level statements (example calls);
+- Go drops `package` lines and `Test…` functions and decides which imports are still used;
+- Rust drops `fn main`, `mod tests` and `#[test]` items;
+- C++ drops `main`;
+- Java and C# find the type that defines the entry point and walk its members.
+
+See [`multipl_e.md`](multipl_e.md).
+
+## How to extend it
+
+- **A new literal form** (a language adds a string syntax): handle it in `_Scanner._literal`, return the index just past the literal, and add a case to `test_mask_blanks_comments_and_zeroes_literals_at_the_same_offsets` in `tests\test_bench_codeparse.py`.
+- **A token that continues a statement after `}`**: add it to `_AFTER_BRACE` for the language, or to `_AFTER_BRACE_WORDS`.
+- **A new language**: add it to `LANGUAGES`, then to the language checks in `_Scanner` (`_literal`, comments) and `chunks` (statement ends), and to `defines`. Then test `mask` and `chunks` on what models write in it: imports, generics, lambdas, nested types, attributes.
+- **Bugs show up as compile errors.** When a MultiPL-E answer fails to compile, run `scripts\check_graders.py multipl_e_<lang>`: a disagreement on an answer MultiPL-E passed often means a piece was cut in the wrong place. Two such bugs, found while checking whole answers, are pinned as tests:
+  - `import { a } from "m"` was cut at its `}`, which is why `from` now continues a statement;
+  - `void` was taken for a keyword, so `void main(` was missed and a model's own `main` was kept beside the tests' `main`.
+
+Pinned behaviour: `tests\test_bench_codeparse.py`.
+
+## Failure modes
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| A MultiPL-E answer fails with `compile_error`, and the assembled program has half a function, or one split across pieces | A literal form or continuation this module doesn't know: the masked text has a stray bracket, or a piece ended early. | Reproduce with `chunks(answer, lang)`; fix the scanner or the continuation tokens, and add a test. |
+| A model's helper function is missing from the assembled program | The helper's piece was classified as something to drop (an example call, a test). | Check `Chunk.head` for the piece and the caller's rules in `multipl_e.py`. |
+| `ValueError: unsupported language 'py'` | Python isn't handled here; it doesn't need to be (`humaneval.py` assembles Python). | Use one of `LANGUAGES`. |
+
+## Related files
+
+- `src\kumaru\eval\benchmarks\multipl_e.py`: the only caller ([`multipl_e.md`](multipl_e.md)).
+- `scripts\check_graders.py`: replays MultiPL-E's graded completions, which exercises this module ([`check_graders.py.md`](../../../../scripts/check_graders.py.md)).
+- `tests\test_bench_codeparse.py`: pinned behaviour.

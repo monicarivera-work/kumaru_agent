@@ -9,29 +9,66 @@ wrong. docs/BENCHMARKS.md ("Are the graders right?") reports the results.
     pip install -e ".[bench]"
     python scripts\\check_graders.py              # gsm8k, mmlu_pro, humaneval (~1-2 min)
     python scripts\\check_graders.py gsm8k        # one benchmark
+    python scripts\\check_graders.py multipl_e_rs # one MultiPL-E language (~2-10 min)
+    python scripts\\check_graders.py multipl_e --workers 2 --sample 200
 
 Exit code 0 means every check passed. Datasets download on first use and are
 cached, exactly as for `kumaru bench run`. The HumanEval check runs the
 dataset's own reference solutions (not model output) in fresh Python processes.
 IFEval is validated against Google's reference implementation instead; see
 docs/BENCHMARKS.md.
+
+MultiPL-E has no reference solutions in most languages, so its check replays
+completions that MultiPL-E's authors already ran and graded with their own
+harness (nuprl/MultiPL-E-completions, pinned): StarCoder2-15B's, and for
+Python replit-code-v1-3b's, the newest run with Python in it. Kumaru grades
+each through `kumaru bench`'s own path (extraction, assembly, compile, run)
+and must reach the same verdict. A sample of `--sample` completions per
+language (default 200) is spread across problems: half passed, half failed in
+each way MultiPL-E saw (wrong answer, exception, compile error; at most 10
+timeouts, which cost 15 s each). `multipl_e` checks every language whose
+toolchain is installed and reports the others as skipped. These are
+model-written programs and run on this machine, as `kumaru bench run` runs
+them without `--sandbox docker`. `--workers` (default: KUMARU_CODE_WORKERS or
+half the cores, at most 4) caps how many programs run at once.
+
+`--sandbox docker` runs every check's programs (HumanEval's too) in the
+sandbox image instead, which is how to check that image before trusting it:
+
+    python scripts\\check_graders.py humaneval multipl_e --sandbox docker
 """
 
 from __future__ import annotations
 
-import os
+import argparse
+import random
+import re
 import sys
 import textwrap
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Any
 
-from kumaru.eval.benchmarks.base import load_hf_rows
+from kumaru.eval.benchmarks import codeexec, multipl_e
+from kumaru.eval.benchmarks.base import BenchItem, Grade, load_hf_rows
+from kumaru.eval.benchmarks.codeexec import ToolchainMissing
 from kumaru.eval.benchmarks.extract import parse_number
 from kumaru.eval.benchmarks.gsm8k import GSM8K
 from kumaru.eval.benchmarks.humaneval import HumanEval, assemble_program, run_program
 from kumaru.eval.benchmarks.mmlu_pro import LETTERS, MMLUPro, clean_options
+
+
+@dataclass
+class Settings:
+    workers: int = field(default_factory=codeexec.max_workers)
+    sample: int = 200
+    sandbox: str = "none"
+
+
+SETTINGS = Settings()
 
 
 def show(name: str, total: int, passed: Counter[str]) -> None:
@@ -122,6 +159,8 @@ def check_humaneval() -> list[str]:
     """All reference solutions pass in three formats; a wrong one fails; a hang
     times out; and the guard stops `os.remove`."""
     bench = HumanEval()
+    bench.configure(sandbox=SETTINGS.sandbox)
+    bench.preflight()
     items = bench.load()
     rows = load_hf_rows("openai/openai_humaneval", None, "test")
     jobs = []
@@ -133,7 +172,7 @@ def check_humaneval() -> list[str]:
             (item, "unindented body", f"```python\n{textwrap.dedent(solution)}\n```"),
         ]
     start = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
+    with ThreadPoolExecutor(max_workers=SETTINGS.workers) as pool:
         grades = list(pool.map(lambda job: bench.grade(job[0], job[2]), jobs))
     elapsed = time.perf_counter() - start
 
@@ -154,12 +193,14 @@ def check_humaneval() -> list[str]:
     hang = assemble_program(
         row["prompt"], "    while True:\n        pass\n", row["test"], row["entry_point"]
     )
-    status, _ = run_program(hang, 3.0)
+    status, _ = run_program(hang, 3.0, sandbox=SETTINGS.sandbox)
     if status != "timeout":
         safety.append(f"an infinite loop ended with {status!r}, not a timeout")
     delete = "    import os\n    os.remove('x')\n    return True\n"
     status, stderr = run_program(
-        assemble_program(row["prompt"], delete, row["test"], row["entry_point"]), 15.0
+        assemble_program(row["prompt"], delete, row["test"], row["entry_point"]),
+        15.0,
+        sandbox=SETTINGS.sandbox,
     )
     # Only "NoneType" proves the guard fired: a real os.remove of a missing file also fails.
     if status != "failed" or "NoneType" not in stderr:
@@ -171,18 +212,214 @@ def check_humaneval() -> list[str]:
     return problems + safety
 
 
+COMPLETIONS = "nuprl/MultiPL-E-completions"
+COMPLETIONS_REVISION = "64df476ca24ffa9e4205827bbdaaa8761df75a71"
+# Whose graded completions each language replays (the parquet's folder name).
+COMPLETION_RUNS = {
+    lang: ("replit_code.0.2.reworded" if lang == "py" else "starcoder2_15b.0.2.reworded")
+    for lang in multipl_e.LANGUAGES
+}
+TIMEOUT_CAP = 10
+# MultiPL-E's time limits (its evaluation/src/eval_<lang>.py). Kumaru allows
+# 15 s to run and 120 s to compile, so a correct answer that timed out there
+# (slow, or graded on a busy machine) can pass here.
+MULTIPL_E_LIMITS = {
+    "py": "15 s",
+    "js": "5 s",
+    "ts": "15 s per step",
+    "cs": "5 s, on Mono",
+    "java": "15 s per step",
+    "cpp": "15 s per step",
+    "go": "30 s to build and run",
+    "rs": "15 s to compile, 5 s to run",
+}
+
+
+@dataclass(frozen=True)
+class Replay:
+    """One completion MultiPL-E graded, and its verdict."""
+
+    problem: str
+    index: int
+    status: str
+    completion: str
+    stderr: str
+
+
+def completion_rows(lang: str) -> list[dict[str, Any]]:
+    import pyarrow.parquet as pq
+    from huggingface_hub import hf_hub_download
+
+    path = hf_hub_download(
+        COMPLETIONS,
+        f"humaneval.{lang}.{COMPLETION_RUNS[lang]}/test-00000-of-00001.parquet",
+        repo_type="dataset",
+        revision=COMPLETIONS_REVISION,
+    )
+    rows = pq.read_table(path).to_pylist()
+    return [row for row in rows if int(row["problem"].split("_")[1]) not in multipl_e.EXCLUDED]
+
+
+def quotas(counts: dict[str, int], size: int) -> dict[str, int]:
+    """How many of each MultiPL-E status to replay: half passes, the rest shared
+    evenly between the ways of failing, timeouts capped."""
+    limits = {status: min(n, TIMEOUT_CAP) if status == "Timeout" else n for status, n in counts.items()}
+    share = {status: 0 for status in limits}
+    share["OK"] = min(limits.get("OK", 0), size // 2)
+    budget = size - share["OK"]
+    active = sorted(status for status in limits if status != "OK" and limits[status])
+    while budget and active:
+        each = max(1, budget // len(active))
+        for status in list(active):
+            take = min(each, limits[status] - share[status], budget)
+            share[status] += take
+            budget -= take
+            if share[status] == limits[status]:
+                active.remove(status)
+            if not budget:
+                break
+    # Too few failures: more passes instead.
+    share["OK"] += min(budget, limits.get("OK", 0) - share["OK"])
+    return {status: n for status, n in share.items() if n}
+
+
+def sample_replays(rows: list[dict[str, Any]], size: int, seed: int = 0) -> list[Replay]:
+    """`size` graded completions, per `quotas`, each status's spread across problems."""
+    rng = random.Random(seed)
+    by_status: dict[str, dict[str, list[Replay]]] = defaultdict(lambda: defaultdict(list))
+    for row in rows:
+        verdicts = zip(row["completions"], row["statuses"], row["stderrs"], strict=True)
+        for index, (completion, status, stderr) in enumerate(verdicts):
+            replay = Replay(row["problem"], index, status, completion, stderr or "")
+            by_status[status][row["problem"]].append(replay)
+    counts = {status: sum(map(len, problems.values())) for status, problems in by_status.items()}
+    picked: list[Replay] = []
+    for status, quota in sorted(quotas(counts, size).items()):
+        pools = [rng.sample(pool, len(pool)) for _, pool in sorted(by_status[status].items())]
+        rng.shuffle(pools)
+        taken = 0
+        # One per problem per round, so no problem dominates.
+        while taken < quota:
+            for pool in pools:
+                if pool and taken < quota:
+                    picked.append(pool.pop())
+                    taken += 1
+    return picked
+
+
+def expected_difference(bench: multipl_e.MultiPLE, replay: Replay, grade: Grade) -> str:
+    """Why Kumaru may rightly disagree with MultiPL-E here ("" if it may not)."""
+    strip_only = bench.lang == "ts" and bench.toolchain.checker == "strip"
+    if strip_only and replay.status == "SyntaxError" and grade.correct:
+        return "tsc rejected it; without tsc, types are not checked"
+    if replay.status == "Timeout" and grade.correct:
+        limit = MULTIPL_E_LIMITS[bench.lang]
+        return f"timed out under MultiPL-E's limit ({limit}), passes within Kumaru's"
+    newer_go = re.search(r"undefined: (?:min|max|clear)\b", replay.stderr)
+    if bench.lang == "go" and replay.status == "SyntaxError" and grade.correct and newer_go:
+        return "uses min, max or clear, built into Go since 1.21 (MultiPL-E's Go is older)"
+    return ""
+
+
+def check_multipl_e_language(lang: str, *, skip_missing: bool = False) -> list[str]:
+    """MultiPL-E's own verdicts on a sample of graded completions are reproduced."""
+    bench = multipl_e.BY_LANGUAGE[lang]()
+    bench.configure(sandbox=SETTINGS.sandbox)
+    try:
+        bench.preflight()
+    except ToolchainMissing as exc:
+        print(f"{bench.name}: not checked, {exc.why}")
+        return [] if skip_missing else [f"{bench.name}: {exc.why}"]
+    rows = completion_rows(lang)
+    replays = sample_replays(rows, SETTINGS.sample)
+    items = {
+        row["problem"]: BenchItem(
+            id=row["problem"],
+            prompt="",
+            meta={
+                "prompt": row["prompt"],
+                "tests": row["tests"],
+                "entry_point": (
+                    row["problem"].split("_", 2)[2]
+                    if lang == "py"
+                    else multipl_e.entry_point(row["prompt"], lang)
+                ),
+            },
+        )
+        for row in rows
+    }
+    start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=SETTINGS.workers) as pool:
+        grades = list(pool.map(lambda r: bench.grade(items[r.problem], r.completion), replays))
+    elapsed = time.perf_counter() - start
+
+    problems: list[str] = []
+    table: dict[str, Counter[str]] = defaultdict(Counter)
+    explained: Counter[str] = Counter()
+    agree = 0
+    for replay, grade in zip(replays, grades, strict=True):
+        table[replay.status][grade.extracted] += 1
+        if grade.correct == (replay.status == "OK"):
+            agree += 1
+            continue
+        reason = expected_difference(bench, replay, grade)
+        if reason:
+            explained[reason] += 1
+            continue
+        ours = str(grade.detail.get("stderr", "")).strip().splitlines()[-3:]
+        theirs = replay.stderr.strip().splitlines()[-3:]
+        problems.append(
+            f"{bench.name} {replay.problem} #{replay.index}: MultiPL-E {replay.status}, "
+            f"Kumaru {grade.extracted} ({grade.detail.get('mode')})\n"
+            f"      Kumaru: {' | '.join(ours)[-300:]}\n      MultiPL-E: {' | '.join(theirs)[-300:]}"
+        )
+    run = COMPLETION_RUNS[lang].split(".")[0]
+    print(
+        f"{bench.name} ({bench.toolchain.version}): {agree}/{len(replays)} of MultiPL-E's verdicts "
+        f"on {run} completions reproduced, {len({r.problem for r in replays})} problems, {elapsed:.0f}s"
+    )
+    for status, kinds in sorted(table.items()):
+        print(f"  MultiPL-E {status:<15} {sum(kinds.values()):>4}: Kumaru {dict(sorted(kinds.items()))}")
+    for reason, n in explained.items():
+        print(f"  {n} expected difference(s): {reason}")
+    return problems
+
+
+def check_multipl_e() -> list[str]:
+    """Every MultiPL-E language whose toolchain is installed."""
+    return [p for lang in multipl_e.LANGUAGES for p in check_multipl_e_language(lang, skip_missing=True)]
+
+
 CHECKS: dict[str, Callable[[], list[str]]] = {
     "gsm8k": check_gsm8k,
     "mmlu_pro": check_mmlu_pro,
     "humaneval": check_humaneval,
+    "multipl_e": check_multipl_e,
+    **{
+        cls.name: (lambda lang=lang: check_multipl_e_language(lang))
+        for lang, cls in multipl_e.BY_LANGUAGE.items()
+    },
 }
+# What runs when no benchmark is named: the quick checks, which need no compilers.
+DEFAULT_CHECKS = ("gsm8k", "mmlu_pro", "humaneval")
 
 
 def main(argv: list[str]) -> int:
     if any(arg in ("-h", "--help") for arg in argv):
         print(__doc__)
         return 0
-    names = argv or list(CHECKS)
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("names", nargs="*")
+    parser.add_argument("--workers", type=int, default=SETTINGS.workers)
+    parser.add_argument("--sample", type=int, default=SETTINGS.sample)
+    parser.add_argument("--sandbox", choices=codeexec.SANDBOXES, default=SETTINGS.sandbox)
+    args = parser.parse_args(argv)
+    if args.workers < 1 or args.sample < 1:
+        print("--workers and --sample must be at least 1")
+        return 2
+    SETTINGS.workers, SETTINGS.sample, SETTINGS.sandbox = args.workers, args.sample, args.sandbox
+    codeexec.set_max_workers(SETTINGS.workers)
+    names = args.names or list(DEFAULT_CHECKS)
     unknown = [name for name in names if name not in CHECKS]
     if unknown:
         print(f"unknown benchmark(s): {', '.join(unknown)}; choose from {', '.join(CHECKS)}")

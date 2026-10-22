@@ -1,0 +1,720 @@
+"""Protect MultiPL-E: reading answers, assembling programs, toolchains and grading.
+
+What must never regress: a chat model's whole answer (imports, helpers, its own
+main and tests) and a completion model's bare function body must both become
+one program in which the hidden tests run and print the marker last; a
+toolchain that grades a known answer wrongly must never score a model; and the
+grader self-check (scripts/check_graders.py) may excuse only the differences
+from MultiPL-E it documents.
+
+Assembly is checked as text, so most of these tests need no compiler. The
+canary and chat-answer tests compile and run programs for real: Python,
+JavaScript and TypeScript whenever they are installed, the compiled languages
+only with KUMARU_TEST_TOOLCHAINS=1 (seconds per program).
+"""
+
+import dataclasses
+import importlib.util
+import os
+import re
+import sys
+from collections import Counter
+from pathlib import Path
+from types import ModuleType
+
+import pytest
+
+from kumaru.core.errors import KumaruError
+from kumaru.core.registry import suite_members
+from kumaru.eval.benchmarks import codeexec, multipl_e, runner
+from kumaru.eval.benchmarks.base import BenchItem, Grade
+from kumaru.eval.benchmarks.codeexec import Outcome, Step, ToolchainMissing
+from kumaru.eval.benchmarks.multipl_e import Toolchain, assemble, extract_answer
+
+MARK = "kumaru-finished-0123456789abcdef"
+CANARIES = multipl_e._CANARIES
+COMPILED = {"cs", "java", "cpp", "go", "rs"}
+REPO = Path(__file__).resolve().parents[1]
+
+
+def canary_item(lang: str) -> BenchItem:
+    canary = CANARIES[lang]
+    entry = "add" if lang == "py" else multipl_e.entry_point(canary.prompt, lang)
+    return BenchItem(id="canary", prompt="", meta={"prompt": canary.prompt, "tests": canary.tests, "entry_point": entry})
+
+
+def finished(status: str, stage: str = "run", returncode: int | None = 0, stdout: str = "", stderr: str = ""):
+    """A stand-in for `codeexec.run` that ends every program the same way."""
+
+    def run(program, *, sandbox="none"):
+        return Outcome(status, stage, returncode, stdout, stderr, 0.1)
+
+    return run
+
+
+def installed(lang: str) -> multipl_e.MultiPLE:
+    """The benchmark for `lang` with this machine's toolchain, or skip."""
+    if lang in COMPILED and os.environ.get("KUMARU_TEST_TOOLCHAINS") != "1":
+        pytest.skip("compiles; set KUMARU_TEST_TOOLCHAINS=1 to run")
+    bench = multipl_e.BY_LANGUAGE[lang]()
+    try:
+        bench.toolchain  # noqa: B018 - finds the toolchain
+    except ToolchainMissing as exc:
+        pytest.skip(f"not installed: {exc}")
+    return bench
+
+
+# What chat models answer: a whole program with imports, helpers, a demo main
+# and sometimes tests of their own, between explanations.
+CHAT_ANSWERS = {
+    "py": '''\
+import math
+
+
+def _same(x: int) -> int:
+    return x
+
+
+def add(x: int, y: int) -> int:
+    """Add two numbers."""
+    return _same(x) + y
+
+
+if __name__ == "__main__":
+    print(add(2, 3))
+''',
+    "js": """\
+const assert = require('assert');
+
+/** Add two numbers. */
+function add(x, y) {
+  return same(x) + y;
+}
+
+const same = (x) => x;
+
+console.log(add(2, 3)); // 5
+module.exports = { add };
+""",
+    "ts": """\
+import { strict as assert } from 'node:assert';
+
+type Num = number;
+
+export function add(x: Num, y: Num): Num {
+  return x + y;
+}
+
+assert.equal(add(2, 3), 5);
+""",
+    "cs": """\
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+public class Solution
+{
+    public static long Add(long x, long y)
+    {
+        return new List<long> { x, y }.Sum();
+    }
+
+    public static void Main(string[] args)
+    {
+        Console.WriteLine(Add(2, 3));
+    }
+}
+""",
+    "java": """\
+import java.util.*;
+import java.util.stream.*;
+
+public class Main {
+    public static long add(long x, long y) {
+        return LongStream.of(x, y).sum();
+    }
+
+    public static void main(String[] args) {
+        System.out.println(add(2, 3));
+    }
+}
+""",
+    "cpp": """\
+#include <iostream>
+#include <numeric>
+#include <vector>
+using namespace std;
+
+long add(long x, long y) {
+    vector<long> both = {x, y};
+    return accumulate(both.begin(), both.end(), 0L);
+}
+
+int main() {
+    cout << add(2, 3) << endl;
+    return 0;
+}
+""",
+    "go": """\
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+func add(x int, y int) int {
+	return x + y
+}
+
+func describe(x int) string {
+	return strings.TrimSpace(fmt.Sprint(" ", x))
+}
+
+func main() {
+	fmt.Println(describe(add(2, 3)))
+}
+""",
+    "rs": """\
+use std::collections::HashMap;
+
+/// Adds two numbers.
+pub fn add(x: isize, y: isize) -> isize {
+    let mut memo: HashMap<(isize, isize), isize> = HashMap::new();
+    *memo.entry((x, y)).or_insert(x + y)
+}
+
+fn main() {
+    println!("{}", add(2, 3));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adds() {
+        assert_eq!(add(2, 3), 5);
+    }
+}
+""",
+}
+
+
+def chat_reply(lang: str) -> str:
+    fence = multipl_e.LANGUAGES[lang].fence
+    return f"Here is a solution.\n\n```{fence}\n{CHAT_ANSWERS[lang]}```\n\nIt runs in constant time.\n"
+
+
+# -- reading the answer -----------------------------------------------------------
+
+
+def test_the_block_that_defines_the_function_wins_over_a_longer_one() -> None:
+    reply = (
+        "Here it is:\n```rust\nfn add(x: isize, y: isize) -> isize {\n    x + y\n}\n```\n"
+        'And how to call it:\n```rust\nfn main() {\n    println!("{}", add(2, 3));\n'
+        '    println!("{}", add(-1, 1));\n    println!("{}", add(40, 2));\n}\n```\n'
+    )
+    assert extract_answer(reply, "rs", "add") == "fn add(x: isize, y: isize) -> isize {\n    x + y\n}\n"
+
+
+@pytest.mark.parametrize("tag", ["rust", "rust,ignore", "{rust}", "Rust", "rs", ""])
+def test_a_block_in_the_language_or_untagged_beats_a_longer_one_in_another(tag: str) -> None:
+    reply = f"```text\n{'It adds its two arguments. ' * 5}\n```\nSo:\n```{tag}\n    x + y\n```\n"
+    assert extract_answer(reply, "rs", "add") == "    x + y\n"
+
+
+def test_an_answer_cut_off_inside_its_block_keeps_what_was_written() -> None:
+    reply = "Sure:\n```go\nfunc add(x int, y int) int {\n\treturn x +"
+    assert extract_answer(reply, "go", "add") == "func add(x int, y int) int {\n\treturn x +"
+
+
+def test_a_reply_without_fences_is_used_whole() -> None:
+    assert extract_answer("  return x + y;\n}\n", "js", "add") == "  return x + y;\n}\n"
+
+
+def test_a_block_tagged_with_another_language_is_used_when_it_is_the_only_one() -> None:
+    reply = "```c\nlong add(long x, long y) {\n    return x + y;\n}\n```"
+    assert extract_answer(reply, "cpp", "add") == "long add(long x, long y) {\n    return x + y;\n}\n"
+
+
+def test_a_whole_function_is_used_as_written_and_a_body_completes_the_prompt() -> None:
+    cpp = CANARIES["cpp"]
+    whole = extract_answer(cpp.good, "cpp", "add")
+    assert multipl_e.solution_source(cpp.prompt, whole, "add", "cpp") == (whole, "whole")
+    # MultiPL-E's completions stop before the closing brace: it is added.
+    assert multipl_e.solution_source(cpp.prompt, cpp.bad, "add", "cpp") == (
+        cpp.prompt + cpp.bad + "}\n",
+        "continuation",
+    )
+    js = CANARIES["js"]  # this body closes the function itself
+    assert multipl_e.solution_source(js.prompt, js.bad, "add", "js") == (js.prompt + js.bad, "continuation")
+
+
+@pytest.mark.parametrize("lang", sorted(set(multipl_e.LANGUAGES) - {"py"}))
+def test_the_entry_point_is_read_from_each_languages_prompt(lang: str) -> None:
+    assert multipl_e.entry_point(CANARIES[lang].prompt, lang) == ("Add" if lang == "cs" else "add")
+
+
+def test_the_entry_point_is_the_last_function_a_prompt_opens() -> None:
+    prompt = "function helper(x){\n  return x;\n}\n// >>> sort_array([])\nfunction sort_array(arr){\n"
+    assert multipl_e.entry_point(prompt, "js") == "sort_array"
+    with pytest.raises(KumaruError, match="Could not find the function a Go prompt asks for"):
+        multipl_e.entry_point("package x_test\n\n// func add(x int) int\n", "go")
+
+
+# -- assembling one program ---------------------------------------------------------
+
+
+def test_javascript_keeps_declarations_and_turns_imports_into_requires() -> None:
+    js = CANARIES["js"]
+    source = (
+        '"use strict";\n'
+        'import fs from "fs";\n'
+        "const { strict: assert } = require('node:assert');\n"
+        "export function add(x, y) {\n  return helper(x) + y;\n}\n"
+        "const helper = (x) => x;\n"
+        "console.log(add(2, 3));\n"
+        "module.exports = { add };\n"
+    )
+    program = assemble("js", js.prompt, source, js.tests, MARK, "add")
+    assert program.startswith('const fs = require("fs");\n')
+    for kept in ("const { strict: assert } = require('node:assert');", "function add(x, y) {", "const helper"):
+        assert kept in program
+    for dropped in ("use strict", "export", "console.log", "module.exports"):
+        assert dropped not in program
+    # The tests run in a block of their own, so their `const assert` cannot clash.
+    assert program.endswith(f"test();\n}}\nrequire('node:fs').writeSync(1, '\\n{MARK}\\n');\n")
+
+
+def test_typescript_drops_type_only_imports_and_keeps_type_declarations() -> None:
+    ts = CANARIES["ts"]
+    source = (
+        "import type { Pair } from './pair';\n"
+        "import { readFileSync as read } from 'node:fs';\n"
+        "interface Point { x: number; y: number }\n"
+        "type Num = number;\n"
+        "enum Sign { Minus = -1, Plus = 1 }\n"
+        "function add(x: Num, y: Num): Num {\n  return x + y;\n}\n"
+    )
+    program = assemble("ts", ts.prompt, source, ts.tests, MARK, "add")
+    # `declare` is only allowed at the top level: once, before everything.
+    assert program.startswith("declare var require: any;\n")
+    assert program.count("declare var require") == 1
+    assert "import" not in program
+    assert "const { readFileSync: read } = require('node:fs');" in program
+    for kept in ("interface Point", "type Num = number;", "enum Sign", "function add(x: Num"):
+        assert kept in program
+
+
+def test_go_keeps_only_the_imports_that_the_code_and_tests_still_use() -> None:
+    go = CANARIES["go"]
+    source = (
+        'package main\n\nimport (\n\t"fmt"\n\t"math"\n\t"strings"\n)\n\n'
+        'func add(x int, y int) int {\n\treturn len(strings.Repeat("a", x)) + y\n}\n\n'
+        "func main() {\n\tfmt.Println(add(2, 3))\n}\n\n"
+        "func TestAdd(t *testing.T) {\n\tif math.Abs(float64(add(2, 3))) != 5 {\n\t\tt.Fail()\n\t}\n}\n"
+    )
+    program = assemble("go", go.prompt, source, go.tests, MARK, "add")
+    # math served only the model's own test, which gives way to the hidden one;
+    # Go refuses to compile an unused import.
+    assert program.startswith('package add_test\n\nimport (\n\t"testing"\n\t"fmt"\n\t"strings"\n)\n\n')
+    assert '"math"' not in program and "package main" not in program
+    assert program.count("func TestAdd(") == 1
+    assert program.count("func main()") == 1  # an ordinary function outside package main
+    assert program.endswith(f'\tfmt.Print("\\n{MARK}\\n")\n}}\n')
+
+
+def test_rust_keeps_the_models_items_and_drops_its_main_and_its_tests() -> None:
+    rs = CANARIES["rs"]
+    prompt = "use std::cmp::Ordering;\n\n" + rs.prompt
+    source = (
+        "#![allow(dead_code)]\n"
+        "use std::collections::HashMap;\n\n"
+        "fn add(x: isize, y: isize) -> isize {\n    let _seen: HashMap<isize, isize> = HashMap::new();\n"
+        "    x + y\n}\n\n"
+        'fn main() {\n    println!("{}", add(2, 3));\n}\n\n'
+        "#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    fn it_adds() {\n"
+        "        assert_eq!(add(2, 3), 5);\n    }\n}\n"
+    )
+    program = assemble("rs", prompt, source, rs.tests, MARK, "add")
+    order = ["#![allow(dead_code)]", "use std::cmp::Ordering;", "use std::collections::HashMap;", "fn add("]
+    assert [program.index(text) for text in order] == sorted(program.index(text) for text in order)
+    assert program.count("fn main()") == 1
+    assert "mod tests" not in program and "it_adds" not in program
+    assert program.rindex("assert_eq!") < program.index(MARK)
+    # A `use` the model writes itself replaces the prompt's.
+    own = source.replace("use std::collections", "use std::cmp::Ordering;\nuse std::collections")
+    assert assemble("rs", prompt, own, rs.tests, MARK, "add").count("use std::cmp::Ordering;") == 1
+
+
+def test_cpp_turns_the_tests_asserts_back_on_after_the_models_ndebug() -> None:
+    cpp = CANARIES["cpp"]
+    source = (
+        "#define NDEBUG\n#include <vector>\n\n"
+        "long add(long x, long y) {\n    return x + y;\n}\n\n"
+        "int main() {\n    return add(2, 3) == 5 ? 0 : 1;\n}\n"
+    )
+    program = assemble("cpp", cpp.prompt, source, cpp.tests, MARK, "add")
+    assert program.startswith("#include<assert.h>\n#include<bits/stdc++.h>\n")
+    assert program.count("int main()") == 1
+    assert program.index("#define NDEBUG") < program.index("#undef assert") < program.index("int main()")
+    assert program.rindex("assert(") < program.index(f'std::fputs("\\n{MARK}\\n", stdout);')
+
+
+def test_java_renames_the_answers_class_and_keeps_its_helpers() -> None:
+    java = CANARIES["java"]
+    source = (
+        "import java.util.*;\nimport java.util.function.Function;\n\n"
+        "public class Helper {\n    static long twice(long x) { return 2 * x; }\n}\n\n"
+        "public class Solution {\n"
+        "    static long half(long x) { return x / 2; }\n"
+        "    public static long add(long x, long y) {\n        return Solution.half(Helper.twice(x)) + y;\n    }\n"
+        "    public static void main(String[] args) {\n        System.out.println(add(2, 3));\n    }\n"
+        "}\n"
+    )
+    program = assemble("java", java.prompt, source, java.tests, MARK, "add")
+    assert program.count("import java.util.*;") == 1
+    assert "import java.util.function.Function;" in program
+    # Problem.java may declare one public type, Problem; references follow the rename.
+    assert "public class" not in program and "Solution" not in program
+    assert "Problem.half(Helper.twice(x))" in program
+    assert program.index("class Helper") < program.index("class Problem {")
+    assert program.count("void main(") == 1
+    assert "KUMARU_NO_ASSERT" in program  # exits 97 if the JVM runs without -ea
+    assert program.rindex("assert(") < program.index(MARK)
+
+
+def test_csharp_unwraps_the_namespace_and_keeps_a_static_class_static() -> None:
+    cs = CANARIES["cs"]
+    source = (
+        "using System;\nusing System.Linq;\n\n"
+        "namespace Answers {\n"
+        "    public static class Solution {\n"
+        "        public static long Add(long x, long y) {\n            return new[] { x, y }.Sum();\n        }\n"
+        "        public static void Main(string[] args) {\n            Console.WriteLine(Add(2, 3));\n        }\n"
+        "    }\n"
+        "}\n"
+    )
+    program = assemble("cs", cs.prompt, source, cs.tests, MARK, "Add")
+    assert program.startswith(multipl_e._CS_DIRECTIVES)
+    assert "namespace" not in program and "Solution" not in program
+    assert "static class Problem {" in program
+    assert program.count("void Main(") == 1
+    assert program.count("using System;") == program.count("using System.Linq;") == 1
+    assert "KUMARU_NO_DEBUG" in program  # exits 97 if built without DEBUG
+    assert program.rindex("Debug.Assert(") < program.index(MARK)
+    assert program.endswith(multipl_e._CS_LISTENER + "\n")
+
+
+@pytest.mark.parametrize(
+    ("statement", "expected"),
+    [
+        ("import fs from 'fs';", "const fs = require('fs');"),
+        ('import * as path from "node:path";', 'const path = require("node:path");'),
+        ("import { a, b as c } from './m';", "const { a, b: c } = require('./m');"),
+        ("import d, { e } from 'm';", "const d = require('m');\nconst { e } = require('m');"),
+        ("import './side-effect';", "require('./side-effect');"),
+        ("import type { T } from './types';", ""),
+        ("import { type T, u } from './m';", "const { u } = require('./m');"),
+        ("import x = require('x');", "const x = require('x');"),
+        ("import data from './data.json' with { type: 'json' };", "const data = require('./data.json');"),
+    ],
+)
+def test_an_import_becomes_the_require_it_stands_for(statement: str, expected: str) -> None:
+    assert multipl_e._js_import(statement) == expected
+
+
+@pytest.mark.parametrize(
+    ("path", "name"), [("fmt", "fmt"), ("math/rand", "rand"), ("math/rand/v2", "rand"), ("example.com/m/v3", "m")]
+)
+def test_a_go_import_binds_its_last_path_element(path: str, name: str) -> None:
+    assert multipl_e._go_name(path) == name
+
+
+@pytest.mark.parametrize(
+    ("use", "names"),
+    [
+        ("use std::collections::{HashMap, HashSet as Set, self};", {"HashMap", "Set"}),
+        ("pub use std::cmp::Ordering;", {"Ordering"}),
+        ("use std::io::*;", set()),
+    ],
+)
+def test_a_rust_use_binds_its_last_names(use: str, names: set[str]) -> None:
+    assert multipl_e._rust_use_names(use) == names
+
+
+# -- the problems ---------------------------------------------------------------------
+
+
+def hf_rows(dataset: str) -> list[dict[str, str]]:
+    """All 164 problems, in reverse, in the given dataset's format."""
+    if dataset == multipl_e.HUMANEVAL:
+        return [
+            {"task_id": f"HumanEval/{n}", "entry_point": f"f{n}", "prompt": f"def f{n}():\n", "test": "\n"}
+            for n in reversed(range(164))
+        ]
+    return [
+        {"name": f"HumanEval_{n}_f{n}", "prompt": f"fn f{n}() -> isize {{\n", "tests": "}\n\nfn main() {}\n"}
+        for n in reversed(range(164))
+    ]
+
+
+def test_every_language_asks_the_same_152_problems_in_the_same_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def load(dataset, config, split, revision=None):
+        calls.append((dataset, config, split, revision))
+        return hf_rows(dataset)
+
+    monkeypatch.setattr(multipl_e, "load_hf_rows", load)
+    rust, python = multipl_e.MultiPLERust().load(), multipl_e.MultiPLEPython().load()
+
+    assert calls == [
+        (multipl_e.DATASET, "humaneval-rs", "test", multipl_e.DATASET_REVISION),
+        (multipl_e.HUMANEVAL, None, "test", multipl_e.HUMANEVAL_REVISION),
+    ]
+    assert len(rust) == multipl_e.N_PROBLEMS == 152
+    assert [item.id for item in rust] == [item.id for item in python]
+    assert [item.meta["problem"] for item in rust] == sorted(set(range(164)) - multipl_e.EXCLUDED)
+    first = rust[0]
+    assert (first.id, first.meta["entry_point"], first.meta["language"]) == ("HumanEval_0_f0", "f0", "rs")
+    assert first.prompt.startswith("Complete the following Rust function.")
+    assert first.prompt.endswith("```rust\nfn f0() -> isize {\n```")
+
+
+def test_a_changed_dataset_is_an_error_not_a_smaller_benchmark(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(multipl_e, "load_hf_rows", lambda *args, **kwargs: hf_rows(multipl_e.DATASET)[:100])
+    with pytest.raises(KumaruError, match="Expected 152 Rust problems, found 93"):
+        multipl_e.MultiPLERust().load()
+
+
+def test_the_suite_runs_every_language_python_first() -> None:
+    names = tuple(f"multipl_e_{lang}" for lang in multipl_e.LANGUAGES)
+    assert names[0] == "multipl_e_py"
+    assert suite_members("multipl_e") == suite_members("multipl-e") == names
+    assert suite_members("humaneval") == ()
+    assert isinstance(runner.resolve_benchmark("multipl-e-rs"), multipl_e.MultiPLERust)
+
+
+# -- toolchains -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("lang", list(multipl_e.LANGUAGES))
+def test_each_installed_toolchain_passes_its_canary(lang: str) -> None:
+    bench = installed(lang)
+    bench.preflight()  # a right answer passes, a wrong one fails
+    assert bench.fingerprint_extra()["toolchain"] == bench.toolchain.version
+
+
+@pytest.mark.parametrize("lang", list(multipl_e.LANGUAGES))
+def test_a_typical_chat_answer_compiles_and_passes(lang: str) -> None:
+    # Its imports, helpers, main and tests must each fit in or give way.
+    bench = installed(lang)
+    grade = bench.grade(canary_item(lang), chat_reply(lang))
+    assert grade.correct, grade.detail
+    assert grade.detail["mode"] == "whole"
+
+
+@pytest.mark.parametrize(
+    ("status", "verdict"), [("passed", "a wrong answer passed"), ("compile_error", "a right answer failed")]
+)
+def test_a_toolchain_that_grades_its_canary_wrongly_is_not_used(
+    monkeypatch: pytest.MonkeyPatch, status: str, verdict: str
+) -> None:
+    monkeypatch.setitem(multipl_e._DETECT, "rs", lambda: Toolchain({"rustc": "rustc"}, "rustc 0.0-fake"))
+    monkeypatch.setattr(codeexec, "run", finished(status, stderr="error: linker `cc` not found"))
+    expected = f"The Rust toolchain (rustc 0.0-fake) failed Kumaru's self-test: {verdict} ({status})"
+    with pytest.raises(ToolchainMissing, match=re.escape(expected)):
+        multipl_e.MultiPLERust().preflight()
+
+
+def test_the_sandbox_runs_the_images_own_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(codeexec, "check_docker", lambda image=None: "sha256:0123456789abcdef0123")
+    go = multipl_e.MultiPLEGo()
+    go.configure(sandbox="docker")
+    assert go.fingerprint_extra() == {"sandbox": "docker", "toolchain": "docker image 0123456789ab"}
+    program = multipl_e.build_program("go", go.toolchain, "", MARK, local=False)
+    # The image's prebuilt standard library, copied where the read-only root lets builds write.
+    assert program.steps[0] == Step(("cp", "-R", "/opt/gocache", "/tmp/gocache"), 60.0, "setup")
+    assert program.env["GOCACHE"] == "/tmp/gocache"
+    assert [step.argv for step in program.steps[1:]] == [
+        ("go", "test", "-c", "-o", "prog.test", "program_test.go"),
+        ("./prog.test",),
+    ]
+    java = multipl_e.MultiPLEJava()
+    java.configure(sandbox="docker")
+    run = multipl_e.build_program("java", java.toolchain, "", MARK, local=False).steps[-1]
+    assert run.argv[run.argv.index("-cp") + 1] == ".:/opt/kumaru/javatuples-1.2.jar"
+    ts = multipl_e.MultiPLETypeScript()
+    ts.configure(sandbox="docker")
+    assert ts.fingerprint_extra()["checker"] == "tsc"  # the image type-checks
+
+
+def test_changing_the_sandbox_finds_the_toolchain_again_and_a_typo_is_refused() -> None:
+    bench = multipl_e.MultiPLERust()
+    fake = Toolchain({"rustc": "rustc"}, "fake")
+    bench._toolchain = fake
+    bench.configure(sandbox="none")
+    assert bench._toolchain is fake
+    bench.configure(sandbox="docker")
+    assert bench._toolchain is None
+    with pytest.raises(KumaruError, match="Unknown sandbox 'vm'"):
+        bench.configure(sandbox="vm")
+
+
+def test_each_language_compiles_and_runs_with_its_settings() -> None:
+    def build(lang: str, **toolchain) -> codeexec.Program:
+        return multipl_e.build_program(lang, Toolchain(**{"version": "fake", **toolchain}), "", MARK, local=False)
+
+    compile_s, run_s = multipl_e.COMPILE_TIMEOUT_S, multipl_e.RUN_TIMEOUT_S
+    assert build("py", tools={"python": "python3"}).steps == (
+        Step(("python3", "-I", "-X", "utf8", "program.py"), run_s),
+    )
+    rs = build("rs", tools={"rustc": "rustc"}, flags=("-C", "x"))
+    assert rs.steps == (
+        Step(("rustc", "--edition", "2021", "-A", "warnings", "-C", "x", "-o", "program", "program.rs"), compile_s, "compile"),
+        Step(("./program",), run_s),
+    )
+    cpp = build("cpp", tools={"cxx": "g++"}, flags=("-static",))
+    assert cpp.steps[0].argv == ("g++", "-std=c++17", "-static", "-o", "program", "program.cpp")
+    java = build("java", tools={"javac": "javac", "java": "java"}, jar="jt.jar")
+    assert list(java.files) == ["Problem.java"]
+    assert java.steps[1].argv[:2] == ("java", "-ea")  # Java ignores `assert` without -ea
+    assert java.steps[1].argv[-3:] == ("-cp", ".:jt.jar", "Problem")
+    cs = build("cs", tools={"dotnet": "dotnet"})
+    assert cs.steps[0].argv[:5] == ("dotnet", "build", "program.cs", "-c", "Debug")  # Debug.Assert needs DEBUG
+    assert cs.steps[1].argv == ("dotnet", "out/program.dll")
+    strip = build("ts", tools={"node": "node"}, checker="strip")
+    assert list(strip.files) == ["program.cts"]
+    assert strip.steps == (
+        Step(("node", "--experimental-transform-types", "--disable-warning=ExperimentalWarning", "program.cts"), run_s),
+    )
+    tsc = build("ts", tools={"node": "node", "tsc": "tsc.js"}, checker="tsc")
+    assert [step.argv for step in tsc.steps] == [
+        ("node", "tsc.js", "--target", "esnext", "program.ts"),
+        ("node", "program.js"),
+    ]
+
+
+# -- grading ----------------------------------------------------------------------------
+
+
+def test_a_failed_program_reports_its_stage_its_exit_code_and_the_end_of_its_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs = []
+
+    def run(program, *, sandbox="none"):
+        programs.append(program)
+        return Outcome("failed", "run", 101, "", "x" * 2000 + "thread 'main' panicked", 0.4)
+
+    monkeypatch.setattr(codeexec, "run", run)
+    bench = multipl_e.MultiPLERust()
+    bench._toolchain = Toolchain({"rustc": "rustc"}, "fake")
+    grade = bench.grade(canary_item("rs"), CANARIES["rs"].good)
+
+    assert (grade.correct, grade.extracted) == (False, "failed")
+    detail = dict(grade.detail)
+    stderr = detail.pop("stderr")
+    assert detail == {"status": "failed", "stage": "run", "mode": "whole", "exit_code": 101}
+    assert len(stderr) == multipl_e.STDERR_TAIL and stderr.endswith("panicked")
+    [program] = programs
+    assert program.marker in program.files["program.rs"]
+
+
+def test_a_compiler_that_reports_errors_on_stdout_is_still_heard(monkeypatch: pytest.MonkeyPatch) -> None:
+    error = "program.cs(3,5): error CS1002: ; expected"
+    monkeypatch.setattr(codeexec, "run", finished("compile_error", "compile", 1, stdout=error))
+    bench = multipl_e.MultiPLECSharp()
+    bench._toolchain = Toolchain({"dotnet": "dotnet"}, "fake")
+    grade = bench.grade(canary_item("cs"), CANARIES["cs"].bad)
+    assert grade.extracted == "compile_error"
+    assert (grade.detail["mode"], grade.detail["stderr"]) == ("continuation", error)
+
+
+def test_a_passing_program_records_only_how_it_passed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(codeexec, "run", finished("passed"))
+    bench = multipl_e.MultiPLEGo()
+    bench._toolchain = Toolchain({"go": "go"}, "fake")
+    grade = bench.grade(canary_item("go"), CANARIES["go"].good)
+    assert grade.correct
+    assert grade.detail == {"status": "passed", "stage": "run", "mode": "whole"}
+
+
+# -- the grader self-check (scripts/check_graders.py) -----------------------------------
+
+
+@pytest.fixture
+def check_graders(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    spec = importlib.util.spec_from_file_location("check_graders", REPO / "scripts" / "check_graders.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "check_graders", module)  # dataclasses look it up
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_replayed_sample_is_half_passes_and_shares_the_rest_between_failures(check_graders) -> None:
+    counts = {"OK": 500, "Exception": 300, "SyntaxError": 40, "Timeout": 90}
+    # Timeouts cost 15 s each, so at most 10.
+    assert check_graders.quotas(counts, 200) == {"OK": 100, "Exception": 50, "SyntaxError": 40, "Timeout": 10}
+    # Too few failures: more passes instead.
+    assert check_graders.quotas({"OK": 500, "Exception": 20}, 200) == {"OK": 180, "Exception": 20}
+
+
+def test_each_verdict_in_the_sample_is_spread_across_problems(check_graders) -> None:
+    rows = [
+        {
+            "problem": f"HumanEval_{p}_f",
+            "completions": [f"{p}-{i}" for i in range(10)],
+            "statuses": ["OK"] * 8 + ["Exception", "Timeout"],
+            "stderrs": [None] * 10,
+        }
+        for p in range(6)
+    ]
+    sample = check_graders.sample_replays(rows, 20)
+    assert sample == check_graders.sample_replays(rows, 20)  # the same every time
+    assert Counter(replay.status for replay in sample) == {"OK": 10, "Exception": 5, "Timeout": 5}
+    passes = Counter(replay.problem for replay in sample if replay.status == "OK")
+    assert len(passes) == 6 and max(passes.values()) == 2
+    assert all(replay.completion == f"{replay.problem.split('_')[1]}-{replay.index}" for replay in sample)
+    assert {replay.stderr for replay in sample} == {""}
+
+
+def test_only_documented_differences_from_multipl_e_are_excused(check_graders) -> None:
+    replay = check_graders.Replay
+    passed, failed = Grade(correct=True, extracted="passed"), Grade(correct=False, extracted="failed")
+    go, rs, js = multipl_e.MultiPLEGo(), multipl_e.MultiPLERust(), multipl_e.MultiPLEJavaScript()
+    excuse = check_graders.expected_difference
+
+    newer_go = replay("HumanEval_114_f", 0, "SyntaxError", "", "./x_test.go:9:9: undefined: min")
+    assert "built into Go since 1.21" in excuse(go, newer_go, passed)
+    assert excuse(rs, newer_go, passed) == ""
+    timeout = replay("HumanEval_0_f", 0, "Timeout", "", "")
+    assert "MultiPL-E's limit (15 s to compile, 5 s to run)" in excuse(rs, timeout, passed)
+    assert excuse(rs, timeout, failed) == ""
+    assert excuse(js, replay("HumanEval_0_f", 0, "Exception", "", ""), passed) == ""
+
+    type_error = replay("HumanEval_0_f", 0, "SyntaxError", "", "error TS2322")
+    ts = multipl_e.MultiPLETypeScript()
+    ts._toolchain = Toolchain({"node": "node"}, "fake", checker="strip")
+    assert "types are not checked" in excuse(ts, type_error, passed)
+    ts._toolchain = dataclasses.replace(ts._toolchain, checker="tsc")
+    assert excuse(ts, type_error, passed) == ""
+
+
+def test_the_self_check_grades_in_the_sandbox_it_is_given(
+    check_graders, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def no_docker(image=None):
+        raise ToolchainMissing("no docker here")
+
+    monkeypatch.setattr(codeexec, "check_docker", no_docker)
+    monkeypatch.setattr(check_graders, "SETTINGS", check_graders.Settings(workers=1, sandbox="docker"))
+    # Rust is checked in the image, not on this machine, so no Docker means not checked.
+    assert check_graders.check_multipl_e_language("rs", skip_missing=True) == []
+    assert "multipl_e_rs: not checked, no docker here" in capsys.readouterr().out
+    assert check_graders.check_multipl_e_language("rs") == ["multipl_e_rs: no docker here"]
+    with pytest.raises(SystemExit):
+        check_graders.main(["multipl_e_rs", "--sandbox", "vm"])

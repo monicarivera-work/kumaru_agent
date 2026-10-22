@@ -12,7 +12,7 @@ Each benchmark has to find the model's final answer in free text before it can g
 
 - `extract_final_number` — GSM8K and the golden `numeric` grader.
 - `extract_choice` — MMLU-Pro and the golden `choice` grader.
-- `extract_code` — HumanEval.
+- `extract_code` — HumanEval, and MultiPL-E's Python (its other languages use `multipl_e.extract_answer`).
 - `last_boxed` — used by the two above.
 
 It also holds the number helpers `parse_number` and `numbers_equal`.
@@ -66,7 +66,7 @@ A model can be right and still be scored wrong because the grader misread `1{,}0
 3. Prefers blocks that `def` / `async def` the entry point, and picks the longest of those. Otherwise it picks the longest candidate.
 4. With no closed fence, it returns the code after an opening fence (the output was cut off). Otherwise it returns the whole text.
 
-There is no `method` for code. HumanEval records the test outcome (`passed`, `failed`, `timeout`) in `detail["status"]` instead, and the report prints those counts on a `tests:` line rather than `answers found by:`.
+There is no `method` for code. HumanEval and MultiPL-E record the test outcome (`passed`, `failed`, `timeout`, and for MultiPL-E `compile_error`) in `detail["status"]` instead, and the report prints those counts on a `tests:` line rather than `answers found by:`.
 
 ## Public API
 
@@ -122,7 +122,7 @@ How to read it:
 - **Many `last_number` or `last_letter`** means the model ignored the format. Open `items.jsonl` and check the `extracted` field against `output`.
 - **`error N`** counts questions whose request or grader raised an error. They are scored wrong, and a resume asks them again.
 - **`whole reply N`** counts rows whose grader judges the whole reply (golden's `contains`, `regex` and so on), which records no method. That is why golden's line adds up to its 27 questions, with only the `numeric` and `choice` rows under `answer_tag`.
-- **`tests:`** replaces `answers found by:` for HumanEval, whose records hold a test outcome instead of a method. IFEval records neither, so it prints no line unless questions failed (`answers found by: error 2, whole reply 98`).
+- **`tests:`** replaces `answers found by:` for HumanEval and MultiPL-E, whose records hold a test outcome instead of a method. IFEval records neither, so it prints no line unless questions failed (`answers found by: error 2, whole reply 98`).
 
 ### Find the answers a weak rule picked
 

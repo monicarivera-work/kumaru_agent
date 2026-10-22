@@ -23,6 +23,8 @@ Accuracy (%) on the same questions, same engine, same harness. In parentheses: t
 
 **What to use:** Qwen3.6 (`-c qwen36`) with Think off, the profile's default. It is the measured upgrade over the 7B, and in this run thinking bought no significant accuracy for 2.4 times the tokens. Think on is still worth trying on hard multi-step problems: chat does not cap thinking, so uncapped thinking is not yet measured. A rerun with a larger `--thinking-budget` would measure it.
 
+**Other programming languages:** HumanEval measures Python only. [§11](#11-programming-languages-multipl-e) adds MultiPL-E, the same problems in JavaScript, TypeScript, C#, Java, C++, Go and Rust, graded by running each language's unit tests. It has not been run on these models yet.
+
 The Think-on run was stopped after three benchmarks to free the GPU. To finish IFEval and HumanEval, run its original command again with `--out`; finished questions are skipped ([§9](#9-run-mechanics)):
 
 ```powershell
@@ -59,6 +61,7 @@ The first run of a public benchmark downloads its dataset (cached afterwards). `
 | `mmlu_pro` | Knowledge plus reasoning across 14 subjects, up to 10 options (Wang et al., 2024) | 12,032 | ~11% | letter correct |
 | `ifeval` | Following verifiable instructions: "no commas", "exactly 3 bullet points" (Zhou et al., 2023) | 541 prompts, 834 instructions, 25 types | - | prompt-level strict |
 | `humaneval` | Writing a correct Python function from its docstring (Chen et al., 2021) | 164 | ~0% | pass@1: hidden unit tests pass |
+| `multipl_e` | HumanEval's problems in 8 languages: Python, JavaScript, TypeScript, C#, Java, C++, Go, Rust (Cassano et al., 2023) | 152 per language | ~0% | pass@1, per language |
 
 What each is good for:
 
@@ -66,6 +69,7 @@ What each is good for:
 - **GSM8K** is nearly saturated by modern models (both score in the 90s). It is a smoke test: a big drop means something broke. Small models still have room: the Qwen2.5 report gives about 73% for Qwen2.5-1.5B, so [distillation](TRAINING.md#part-3--distillation) is measured on it.
 - **IFEval** is the closest proxy for "does what I asked". It reports four scores: *prompt-level* (every instruction in the prompt followed) and *instruction-level* (share of individual instructions followed), each *strict* (checked literally) or *loose* (forgiving markdown asterisks or a "Sure, here it is" first line). The headline is prompt-level strict, the strictest and the one model cards usually quote.
 - **HumanEval** runs the model's code against unit tests, so it measures working code, not plausible-looking code. It is opt-in (`--allow-code-exec`, [§7](#7-caveats-read-before-quoting-these-numbers)).
+- **MultiPL-E** asks the same problems in every language, so a language that scores well below Python is a weak language, not a harder test. `multipl_e` is a suite of eight benchmarks, `multipl_e_py` to `multipl_e_rs`. Each needs its language's compiler or runtime; a language without one is skipped, not scored 0 ([§11](#11-programming-languages-multipl-e)).
 - **golden** is the only benchmark that cannot have leaked into a model's training data, and the only one that measures what *you* care about.
 
 `kumaru bench list` also shows **`gsm8k_train`**, GSM8K's 7,473 training problems. It is not a score: a teacher model answers it to make distillation data, and `kumaru distill` accepts only runs of training splits like it ([TRAINING.md Part 3](TRAINING.md#part-3--distillation)).
@@ -93,6 +97,7 @@ Everything was held fixed except the model, and in the third column, thinking:
 | MMLU-Pro | `The following is a multiple choice question about {subject}. Think step by step, then finish your answer with "The answer is (X)" where X is the letter of the correct option.` + question and options |
 | IFEval | The dataset prompt, unchanged |
 | HumanEval | ``Complete the following Python function. Return the complete function, including its signature and any imports it needs, in a single ```python code block.`` + the stub |
+| MultiPL-E | ``Complete the following {language} function. Keep its name and signature, and return the complete function, plus any helper functions or imports it needs, in a single ```{fence} code block. Do not include a main function, tests or example usage.`` + the stub in that language, fenced |
 
 The extractors accept the common ways models deviate (`**Answer:** $1,080`, `\boxed{C}`, a bare function body) and record which method found the answer; `report` shows the counts.
 
@@ -104,7 +109,7 @@ The extractors accept the common ways models deviate (`**Answer:** $1,080`, `\bo
 | Qwen3.6, Think off | 0.7 | 0.8 | 20 | 0 | 1.5 | 1.0 |
 | Qwen3.6, Think on | 1.0 | 0.95 | 20 | 0 | 1.5 | 1.0 |
 
-HumanEval turns both penalties off for every model, because code repeats tokens legitimately (indentation, names, brackets).
+HumanEval and MultiPL-E turn both penalties off for every model, because code repeats tokens legitimately (indentation, names, brackets).
 
 **The thinking budget** is enforced by llama-server. When a model has thought for 4,096 tokens, the server appends *"I have used my thinking budget, so I will now give my best final answer."* and makes it answer. Chat in the UI does not cap thinking (up to the profile's 32,768-token `max_tokens`); the benchmark cap exists to bound run time, so it understates what unlimited thinking can do on hard questions.
 
@@ -144,7 +149,8 @@ A benchmark score is only as trustworthy as its grader. One that misreads `$1,08
 | GSM8K | All 1,319 reference answers, each phrased 5 ways (the dataset's own solution, `Answer: N`, `**Answer:** $N,NNN`, `\boxed{N{,}NNN}`, `The answer is N.`), must grade correct; the reference answer + 1 must grade wrong | 6,595 / 6,595 correct; 1,319 / 1,319 wrong answers rejected (after the fix described below) |
 | MMLU-Pro | All 12,032 gold letters, each phrased 6 ways, must grade correct; a wrong letter must grade wrong; removing junk options must never move the gold one | 72,192 / 72,192 correct; no wrong letter accepted |
 | IFEval | Kumaru's implementation against Google's reference implementation, on the 541 GPT-4 responses published with the paper | Identical inputs 541/541; instruction verdicts agree 833/834; prompt-level strict 77.08 vs 76.89 and loose 79.67 vs 79.48 (Kumaru vs reference); word and sentence counts match on 2,253 texts |
-| HumanEval | All 164 reference solutions, in 3 forms (whole function, body only, unindented body), must pass; a wrong solution must fail; an infinite loop must time out; the guard must block `os.remove` | 492 / 492 pass (15 s on 8 cores); all three safety checks hold |
+| HumanEval | All 164 reference solutions, in 3 forms (whole function, body only, unindented body), must pass; a wrong solution must fail; an infinite loop must time out; the guard must block `os.remove` | 492 / 492 pass (69 s at `--workers 2`); all three safety checks hold |
+| MultiPL-E | The other languages have no reference solutions, so Kumaru re-grades answers that MultiPL-E's authors graded with their own harness. Up to 200 per language, spread over the problems: half that MultiPL-E passed, half that it failed, covering every kind of failure (wrong result, crash, compile error, timeout). Each must get MultiPL-E's verdict | Python, JavaScript, Java, C++ and Rust 200 / 200; C# 199 / 200; Go 198 / 200; TypeScript 195 / 200. All 8 disagreements are expected and explained in [§11.4](#114-are-its-graders-right) |
 
 The one IFEval disagreement is deliberate. For "the letter *x* should appear at least *n* times" where *x* is not a letter, the reference implementation silently substitutes a random letter; Kumaru counts the character that was actually asked for.
 
@@ -157,6 +163,8 @@ Reproduce the first, second and fourth rows with:
 ```powershell
 python scripts\check_graders.py        # exit code 0 = every check passed
 ```
+
+and the MultiPL-E row, once the languages' toolchains are installed ([§11.2](#112-run-it)), with `python scripts\check_graders.py multipl_e --workers 2`. It downloads about 12 MB of graded answers and takes about 40 minutes.
 
 The IFEval cross-check needs Google's reference code (`instruction_following_eval` in the `google-research` repository) in its own virtual environment: grade the GPT-4 responses published there (`data/input_response_data_gpt4_20231107_145030.jsonl`) with both implementations, then compare the verdicts instruction by instruction. The unit tests `tests/test_bench_extract.py`, `test_bench_graders.py` and `test_bench_ifeval.py` pin the edge cases found along the way.
 
@@ -208,10 +216,10 @@ Only 104 of the 427 answers came out identical word for word, and most of the re
 - **Subsets.** 100 questions per benchmark detect big jumps, not small ones ([§4](#4-reading-the-numbers)). Use `--full` for numbers you want to publish.
 - **Not comparable to model-card scores.** Publishers use their own prompts, few-shot examples, unquantized weights, larger budgets and sometimes several attempts per question; differences of several points are routine. Compare models *within* this harness.
 - **Quantization.** Both models are ~4-bit. That costs a little accuracy against the original weights, equally for both, and it is how you run them.
-- **Contamination.** GSM8K and HumanEval have been public since 2021 and MMLU-Pro since 2024; newer models may have seen them in training. Your golden set is immune; grow it.
+- **Contamination.** GSM8K and HumanEval have been public since 2021, MultiPL-E's translations of HumanEval since 2022 and MMLU-Pro since 2024; newer models may have seen them in training. Your golden set is immune; grow it.
 - **The thinking cap.** Think-on scores used a 4,096-token thinking budget to bound run time ([§3](#3-how-the-comparison-was-run)). It cut short 24 of the 100 MMLU-Pro answers, so it likely understates Think on. Chat thinks without that cap.
 - **One run per configuration**, with the run-to-run noise measured in [§6.2](#62-the-noise-floor-the-same-model-twice).
-- **HumanEval runs model-written code** in a fresh Python process with a 15 s limit, an empty temporary folder, a scrubbed environment and a guard that disables destructive `os`/`shutil`/`subprocess` calls. That stops accidents, not a determined adversary: it is not a sandbox. Evaluate models you do not trust in a container or VM.
+- **HumanEval and MultiPL-E run model-written code** on your machine, as you. Each program gets a fresh temporary folder, a scrubbed environment and time limits (HumanEval: 15 s; MultiPL-E: 120 s to compile, 15 s to run), and everything it started is killed when it ends. On Windows its memory is also capped (4 GB). HumanEval's Python also gets a guard that disables destructive `os`/`shutil`/`subprocess` calls. That stops accidents, not a determined adversary: it is not a sandbox. `--sandbox docker` runs each program in a throwaway container with no network, a read-only root and CPU, memory and process limits, but its image is not yet built or tested ([§11.3](#113-where-the-code-runs)). Until it is, evaluate models you do not trust in a container or VM.
 
 ## 8. Your own golden questions
 
@@ -235,7 +243,7 @@ The habit that compounds: **whenever Kumaru gets something wrong that it should 
 
 Every number in this document can be traced to individual answers.
 
-**Resuming.** A run that dies (crash, reboot, Ctrl+C) resumes with `-o <its folder>` and the same flags. Answered questions are skipped, and a line half-written by a hard kill is repaired. Resuming with different settings (model, decoding parameters, seed or prompt mode) is refused, so one folder never mixes two configurations.
+**Resuming.** A run that dies (crash, reboot, Ctrl+C) resumes with `-o <its folder>` and the same flags. Answered questions are skipped, and a line half-written by a hard kill is repaired. Resuming with different settings (model, decoding parameters, seed, prompt mode, sandbox or compiler version) is refused, so one folder never mixes two configurations.
 
 **Useful flags for `kumaru bench run`:**
 
@@ -250,7 +258,8 @@ Every number in this document can be traced to individual answers.
 | `--context 65536` | Shrink the context window (and the KV cache) to free VRAM |
 | `-j N` | Questions in flight (default: as many as the backend can batch) |
 | `--use-agent-prompt` | Include Kumaru's system prompt, as chat does |
-| `--allow-code-exec` | Required for `humaneval` |
+| `--allow-code-exec` | Required for `humaneval` and `multipl_e`: they run model-written code |
+| `--sandbox docker` | Run that code in a container without network instead of on your machine ([§11.3](#113-where-the-code-runs); the image is not yet tested) |
 | `-o <folder>` | Write to (or resume) this folder |
 
 **How long it takes** on the hardware above, for golden plus 100 questions of each public benchmark:
@@ -267,13 +276,123 @@ The 9-fold gap to the 7B has two factors. Qwen3.6 generated about a quarter as m
 
 Evaluation has to scale with the model, or you lose the ability to tell whether changes help. In rough order of value:
 
-1. **More questions.** `--full` runs all ~14,000 questions. It turns ±10-point intervals into about ±1 point on MMLU-Pro and GSM8K, ±4 on IFEval and ±6 on HumanEval (only 164 problems exist).
+1. **More questions.** `--full` runs all ~14,000 questions. It turns ±10-point intervals into about ±1 point on MMLU-Pro and GSM8K, ±4 on IFEval and ±6 on HumanEval (only 164 problems exist) and on each MultiPL-E language (152).
 2. **Harder benchmarks**, as the current ones saturate: GPQA-Diamond (graduate-level science), MATH-500 and AIME (competition mathematics), LiveCodeBench (code problems published after a model's training cutoff, so contamination-resistant), BFCL (function calling, once Kumaru has tools) and RULER (long-context retrieval and reasoning).
 3. **Open-ended quality.** Chat answers have no single right answer. The standard tool is a strong *LLM judge* comparing two answers pairwise, with positions swapped to cancel its bias toward the first one (Arena-Hard works this way).
 4. **Test-time compute.** pass@k and majority voting over k samples measure how much extra compute buys. Thinking budgets are the first instance of this; the scores in the TL;DR are the first data point.
 5. **A regression gate.** Run golden in CI on every change and fail the build if `compare` says the change made it worse.
 
 **Adding a benchmark** takes about 50 lines: subclass `Benchmark` in `src/kumaru/eval/benchmarks/` (implement `load()` and `grade()`; optionally `aggregate()` for extra metrics and `generation_overrides()`), then register it in `src/kumaru/core/registry.py` with `BENCHMARKS.register_lazy(...)`. A separate package can also register through the `kumaru.benchmarks` entry point without touching Kumaru. Start from [`docs/howto/src/kumaru/eval/benchmarks/base.md`](howto/src/kumaru/eval/benchmarks/base.md). The evaluation axis of scaling is in [SCALABILITY.md §7](SCALABILITY.md#7-evaluation-scale).
+
+## 11. Programming languages: MultiPL-E
+
+HumanEval asks for Python only. It cannot say how well the model writes JavaScript for a website, C# for a game or Rust for an app, or which of those languages it is weak in. MultiPL-E (Cassano et al., 2023) translated HumanEval's problems, docstrings and unit tests into other languages. Kumaru runs seven of them, chosen for building apps, websites and games, plus Python as the baseline:
+
+| Benchmark | Language | Needs | Checked here with |
+|---|---|---|---|
+| `multipl_e_py` | Python | nothing: the Python that runs Kumaru | Python 3.12.6 |
+| `multipl_e_js` | JavaScript | Node.js 18+ | Node.js 24.17.0 |
+| `multipl_e_ts` | TypeScript | Node.js 22.7+; `tsc` to check types | Node.js 24.17.0, without `tsc` |
+| `multipl_e_cs` | C# | the .NET 10 SDK | .NET SDK 10.0.301 |
+| `multipl_e_java` | Java | a JDK 17+ and `javatuples-1.2.jar` | Temurin JDK 21.0.12.1 |
+| `multipl_e_cpp` | C++ | g++ (the tests need GCC's standard library) | g++ 16.2.0 (WinLibs) |
+| `multipl_e_go` | Go | Go | Go 1.27.3 |
+| `multipl_e_rs` | Rust | `rustc` | rustc 1.99.1 |
+
+Where to get each: [`multipl_e.md`](howto/src/kumaru/eval/benchmarks/multipl_e.md#install-the-toolchains).
+
+### 11.1 What it measures
+
+- **The same problems in every language.** MultiPL-E has no translation of 12 of HumanEval's 164 problems in at least one of these languages, so every language gets the other 152, in the same order. With the same `--seed`, `-n 100` asks every language the same 100 problems. A language that scores well below Python is then a weak language, not a harder test.
+- **Working code.** Each answer is compiled and run against the translated unit tests, and scores only if every test passes (pass@1). A failure is recorded as `failed` (a test failed or the program crashed), `compile_error` or `timeout`, so `report` shows how a language goes wrong: `tests: passed 120, failed 20, compile_error 9, timeout 3`.
+- **`multipl_e_py` is not `humaneval`.** It asks the 152 shared problems with the same instruction as the other languages, which makes it their baseline. `humaneval` asks all 164 with its own instruction. Do not compare one's score with the other's.
+- **What it does not measure.** These are short, single-function problems that use only the standard library. Building an app, a website or a game also takes frameworks, many files, build tools, user interfaces and debugging, none of which MultiPL-E tests. A low score flags a language to be careful with. A high score shows the model writes correct code in that language, not that it can build a whole application in it.
+
+### 11.2 Run it
+
+```powershell
+kumaru bench run multipl_e -c qwen36 --no-think --allow-code-exec -n 100            # every language with a toolchain
+kumaru bench run multipl_e_rs multipl_e_go -c qwen36 --allow-code-exec --full       # chosen languages, all 152 problems
+kumaru bench report runs\bench\<run folder>
+```
+
+`multipl_e` (or `multipl-e`) expands to the eight benchmarks. Before the model loads, each language grades a known right and a known wrong answer with its toolchain. A language whose toolchain is missing, or fails that self-test, is skipped with how to fix it:
+
+```
+skipped multipl_e_rs: Rust needs rustc, which is not on PATH. Install Rust: https://rustup.rs
+```
+
+It is listed again under `not run:` when the run ends, and is never scored 0. A language named on its own (`multipl_e_rs`) stops the run with that message instead.
+
+Programs compile and run on the CPU, at most `KUMARU_CODE_WORKERS` at a time (default: half the cores, from 1 to 4). Lower it to leave room for a game, or if compiles start timing out.
+
+### 11.3 Where the code runs
+
+By default, on your machine: `--allow-code-exec` is your consent. Every program, HumanEval's included, goes through [`codeexec`](howto/src/kumaru/eval/benchmarks/codeexec.md):
+
+- a fresh temporary folder, deleted afterwards, and a scrubbed environment (no API keys);
+- 120 s to compile and 15 s to run. When a step ends or times out, everything it started is killed, not just its own process;
+- on Windows, a job object per step, which caps its memory at 4 GB (`KUMARU_CODE_MEMORY_MB`) and suppresses crash dialogs;
+- a random marker placed after the last test. A program passes only if it exits with 0 *and* prints the marker, so code that exits early cannot pass untested.
+
+That stops accidents, not adversaries: the program runs as you, can read your files and can reach the network.
+
+`--sandbox docker` runs each program in a throwaway container instead: no network, a read-only root, an unprivileged user without capabilities, 2 CPUs, 2 GB of memory and 512 processes. That is a real boundary. The image, built from [`docker/sandbox/Dockerfile`](howto/docker/sandbox/Dockerfile.md), carries every toolchain, because nothing can be downloaded inside it. The sandbox and the compiler versions are part of a run's fingerprint, so one run never mixes programs graded inside and outside it.
+
+**Status: the image is written but has not been built or tested**, because Docker was not set up on the machine this was developed on. Build it, check its graders, then use it:
+
+```powershell
+docker build -t kumaru-sandbox -f docker/sandbox/Dockerfile .
+python scripts\check_graders.py humaneval multipl_e --sandbox docker --workers 2
+kumaru bench run humaneval multipl_e -c qwen36 --no-think --allow-code-exec --sandbox docker
+```
+
+### 11.4 Are its graders right?
+
+Turning a chat model's reply into a program is where a code grader goes wrong. Models add imports, helper functions, a `main`, their own tests and example calls, and any of those can clash with the hidden tests. Each language's assembler keeps what the code needs and drops the rest ([`multipl_e.md`](howto/src/kumaru/eval/benchmarks/multipl_e.md#how-each-languages-program-is-assembled)); a mistake there fails working code.
+
+These languages have no reference solutions to check against. Instead, MultiPL-E's authors published answers they had graded with their own harness ([`nuprl/MultiPL-E-completions`](https://huggingface.co/datasets/nuprl/MultiPL-E-completions)): StarCoder2-15B's, and for Python replit-code-v1-3b's. `scripts\check_graders.py` replays up to 200 per language through `kumaru bench`'s own path (extraction, assembly, compile, run) and asks for MultiPL-E's verdict. The sample is spread over the problems. Half are answers MultiPL-E passed; the other half covers every way it saw them fail (a wrong result or a crash, a compile error, and up to 10 timeouts). Measured on Windows 11, with 2 programs at a time, on a CPU shared with a model:
+
+| Language | Same verdict as MultiPL-E | Problems | Toolchain | Time |
+|---|---|---|---|---|
+| Python | 200 / 200 | 104 | Python 3.12.6 | 48 s |
+| JavaScript | 200 / 200 | 129 | Node.js 24.17.0 | 109 s |
+| TypeScript | 195 / 200; the other 5 expected | 120 | Node.js 24.17.0, types stripped | 155 s |
+| C# | 199 / 200; the other one expected | 121 | .NET SDK 10.0.301 | 780 s |
+| Java | 200 / 200 | 132 | Temurin JDK 21.0.12.1, javatuples 1.2 | 208 s |
+| C++ | 200 / 200 | 126 | g++ 16.2.0 (WinLibs, MinGW-w64 UCRT) | 489 s |
+| Go | 198 / 200; the other 2 expected | 125 | Go 1.27.3 | 274 s |
+| Rust | 200 / 200 | 133 | rustc 1.99.1 | 186 s |
+
+All 8 disagreements are differences between toolchains, not grader errors:
+
+- **TypeScript, 5.** MultiPL-E checks types with `tsc`, which rejected these answers. Without `tsc`, Kumaru runs TypeScript with Node's built-in type stripping, which skips type checking, and their tests pass. With `tsc` installed, Kumaru checks types too; that path is unit-tested, but has not yet run against a real `tsc`.
+- **C#, 1.** An answer to `HumanEval_94` timed out under MultiPL-E's 5 s limit on Mono. On .NET 10 it takes about 4 s and passes.
+- **Go, 2.** An answer to `HumanEval_114` calls `min`, which has been built into Go since version 1.21; MultiPL-E's older Go rejected it. An answer to `HumanEval_136` timed out under MultiPL-E's 30 s limit, which covers building as well as running; here it builds and passes.
+
+Agreement compares verdicts, pass or fail. The kind of failure can differ without changing a verdict. Of the 10 C# timeouts sampled, for example, Kumaru reports 7 as plain failures: 4 programs stop at their first failed `Debug.Assert`, where Mono's carries on, and 3 runaway loops hit the 4 GB memory cap before the time limit.
+
+**What the check does not cover.** MultiPL-E's answers continue its prompt, as base models do, so they rarely bring the extras a chat model's answer does. How the assemblers handle those is covered by unit tests and by each language's self-test, not by this agreement. The check caught one assembler bug: Go's `[]interface{}` was taken for a block, which cut functions in two. Tests of whole answers caught two more: a JavaScript `import { … } from` was cut at its `}`, and a Java or C# `void main` was missed, which left two `main`s. All three are fixed and pinned by unit tests. Once a chat model has been run, read a few of each language's `compile_error`s in its `items.jsonl` before believing a low score: each keeps its `mode`, its `stage` and the compiler's output.
+
+**Deliberate differences from MultiPL-E's harness.**
+- Answers may be whole functions, as chat models write them, as well as continuations.
+- Time limits: 120 s to compile and 15 s to run, where MultiPL-E allows 5 to 30 s by language.
+- C# builds with .NET 10 instead of Mono.
+- Rust compiles as edition 2021 with warnings allowed, instead of 2015.
+- TypeScript is type-checked only when `tsc` is installed.
+- On Windows, C++ and Rust get the 8 MB stack Linux gives them, and C++ links statically.
+
+The full table is in [`multipl_e.md`](howto/src/kumaru/eval/benchmarks/multipl_e.md#differences-from-multipl-es-own-harness).
+
+### 11.5 Results
+
+Not measured yet: the first run waits for the GPU. With the settings of [§3](#3-how-the-comparison-was-run), it is:
+
+```powershell
+kumaru bench run multipl_e -c qwen36 --context 65536 --no-think -n 100 --allow-code-exec
+```
+
+Each language's score, beside `multipl_e_py`'s, goes here.
 
 ## Related files
 

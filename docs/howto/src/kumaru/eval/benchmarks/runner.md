@@ -34,8 +34,9 @@ Three properties make a benchmark number usable, and this module guarantees them
 1. **Resolve.** Each argument is either a registry name or a golden-set file. A path ending in `.jsonl`, or an existing file that isn't a registered name, becomes `GoldenSet(path)`.
    - The same benchmark given twice runs once, so `mmlu_pro mmlu-pro` runs once.
    - Two *different* benchmarks with one name are refused, because their results would share one folder. Golden sets `a\set.jsonl` and `b\set.jsonl` are both named `golden-set`, so `kumaru bench run a\set.jsonl b\set.jsonl` stops with `Two benchmarks share the name 'golden-set' (the second is b\set.jsonl), so their results would share one folder.` and the hint `Rename one of the files: a golden set is named after its file.` This happens before the model loads, so no run directory is created.
-   - A benchmark that executes code is refused without `--allow-code-exec`.
-   - Each benchmark's `preflight()` runs.
+   - A suite name expands to its members: `multipl_e` (alias `multipl-e`) is the eight `multipl_e_<lang>` benchmarks ([`registry.md`](../../core/registry.md)).
+   - A benchmark that executes code is refused without `--allow-code-exec`. The message names what you typed (a suite, or the benchmark), and says `on this machine` unless `--sandbox docker` is set.
+   - Each benchmark's `configure(sandbox=...)` runs, then its `preflight()`, which checks that grading can work: Docker and its image, a compiler. When a suite member can't (`ToolchainMissing`), it is skipped, not scored 0: the console prints `skipped <name>: <why>` (`exc.why`: the error's message, then its hint), `run.json` records it under `skipped`, and the run ends with `not run: <name>: <why>`. A benchmark named on its own raises the error instead, as does a suite with no member left.
 2. **Load and sample** every benchmark's questions (`select_items`, see [`base.md`](base.md#what--n--limit-picks-select_items)). This happens before the model loads, so a typo or missing package fails in seconds.
 3. **Build the `ChatAgent`, then load the backend once** (`loading <model>...`). Building the agent first means a bad knowledge pack or tool name also fails before the model loads. Resolve decoding with `ChatAgent.resolve_params(thinking=, thinking_budget=, temperature=)`. This is exactly how `kumaru chat` decodes: `generation` < `thinking_mode` (only when thinking is on) < flags.
 4. **Name the run** (`default_label`, below). The directory is `--out`, or else `<repo>\runs\bench\<YYYYmmdd-HHMMSS>-<label>`. The default is anchored at the repo root, not the current directory.
@@ -82,7 +83,7 @@ runs\bench\20261010-114917-qwen25-7b-gguf-default\
 |---|---|
 | `n`, `n_planned`, `complete` | Answered (including failed) / sampled questions. `complete` means `n == n_planned`. |
 | `accuracy`, `ci95` | `n_correct / n` with a Wilson 95% interval. Errors count as wrong. |
-| `metrics`, `by_group`, `extraction` | `aggregate()` output (e.g. IFEval's four scores), accuracy per group, and the counts behind the report's `answers found by:` or `tests:` line. `extraction` counts `error` for a failed question, else `detail["method"]`, else `detail["status"]` (HumanEval's `passed`/`failed`/`timeout`). Whole-reply graders (`contains`, `regex`, IFEval) add nothing; the report shows the remainder as `whole reply`. |
+| `metrics`, `by_group`, `extraction` | `aggregate()` output (e.g. IFEval's four scores), accuracy per group, and the counts behind the report's `answers found by:` or `tests:` line. `extraction` counts `error` for a failed question, else `detail["method"]`, else `detail["status"]` (the code benchmarks' `passed`/`failed`/`timeout`/`compile_error`). Whole-reply graders (`contains`, `regex`, IFEval) add nothing; the report shows the remainder as `whole reply`. |
 | `n_errors`, `n_truncated` | Failed questions, and answers that hit the token budget (`finish_reason == "length"`). |
 | `mean_completion_tokens`, `median_latency_ms` | Over error-free answers only. |
 | `wall_seconds`, `items_per_minute` | Accumulated over all sessions of the run. |
@@ -153,9 +154,10 @@ The progress line shows the value in use: `acc 92.0%  j=3`.
   - the benchmark name, backend, `backend.model`, `model_path`, `adapter_path`;
   - the resolved decoding parameters except `seed` and `max_tokens` (so thinking, thinking budget, temperature, top-p/k, min-p, penalties);
   - `--max-tokens`, `--seed`;
-  - with `--use-agent-prompt`, the agent settings that shape the prepended prompt: `system_prompt`, `enabled_tools`, `max_history_tokens` and `memory_policy`. Without the flag this entry is empty, so runs without it keep the fingerprints and keys of older runs, which still resume. A run saved with the flag before these settings joined the fingerprint is refused; start it afresh.
+  - with `--use-agent-prompt`, the agent settings that shape the prepended prompt: `system_prompt`, `enabled_tools`, `max_history_tokens` and `memory_policy`. Without the flag this entry is empty, so runs without it keep the fingerprints and keys of older runs, which still resume. A run saved with the flag before these settings joined the fingerprint is refused; start it afresh;
+  - the benchmark's `fingerprint_extra()`, only when it returns something: HumanEval adds the sandbox and image only under `--sandbox docker`; MultiPL-E always adds the sandbox and the toolchain's version (e.g. `node v24.17.0`), plus `tsc` when TypeScript is type-checked. A benchmark that adds nothing keeps its old fingerprint.
 
-  A mismatch refuses the run: `<run>\<bench> holds results from different settings (model, decoding parameters, seed or prompt mode).`
+  A mismatch refuses the run: `<run>\<bench> holds results from different settings (model, decoding parameters, seed, prompt mode, sandbox or compiler version).`
 
   `-n`, `-j`, `--context`, `--label`, `backend.max_batch_size` and the dataset contents are **not** in the fingerprint. A bf16 run with batching and one without can therefore share a directory, although a few greedy answers may differ through rounding ([`transformers_backend.md`](../../backends/transformers_backend.md)).
 - **Settings, not code.** The fingerprint does not cover Kumaru's code. After changing a grader, a resume keeps every saved verdict from the old grader. After changing a prompt template, every key changes, so a resume re-asks every question into the old directory. In both cases start a new run directory instead of resuming an old one.
@@ -180,6 +182,7 @@ The progress line shows the value in use: `acc 92.0%  j=3`.
 | `command` | `sys.argv`, verbatim. |
 | `settings` | The `BenchSettings` (limit, seed, concurrency, thinking, budgets, flags, label, out_dir). |
 | `params` | The resolved base decoding parameters, before per-benchmark overrides and budgets. |
+| `skipped` | Suite members that didn't run, each with the reason (usually a missing compiler). `{}` when none. |
 | `backend` | `BackendInfo`, including `extra` (for llama-server: engine build, slots, model file, log file, base URL, pid). |
 | `environment` | Python, platform, machine, and `gpus` from `nvidia-smi` (name, total/used memory, driver) when available. |
 | `config` | The full resolved `KumaruConfig`, with secrets redacted. |
@@ -201,8 +204,8 @@ Runs made before this fix (e.g. `runs\bench\20261010-104148-qwen25-7b-gguf-defau
 | Name | Signature | What it's for |
 |---|---|---|
 | `run_benchmarks` | `async run_benchmarks(cfg: KumaruConfig, specs: Sequence[str], settings: BenchSettings, *, profile: str \| None = None, console: Console \| None = None, show_progress: bool = True) -> tuple[Path, list[BenchSummary]]` | Run and return `(results_dir, summaries)`. `profile` only feeds the label. |
-| `BenchRunner` | `BenchRunner(cfg, settings, *, profile=None, console=None, show_progress=True)`; `async run(specs) -> list[BenchSummary]`; `.out_dir` | The class behind `run_benchmarks`. |
-| `BenchSettings` | `limit=100, seed=1234, concurrency=None (≥1), thinking=None, thinking_budget=None (≥0), max_tokens=None (1..131072), temperature=None (0..2), use_agent_prompt=False, allow_code_exec=False, label=None, out_dir=None` | How to run. `None` defers to the profile or computed default. Stored in `run.json`. |
+| `BenchRunner` | `BenchRunner(cfg, settings, *, profile=None, console=None, show_progress=True)`; `async run(specs) -> list[BenchSummary]`; `.out_dir`; `.skipped` | The class behind `run_benchmarks`. `skipped` maps each skipped suite member to the reason. |
+| `BenchSettings` | `limit=100, seed=1234, concurrency=None (≥1), thinking=None, thinking_budget=None (≥0), max_tokens=None (1..131072), temperature=None (0..2), use_agent_prompt=False, allow_code_exec=False, sandbox="none" ("none" or "docker"), label=None, out_dir=None` | How to run. `None` defers to the profile or computed default. Stored in `run.json`. |
 | `ItemRecord` / `BenchSummary` / `Comparison` | pydantic models | The on-disk shapes above, and one comparison row. |
 | `compare_runs` | `compare_runs(baseline: Path, candidate: Path, *, resamples: int = 10_000) -> list[Comparison]` | Paired comparison on every shared benchmark, Holm-adjusted. |
 | `verdict` | `verdict(c: Comparison) -> str` | The verdict column (rules below). |
@@ -216,7 +219,7 @@ Runs made before this fix (e.g. `runs\bench\20261010-104148-qwen25-7b-gguf-defau
 | `read_summary` | `read_summary(path: Path) -> BenchSummary` | Parse one `summary.json`, or raise `ConfigError`. |
 | `summarize` | `summarize(bench, items, records, header, *, wall_seconds: float) -> BenchSummary` | Records → summary. |
 | `resolve_benchmark` | `resolve_benchmark(spec: str) -> Benchmark` | Name or golden-file path → instance. |
-| `list_benchmarks` | `list_benchmarks() -> list[dict[str, Any]]` | Rows for `bench list`: name, description, source, code_exec. |
+| `list_benchmarks` | `list_benchmarks() -> list[dict[str, Any]]` | Rows for `bench list`: name, description, source, code_exec. Each suite adds a row with source `suite` and the description `Runs <members>; skips any whose compiler or runtime is missing.` |
 | `default_label` | `default_label(model_id: str, profile: str \| None, params: GenerationParams) -> str` | See above. |
 | `model_name` | `model_name(model_id: str) -> str` | The file or repo name in a model path or id (the table above). Used by `default_label` when no profile is given. |
 | `default_concurrency` | `default_concurrency(cfg, backend, per_request_tokens: int, params: GenerationParams \| None = None) -> int` | See above. `params` decides whether a `transformers` run is greedy. |
@@ -225,7 +228,7 @@ Runs made before this fix (e.g. `runs\bench\20261010-104148-qwen25-7b-gguf-defau
 | `record_key` | `record_key(fingerprint: str, messages: Sequence[Message], params: GenerationParams) -> str` | The 16-hex-character resume key. |
 | `items_digest` | `items_digest(items: Sequence[BenchItem]) -> str` | `items_sha256`. |
 | `git_commit`, `environment` | `() -> str \| None`, `() -> dict` | Provenance. |
-| Constants | `DEFAULT_OUT = REPO_ROOT / "runs" / "bench"`, `MAX_CONSECUTIVE_ERRORS = 5`, `TEST_OUTCOMES = frozenset({"passed", "failed", "timeout"})`, `PROMPT_MARGIN_TOKENS = 256`, `MAX_OUTPUT_TOKENS = 131_072` | `TEST_OUTCOMES` are the `extraction` keys that turn the report line into `tests:`. |
+| Constants | `DEFAULT_OUT = REPO_ROOT / "runs" / "bench"`, `MAX_CONSECUTIVE_ERRORS = 5`, `TEST_OUTCOMES = frozenset({"passed", "failed", "timeout", "compile_error"})`, `PROMPT_MARGIN_TOKENS = 256`, `MAX_OUTPUT_TOKENS = 131_072` | `TEST_OUTCOMES` are the `extraction` keys that turn the report line into `tests:`. |
 
 ## How to use it
 
@@ -236,6 +239,7 @@ kumaru bench run golden gsm8k mmlu_pro ifeval -c qwen36                 # thinki
 kumaru bench run golden gsm8k -c qwen36 --think --thinking-budget 8192  # label qwen36-think8192
 kumaru bench run gsm8k -c qwen36 --full -t 0                            # all 1,319 problems, greedy
 kumaru bench run humaneval -c qwen36 --allow-code-exec                  # read humaneval.md first
+kumaru bench run multipl_e -c qwen36 --allow-code-exec                  # 8 languages; read multipl_e.md first
 kumaru bench run golden -c test                                         # offline plumbing check (echo)
 ```
 
@@ -255,7 +259,8 @@ Flags, verified against `kumaru bench run --help`:
 | `-j/--concurrency` | computed | Questions in flight. |
 | `--label` | `<profile or model>-<thinking mode>` | Run name, e.g. `qwen36-think4096`. See [Labels](#3-labels-default_label). |
 | `-o/--out` | `runs\bench\<YYYYmmdd-HHMMSS>-<label>` | The run's folder. Point at an earlier run to resume it. |
-| `--allow-code-exec` | off | Required for `humaneval`. |
+| `--allow-code-exec` | off | Required for benchmarks that run model-written code: `humaneval` and `multipl_e*`. |
+| `--sandbox` | `none` | Where those programs run: `none` (this machine, through `codeexec`'s limits) or `docker` (a throwaway container per program, no network; build the image first, see [`Dockerfile.md`](../../../../docker/sandbox/Dockerfile.md)). Any other value: `Unknown sandbox '<value>'.`, before the profile loads. |
 | `--use-agent-prompt` | off | Prepend Kumaru's system prompt via `ChatAgent.prepare`, as chat does. Off by default: public numbers are measured on the raw benchmark prompt. |
 
 When the run finishes it prints the summary table, then `saved to <dir>`, `details: kumaru bench report <dir>` and `compare: kumaru bench compare <baseline-run> <dir>`.
@@ -307,7 +312,7 @@ mmlu_pro  answers found by: answer_is 100
 - **`cut off`:** `n_truncated`.
 - **`tokens/answer`:** the mean over error-free answers.
 - **The lines under the table:** `metrics`, then `answers found by:` (or `tests:`), then `by group:`. Each is one line; long ones wrap on the console, which is why IFEval's `strict/<category>` scores start a new line above. Metric keys containing `/` (per-category scores) and `by group:` appear only in `report`, not after `run`. A non-zero `cut off` anywhere adds the token-limit warning.
-- **How each answer was read.** `answers found by:` counts extraction methods. A grader that judges the whole reply (`contains`, `regex` and so on) records no method, so those answers are counted as `whole reply`: golden's `answer_tag 14, whole reply 13` covers all 27. A code benchmark prints its test outcomes instead: `tests: passed 81, failed 19`, plus `timeout` or `error` when there are any. IFEval prints no such line unless questions failed (then `answers found by: error 2, whole reply 98`). See [`extract.md`](extract.md).
+- **How each answer was read.** `answers found by:` counts extraction methods. A grader that judges the whole reply (`contains`, `regex` and so on) records no method, so those answers are counted as `whole reply`: golden's `answer_tag 14, whole reply 13` covers all 27. A code benchmark prints its test outcomes instead: `tests: passed 81, failed 19`, plus `timeout`, `compile_error` (MultiPL-E's compiled languages) or `error` when there are any. IFEval prints no such line unless questions failed (then `answers found by: error 2, whole reply 98`). See [`extract.md`](extract.md).
 
 ### Compare two runs
 
@@ -387,7 +392,7 @@ render_comparisons(Console(), compare_runs(out_dir, out_dir))                # a
 
 ## How to extend it
 
-- **New benchmarks need no runner change.** Register them (see [`__init__.md`](__init__.md#add-a-benchmark-end-to-end)). `generation_overrides`, `aggregate`, `blocking_grader`, `needs_code_execution` and `BenchItem.max_tokens` are the hooks the runner honours.
+- **New benchmarks need no runner change.** Register them (see [`__init__.md`](__init__.md#add-a-benchmark-end-to-end)). `generation_overrides`, `aggregate`, `blocking_grader`, `needs_code_execution`, `configure`, `preflight`, `fingerprint_extra` and `BenchItem.max_tokens` are the hooks the runner honours ([`base.md`](base.md)).
 - **New summary fields:** add them to `BenchSummary` with a default, so old `summary.json` files still validate, and fill them in `summarize`.
 - **Anything that changes what is sent** must be in the record key (it is, through the messages and params) or in `_fingerprint`. If it should forbid mixing sessions, it must go in `_fingerprint`. The agent prompt shows why both exist: it states today's date, so the key hashes the bare question and the fingerprint holds the settings that shape the prompt.
 - **Changing `item_seed` breaks pairing with every existing run.** `test_item_seeds_are_pinned_because_old_runs_pair_on_them` exists to stop that.
@@ -401,8 +406,9 @@ render_comparisons(Console(), compare_runs(out_dir, out_dir))                # a
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `<run>\<bench> holds results from different settings (model, decoding parameters, seed or prompt mode).` | Resuming with other model, thinking, temperature, `--max-tokens`, `--seed` or `--use-agent-prompt` settings. With the flag, an edited persona (`system_prompt`, `enabled_tools`, `max_history_tokens`, `memory_policy`) counts too, as does a run saved before those settings joined the fingerprint. | Repeat the original flags (see `run.json` `command`), or omit `-o` for a fresh run (the hint says the same). |
-| `'humaneval' grades answers by running model-written code on this machine.` | Missing consent. | `--allow-code-exec`, after reading [`humaneval.md`](humaneval.md). |
+| `<run>\<bench> holds results from different settings (model, decoding parameters, seed, prompt mode, sandbox or compiler version).` | Resuming with other model, thinking, temperature, `--max-tokens`, `--seed`, `--use-agent-prompt` or `--sandbox` settings, or after a compiler or sandbox image changed (MultiPL-E records its toolchain's version). With the flag, an edited persona (`system_prompt`, `enabled_tools`, `max_history_tokens`, `memory_policy`) counts too, as does a run saved before those settings joined the fingerprint. | Repeat the original flags (see `run.json` `command`), or omit `-o` for a fresh run (the hint says the same). After a toolchain update, start a fresh run: its scores aren't comparable with the old ones anyway. |
+| `'humaneval' grades answers by running model-written code on this machine.` (or `'multipl_e' ...`) | Missing consent. | `--allow-code-exec`, after reading [`humaneval.md`](humaneval.md) and [`multipl_e.md`](multipl_e.md). |
+| `skipped multipl_e_rs: Rust needs rustc, which is not on PATH. Install Rust: https://rustup.rs` | A suite member's compiler or runtime is missing. The rest of the suite runs. | Install it (the second sentence says how) and resume with `-o <run dir>`, or ignore it. Named on its own, the same benchmark stops the run with that error. |
 | `Stopped <bench>: 5 questions failed in a row. Last error: ...` | Server down, out of memory, or wrong URL. Grader crashes count too; as the hint says, an error starting `grader failed` is the benchmark's own bug. | Backend: `kumaru chat -q hi` with the same flags, then re-run with `--out <dir>` to resume; failed questions are retried. Grader: fix it, then start a new run directory (the fingerprint covers settings, not code). |
 | `cut off` > 0 and the token-limit warning | The budget binds. Thinking runs are the usual case. | Thinking on: raise `--thinking-budget`. Off: `--max-tokens` above 8,192. Use a new directory if you change `--max-tokens` (it is in the fingerprint). |
 | `bench report` shows `0/100 (partial)` for a running or killed run | `summary.json` is written only when a benchmark starts and when it stops; after a hard kill it stays stale. | Use `bench compare` (reads `items.jsonl`), or resume: a resume rewrites `summary.json` from `items.jsonl` as it starts. |
