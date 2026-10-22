@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import functools
 import hashlib
+import itertools
 import os
 import re
 import sqlite3
@@ -36,7 +38,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from kumaru import __version__
 from kumaru.agent.doc_chunks import SUPPORTED_SUFFIXES, document_chunks
-from kumaru.agent.knowledge import Source, Topic, Version, describe_errors
+from kumaru.agent.knowledge import (
+    Source,
+    Topic,
+    Version,
+    describe_errors,
+    neutralize_control_tokens,
+)
 from kumaru.core.errors import ConfigError, KumaruError
 from kumaru.core.logging import get_logger
 from kumaru.core.types import Message, Role
@@ -78,6 +86,12 @@ MAX_QUERY_PHRASES = 8
 MAX_PHRASE_WORDS = 8
 MAX_TERM_CHARS = 64
 FOLLOW_UP_MESSAGES = 2
+# Every connection to an index gives up after this many SQLite steps, so a damaged or
+# crafted file cannot hang the agent. Searching 32 common words in the Python 3.12 docs
+# (8,800 passages) takes about 150,000; a search matching every passage of a full-size
+# index (1 GiB of documentation) would stay under 50 million.
+MAX_SQL_STEPS = 100_000_000
+_STEPS_PER_CHECK = 10_000
 
 # Windows file attributes and reparse tags (zero elsewhere).
 _HIDDEN = stat.FILE_ATTRIBUTE_HIDDEN | stat.FILE_ATTRIBUTE_SYSTEM
@@ -92,18 +106,22 @@ _REBUILD_HINT = (
     "or remove it from agent.knowledge_indexes."
 )
 
+_RANK = "bm25(2.0, 1.0)"  # a section-path match counts twice as much as a body match
 _SCHEMA = (
     "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     "CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, bytes INTEGER NOT NULL)",
     f"CREATE VIRTUAL TABLE chunks USING fts5(section, body, file_id UNINDEXED, tokenize='{TOKENIZER}')",
-    # Persistent ranking: a section-path match counts twice as much as a body match.
-    "INSERT INTO chunks (chunks, rank) VALUES ('rank', 'bm25(2.0, 1.0)')",
+    # For other readers, such as the sqlite3 shell; searches give the ranking themselves.
+    f"INSERT INTO chunks (chunks, rank) VALUES ('rank', '{_RANK}')",
 )
 
-# Rank on the full-text index alone, then read only the passages that won.
-_SEARCH = """
+# Rank on the full-text index alone, then read only the passages that won. The ranking
+# is part of the query, so a rank stored in a crafted index (such as one that turns
+# scores into text) is ignored.
+_SEARCH = f"""
 WITH hit AS (
-    SELECT rowid AS id, rank FROM chunks WHERE chunks MATCH ? ORDER BY rank, rowid LIMIT ?
+    SELECT rowid AS id, rank FROM chunks
+    WHERE chunks MATCH ? AND rank MATCH '{_RANK}' ORDER BY rank, rowid LIMIT ?
 )
 SELECT hit.id, files.path, chunks.section, chunks.body, hit.rank
 FROM hit
@@ -111,6 +129,7 @@ JOIN chunks ON chunks.rowid = hit.id
 JOIN files ON files.id = chunks.file_id
 ORDER BY hit.rank, hit.id
 """
+_SCHEMA_ROWS = "SELECT type, name, tbl_name, sql FROM sqlite_master"
 
 
 class IndexLabel(BaseModel):
@@ -155,7 +174,8 @@ class BuildReport:
 
 @dataclass
 class _Scan:
-    files: list[tuple[str, str]] = field(default_factory=list)  # (relative path, OS path)
+    # (relative path, OS path, (device, file ID) when listed)
+    files: list[tuple[str, str, tuple[int, int]]] = field(default_factory=list)
     skipped: list[Skipped] = field(default_factory=list)
     other_types: Counter[str] = field(default_factory=Counter)
     entries: int = 0
@@ -201,12 +221,12 @@ def _add_file(scan: _Scan, folder: Path, entry: os.DirEntry[str], relative: str,
         return
     if os.path.normcase(entry.path) == exclude:
         return
-    size = entry.stat(follow_symlinks=False).st_size
-    if size > MAX_DOC_FILE_BYTES:
+    info = os.lstat(entry.path)  # not entry.stat(): on Windows its file ID is always 0
+    if info.st_size > MAX_DOC_FILE_BYTES:
         scan.skipped.append(Skipped(relative, "too large"))
         return
-    scan.files.append((relative, entry.path))
-    scan.total_bytes += size
+    scan.files.append((relative, entry.path, (info.st_dev, info.st_ino)))
+    scan.total_bytes += info.st_size
     if len(scan.files) > MAX_FILES:
         raise _too_big(folder, f"more than {MAX_FILES:,} documentation files")
     if scan.total_bytes > MAX_TOTAL_BYTES:
@@ -255,11 +275,20 @@ def _scan(folder: Path, output: Path) -> _Scan:
     return scan
 
 
-def _read(path: str) -> tuple[str, int]:
-    """Read one file as (text, bytes), or raise `_Skip` with the reason it cannot be indexed."""
+def _read(path: str, identity: tuple[int, int]) -> tuple[str, int]:
+    """Read one file as (text, bytes), or raise `_Skip` with the reason it cannot be indexed.
+
+    `identity` is the file's (device, file ID) when its folder was listed. Opening
+    follows links, so a file swapped since then for a link, or reached through a
+    folder swapped for one, is a different file: it is skipped, not read.
+    """
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         with open(os.open(path, flags), "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            # A file system without file IDs reports 0, and then cannot be checked.
+            if identity[1] and (opened.st_dev, opened.st_ino) != identity:
+                raise _Skip("changed while indexing")
             raw = handle.read(MAX_DOC_FILE_BYTES + 1)
     except OSError:
         raise _Skip("unreadable") from None
@@ -301,9 +330,9 @@ def _fill(conn: sqlite3.Connection, scan: _Scan, progress: Callable[[int, int], 
     seen: set[bytes] = set()
     files = chunks = empty = 0
     skipped: list[Skipped] = []
-    for done, (relative, path) in enumerate(scan.files, start=1):
+    for done, (relative, path, identity) in enumerate(scan.files, start=1):
         try:
-            text, size = _read(path)
+            text, size = _read(path, identity)
             try:
                 found = document_chunks(text, relative)
             except Exception as exc:  # one malformed page must not end a long build
@@ -432,9 +461,63 @@ class Hit:
     body: str
 
 
+class _NotAnIndex(sqlite3.DatabaseError):
+    """The file's tables are not the ones `build_index` creates."""
+
+
+@functools.cache
+def _expected_schema() -> frozenset[tuple[str, str, str, str | None]]:
+    """The sqlite_master rows `build_index` creates, apart from their page numbers."""
+    with closing(sqlite3.connect(":memory:")) as conn:
+        for statement in _SCHEMA:
+            conn.execute(statement)
+        return frozenset(conn.execute(_SCHEMA_ROWS))
+
+
+def _schema_problem(conn: sqlite3.Connection) -> str:
+    """How the file's tables differ from those `build_index` creates, or ""."""
+    expected = _expected_schema()
+    found = set(conn.execute(_SCHEMA_ROWS).fetchmany(len(expected) + 1))
+    ours = {row[:2] for row in expected}
+    for kind, name, _, _ in sorted(found - expected, key=lambda row: row[:2]):
+        if (kind, name) in ours:
+            return f"its {kind} {name!r} is not the one `kumaru learn` creates"
+        return f"it has an unexpected {kind} {name!r}"
+    for kind, name, _, _ in sorted(expected - found, key=lambda row: (row[0] != "table", row[1])):
+        return f"it has no {kind} {name!r}"
+    return ""
+
+
 def _connect(path: Path) -> sqlite3.Connection:
-    """Open read-only, so a search can never change or create an index file."""
-    return sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    """Open an index read-only, after checking that its tables are those `build_index` creates.
+
+    Read-only, so a search can never change or create an index file. Index files
+    may come from someone else, so the connection also refuses any view, trigger
+    or other object `build_index` does not create (reading a view runs its query,
+    which can be endless), ignores functions in the schema (trusted_schema),
+    checks pages for corruption, and gives up after `MAX_SQL_STEPS`.
+    """
+    conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        conn.execute("PRAGMA trusted_schema = OFF")
+        conn.execute("PRAGMA cell_size_check = ON")
+        checks = itertools.count(1)
+        conn.set_progress_handler(
+            lambda: next(checks) > MAX_SQL_STEPS // _STEPS_PER_CHECK, _STEPS_PER_CHECK
+        )
+        problem = _schema_problem(conn)
+        if problem:
+            raise _NotAnIndex(problem)
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def _sql_problem(exc: sqlite3.Error) -> str:
+    if str(exc) == "interrupted":  # only the step limit interrupts
+        return f"gave up after {MAX_SQL_STEPS:,} SQLite steps"
+    return str(exc)
 
 
 class DocIndex:
@@ -451,7 +534,8 @@ class DocIndex:
                 rows = conn.execute(_SEARCH, (query, limit)).fetchall()
         except sqlite3.Error as exc:
             raise KumaruError(
-                f"Cannot search documentation index {self.path}: {exc}", hint=_REBUILD_HINT
+                f"Cannot search documentation index {self.path}: {_sql_problem(exc)}",
+                hint=_REBUILD_HINT,
             ) from exc
         info = self.info
         return [
@@ -485,13 +569,17 @@ def open_index(path: Path) -> DocIndex:
         with closing(_connect(path)) as conn:
             info = IndexInfo.model_validate(dict(conn.execute("SELECT key, value FROM meta")))
             conn.execute(_SEARCH, ('"kumaru"', 1)).fetchall()
+    except _NotAnIndex as exc:
+        raise ConfigError(
+            f"Invalid documentation index {path}: {exc}", hint=_REBUILD_HINT
+        ) from exc
     except ValidationError as exc:
         raise ConfigError(
             f"Invalid documentation index {path}: {describe_errors(exc)}", hint=_REBUILD_HINT
         ) from exc
     except sqlite3.Error as exc:
         raise ConfigError(
-            f"Cannot read documentation index {path}: {exc}", hint=_REBUILD_HINT
+            f"Cannot read documentation index {path}: {_sql_problem(exc)}", hint=_REBUILD_HINT
         ) from exc
     return DocIndex(path, info)
 
@@ -580,11 +668,19 @@ _TAG = re.compile(r"(?i)<(/?)excerpts\b")
 _FENCE_LINE = re.compile(r"^(`{3,})(.*)$")
 
 
-def _cut(passage: str, room: int) -> str:
-    """Shorten a passage to whole lines within `room`, closing a code fence it leaves open."""
+def _cut(passage: str, room: int, body_start: int) -> str:
+    """Shorten a passage to whole lines within `room`, closing a code fence it leaves open.
+
+    Returns "" unless the result would keep at least `MIN_CUT_CHARS` and a
+    whole line of the body, which starts at `body_start`. Room for a closing
+    fence as long as the passage's longest is set aside first, so the result
+    never exceeds `room`.
+    """
     longest_fence = max(map(len, re.findall(r"^`{3,}", passage, flags=re.M)), default=0)
-    kept = passage[: room - len(CUT_MARKER) - longest_fence - 1]
-    kept = kept[: kept.rfind("\n")] if "\n" in kept else kept
+    end = passage.rfind("\n", body_start, max(0, room - len(CUT_MARKER) - longest_fence - 1))
+    if end < MIN_CUT_CHARS:  # also -1: no line of the body fits
+        return ""
+    kept = passage[:end]
     opener = ""
     for line in kept.split("\n"):
         match = _FENCE_LINE.match(line)
@@ -599,7 +695,9 @@ def excerpt_block(hits: Sequence[Hit], limit: int) -> tuple[str, list[Hit]]:
     """Lay out passages best first in at most `limit` characters; return (block, hits used).
 
     Whole passages only, skipping any that no longer fit; just the first may
-    be cut short, so that a small budget still gets the best match.
+    be cut short, so that a small budget still gets the best match. Control
+    tokens in passages and citations are escaped (`neutralize_control_tokens`),
+    and tags that would close the block are renamed.
     """
     room = limit - len(_HEAD) - len(_TAIL)
     passages: list[str] = []
@@ -607,11 +705,15 @@ def excerpt_block(hits: Sequence[Hit], limit: int) -> tuple[str, list[Hit]]:
     for hit in hits:
         if any(hit.body == other.body for other in used):
             continue
-        passage = _TAG.sub(r"<\1excerpts_", f"{hit.citation}\n{hit.body}")
+        citation, body = (
+            _TAG.sub(r"<\1excerpts_", neutralize_control_tokens(text))
+            for text in (hit.citation, hit.body)
+        )
+        passage = f"{citation}\n{body}"
         if len(passage) + 2 > room:
-            if passages or room - 2 < MIN_CUT_CHARS:
+            passage = "" if passages else _cut(passage, room - 2, len(citation) + 1)
+            if not passage:
                 continue
-            passage = _cut(passage, room - 2)
         passages.append(passage)
         used.append(hit)
         room -= len(passage) + 2

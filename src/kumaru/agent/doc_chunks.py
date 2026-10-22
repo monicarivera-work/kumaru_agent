@@ -244,7 +244,8 @@ def chunk_blocks(blocks: Sequence[Block], title: str) -> list[Chunk]:
 
 # These patterns see whole lines and paragraphs of files up to 4 MiB, so each must stay
 # linear: a repeat stops at the next opener ([, {, <) instead of rescanning the rest of
-# the text from every one, and no two repeats compete for the same run of spaces.
+# the text from every one, and no two parts can match the same character, such as a
+# space or the "/" of "<a b />", or a failed match retries every split between them.
 _MD_FENCE = re.compile(r"^([ \t]*)(`{3,}|~{3,})(.*)$")
 _MD_FENCE_CLOSE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*$")
 _MD_ATX = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*))?$")
@@ -254,7 +255,7 @@ _MD_LIST_OR_TABLE = re.compile(r"^[ \t]*(?:[-*+][ \t]|\d+[.)][ \t]|\|)")
 _MD_TABLE_RULE = re.compile(r"^\|?[ \t]*:?-{2,}:?[ \t]*(?:\|[ \t]*:?-{2,}:?[ \t]*)*\|?$")
 _MD_LINK_DEFINITION = re.compile(r"^ {0,3}\[[^\]]+\]:[ \t]*\S")
 _MD_CONTAINER_FENCE = re.compile(r"^[ \t]*:{3,}")
-_MD_TAG_LINE = re.compile(r"^[ \t]*(?:</?[A-Za-z][\w.:-]*(?:[ \t][^<>]*)?/?>[ \t]*)+$")
+_MD_TAG_LINE = re.compile(r"^[ \t]*(?:</?[A-Za-z][\w.:-]*(?:[ \t][^<>]*|/)?>[ \t]*)+$")
 _MD_OPEN_TAG_START = re.compile(r"^[ \t]*<[A-Za-z][\w.:-]*(?:[ \t][^<>]*)?$")
 _MDX_STATEMENT = re.compile(r"^(?:import|export)\b")
 _MD_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)|\{/\*.*?(?:\*/\}|\Z)", re.S)

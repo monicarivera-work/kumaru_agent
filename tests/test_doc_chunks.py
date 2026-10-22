@@ -305,6 +305,7 @@ def test_broken_html_keeps_the_text_before_the_break(page: str, body: str) -> No
         ("x.md", "|--", "x"),
         ("x.md", " ", "#"),
         ("x.md", "<a ", ""),
+        ("x.md", '<a b="c" /> ', "x"),
         ("x.rst", ":a", ""),
         ("x.rst", ":ref:`a <", "`"),
         ("x.rst", "`a <", ""),

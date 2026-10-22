@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Annotated
@@ -139,6 +140,30 @@ REFERENCE_HEADER = (
     "Use only relevant facts; cite the topic, version and source, noting uncertainty.\n"
 )
 
+# Text that tokenizers read as a chat control token, not as text, even inside a message:
+# ChatML and Llama 3's <|im_end|>, DeepSeek's <｜User｜>, Mistral's [INST], Llama 2's
+# <<SYS>>, Gemma's <start_of_turn>, <s> and </s>, and Qwen's <think> and <tool_call>.
+# Names never hold "&", so an escaped token can never become part of a new one.
+CONTROL_TOKEN = re.compile(
+    r"<\|[^\s|<>&]{1,64}\|>|<\uff5c[^\s\uff5c<>&]{1,64}\uff5c>"
+    r"|</?(?:s|bos|eos|start_of_turn|end_of_turn|think|tool_call|tool_response)>"
+    r"|<</?SYS>>"
+    r"|\[/?(?:INST|SYSTEM_PROMPT|AVAILABLE_TOOLS|TOOL_RESULTS|TOOL_CALLS|THINK)\]"
+)
+MAX_CONTROL_TOKEN_CHARS = 68  # "<|", a 64-character name and "|>"
+_ENTITIES = str.maketrans({"<": "&lt;", ">": "&gt;", "[": "&#91;", "]": "&#93;"})
+
+
+def neutralize_control_tokens(text: str) -> str:
+    """Escape chat control tokens in reference text: `<|im_end|>` becomes `&lt;|im_end|&gt;`.
+
+    Llama-server and the transformers backend tokenize the rendered chat
+    template with special tokens recognized, so such a string in a document
+    would otherwise end the turn and open a new one in any role. The change is
+    visible, not a zero-width character, so code copied from the text shows it.
+    """
+    return CONTROL_TOKEN.sub(lambda match: match.group().translate(_ENTITIES), text)
+
 
 def _reference_parts(packs: Sequence[KnowledgePack]) -> Iterator[str]:
     yield REFERENCE_HEADER
@@ -154,13 +179,17 @@ def reference_context(packs: Sequence[KnowledgePack], limit: int) -> str:
 
     Runs on every request, so it stops as soon as `limit` characters are taken:
     the work is bounded by the budget, not by the size or number of packs.
+    Control tokens are escaped (`neutralize_control_tokens`), looking just far
+    enough past the cut to escape a token it splits: the result is always a
+    prefix of the whole context. No token spans two parts, as each label and
+    separator ends with a line break.
     """
     if not packs or limit <= 0:
         return ""
     taken: list[str] = []
     room = limit
     for part in _reference_parts(packs):
-        taken.append(part[:room])
+        taken.append(neutralize_control_tokens(part[: room + MAX_CONTROL_TOKEN_CHARS])[:room])
         room -= len(taken[-1])
         if not room:
             break

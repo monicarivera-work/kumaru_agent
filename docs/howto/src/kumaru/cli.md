@@ -341,7 +341,7 @@ kumaru bench run gsm8k ifeval -c qwen36 --think --thinking-budget 4096 -n 50 -o 
 
 - **Resuming.**
   - A rerun with the same `--out` reuses the finished answers.
-  - A run whose fingerprint differs (model, decoding parameters, seed or prompt mode) is refused before anything is written.
+  - A run whose fingerprint differs (model, decoding parameters, seed, prompt mode or documentation indexes) is refused before anything is written.
   - On Ctrl+C the runner prints `Stopped. Finished answers are saved; resume with --out <dir>`.
 - **`humaneval`** refuses to run without `--allow-code-exec`.
 
@@ -436,7 +436,7 @@ def serve(
 | `Missing argument 'config'.` from `kumaru train`, exit 2. | `train` takes a positional path, not `-c`. | `kumaru train configs\train\lora-small.yaml`. |
 | `error: Training config not found: <path>`. | A wrong path. | Start from a file in `configs\train\`. |
 | `error: 'humaneval' grades answers by running model-written code on this machine.` | Benchmarks that execute code are opt-in. | Add `--allow-code-exec` after reading the safeguards in `docs\BENCHMARKS.md`, or drop `humaneval`. |
-| `error: <dir> holds results from different settings (model, decoding parameters, seed or prompt mode).` | `--out` points at a run made with other settings, and resuming would mix them. | Omit `--out`, or choose a new directory. |
+| `error: <dir> holds results from different settings (model, decoding parameters, seed, prompt mode or documentation indexes).` | `--out` points at a run made with other settings, and resuming would mix them. | Omit `--out`, or choose a new directory. |
 | A bench run is not in `runs\bench\<label>`. | The default folder is `runs\bench\<YYYYMMDD-HHMMSS>-<label>`. | Use the `results:` or `saved to` path that the run prints. |
 | `error: No benchmark results in <dir>`. | `bench report` was pointed at a folder that `bench run` didn't create. | Point it at a run folder under `runs\bench\`. |
 | `error: <dir> holds answers to gsm8k, an evaluation set: training on them would inflate the score it measures.` | `distill build` was given a run of a test split or a golden set. | Run the teacher on `gsm8k_train` and pass that run. See `docs\howto\src\kumaru\train\distill.md`. |

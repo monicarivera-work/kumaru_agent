@@ -27,8 +27,8 @@ The functions cover an index's whole life:
 - **Whole documentation sets, not their first pages.** A pack sends the same prefix whatever the question, and at most 24,000 characters. Python's HTML documentation alone is 51 MB. Retrieval sends only the passages that match the question, so the size of what you index no longer limits what the model can draw on.
 - **Local, with no model.** Ranking is BM25 over SQLite's FTS5, which ships with Python. There is no embedding model, GPU, download or service. Nothing competes with the LLM for memory, and a search takes milliseconds.
 - **Keywords suit API documentation.** Coding questions name identifiers such as `move_and_slide`, `Vec::new` or `useEffect`, and keyword search matches them exactly. Its weakness is paraphrase; see "What keyword search cannot do".
-- **Bounded and inert.** The build reads only regular files inside the folder you name. It never follows links or junctions, runs code, or fetches includes or URLs. Searches open the index read-only.
-- **The same trust rules as packs.** Passages are labelled as untrusted reference data. Each one cites its topic, version, source file and section, so the model can say where an answer came from.
+- **Bounded and inert.** The build reads only regular files inside the folder you name. It never follows links or junctions, runs code, or fetches includes or URLs. Searches open the index read-only, and only after checking that it holds just the tables `kumaru learn` creates, so an index from someone else cannot run queries of its own.
+- **The same trust rules as packs.** Passages are labelled as untrusted reference data, and chat control tokens in them are escaped. Each one cites its topic, version, source file and section, so the model can say where an answer came from.
 - **Fail early.** A missing or damaged index stops `kumaru chat`, `eval`, `bench run` and server startup before the model loads, as a bad pack does.
 - **The prompt cache keeps working.** The system prompt gains only a fixed rule, and the passages travel with the question. Servers such as llama.cpp can then reuse their cache of the unchanged prefix from turn to turn.
 
@@ -38,7 +38,7 @@ The functions cover an index's whole life:
 `build_index(folder, output, topic=..., version=...)` does six things:
 1. **Checks first.** Topic and version must be valid labels: 1–200 and 1–100 characters, as for packs. The folder must exist, and SQLite must support FTS5. `output` is created with mode `"x"`, so an existing file is never overwritten.
 2. **Walks the folder** in name order, so the same folder always gives the same index. Links and junctions are never followed. Some entries are left out silently and others are reported, as the table below shows.
-3. **Reads each file.** It reads at most 4 MiB, which must be UTF-8, with or without a byte-order mark, or UTF-16 with one. A NUL byte marks a file as binary.
+3. **Reads each file.** It reads at most 4 MiB, which must be UTF-8, with or without a byte-order mark, or UTF-16 with one. A NUL byte marks a file as binary. The file opened must have the device and file ID listed in step 2. If not, it or a folder above it was replaced in the meantime, perhaps by a link, and it is skipped unread.
 4. **Converts** each file with `document_chunks`. Markup is stripped, code is kept in fences, and the text is cut into passages of at most 1,500 characters. Each passage sits under its section path, such as `json — JSON encoder and decoder > Basic Usage`.
 5. **Removes duplicates.** A passage identical to an earlier one, such as a footer on every page, is stored once. A file with no new passages counts as having "no new text".
 6. **Stores** the passages in the full-text table, optimizes it, writes the `meta` table and compacts the file with `VACUUM`. On any failure, including Ctrl+C, the partial file is deleted.
@@ -53,6 +53,7 @@ The functions cover an index's whole life:
 | OneDrive files kept online only | `not downloaded` |
 | Folders more than 32 levels deep | `too deep` |
 | Files or folders that cannot be opened | `unreadable` |
+| Files replaced after the folder was listed, or reached through a folder replaced by a link | `changed while indexing` |
 | Files over 4 MiB | `too large` |
 | Files with NUL bytes | `binary` |
 | Files that are neither UTF-8 nor UTF-16 with a byte-order mark | `not UTF-8` |
@@ -66,9 +67,17 @@ One SQLite file with three tables:
 - `files` lists each indexed file's path relative to the folder, with `/` separators, and its size.
 - `chunks` is an FTS5 table of `section`, `body` and `file_id`.
   - The tokenizer is `porter unicode61 remove_diacritics 2`. Words are split at anything but letters and digits, lowercased, stripped of accents and reduced to their English stem, so `printed` matches `print`.
-  - The table ranks with `bm25(2.0, 1.0)`: a word in the section path counts twice as much as one in the body.
+  - Searches rank with `bm25(2.0, 1.0)` (`_RANK`): a word in the section path counts twice as much as one in the body.
 
-The tokenizer and the ranking are stored in the file, so an index keeps behaving the same if the code's defaults change. Nothing writes to an index after the build, and you can copy one to another machine.
+The tokenizer is part of the table's definition. The ranking is stored too, for tools such as the `sqlite3` shell, but searches always use the code's own, so an index cannot change how its passages are scored. Nothing writes to an index after the build, and you can copy one to another machine.
+
+### Opening an index
+An index is a file that may come from someone else, so Kumaru treats it as untrusted input. A SQLite file can hold views and triggers that run arbitrary queries when read, including endless ones, and read-only mode does not stop them. So every connection, at startup and for each search (`_connect`):
+- compares `sqlite_master` with what `kumaru learn` creates before reading anything else. Any view, trigger, index or extra table is refused, as is a table defined differently or missing;
+- sets `PRAGMA trusted_schema = OFF`, so the schema cannot call functions, and `PRAGMA cell_size_check = ON`, which catches some damaged pages;
+- gives up after 100 million SQLite steps (`MAX_SQL_STEPS`). A broad search of the Python documentation takes about 150,000, so only a crafted or damaged file gets there.
+
+The checks cost well under a millisecond per connection.
 
 ### Choosing passages for a question
 This runs on every `prepare()`, when `agent.knowledge_indexes` is set and `agent.max_retrieved_chars` is above 0:
@@ -77,13 +86,14 @@ This runs on every `prepare()`, when `agent.knowledge_indexes` is set and `agent
 3. **Search** (`find_passages`). All terms and phrases are quoted, joined with `OR` and sent to every index, which returns its best 16 passages by BM25.
 4. **Rank.** All candidates are sorted by score. Ties go to the earlier index, then to the earlier passage, so the same question always gets the same passages. Passages scoring under a quarter of the best one are dropped as off-topic.
 5. **Lay out** (`excerpt_block`).
+   - Chat control tokens in each passage and its citation are escaped first, so the length checked is the length sent (see "What the model sees").
    - Passages are added best first while they fit `agent.max_retrieved_chars`, block header included. A passage that no longer fits is skipped, and a smaller one further down can still fit. An identical passage is used once.
-   - Only the best passage may be shortened. It is cut at a line end, any open code fence is closed, and `[…]` is appended. So even a small budget gets the best match.
+   - Only the best passage may be shortened. It is cut at a line end, any open code fence is closed, and `[…]` is appended, all within the limit. So even a small budget gets the best match. Room for the passage's longest fence is set aside first. The cut must keep at least 200 characters (`MIN_CUT_CHARS`), citation included, and at least one whole line of the passage's text, never just its citation. Otherwise the next passage is tried instead.
 6. **Place** (`with_excerpts`). The block goes before the text of the latest user message. The system prompt gains only the fixed `EXCERPTS_RULE`, which tells the model what the block is.
 7. **Fit the prompt budget** (`ChatAgent._apply_memory`).
    - The memory policy then trims older history to fit `agent.max_history_tokens`, as usual. Excerpts outrank old turns.
    - If even the system prompt and the question with its excerpts do not fit, the block's limit is halved and steps 5–7 run again.
-   - When no passage fits whole and the limit is too small to shorten the best one (under 537 characters), the question is sent without excerpts.
+   - When no passage fits whole and none keeps 200 characters when cut at a line end, the question is sent without excerpts. At 542 characters or fewer, that is always the case.
    - So retrieval never causes a 413 error.
 
 ### What the model sees
@@ -106,6 +116,11 @@ How do I pretty-print JSON with indentation?
 Consequences:
 - **The source** is the indexed folder's name plus the file's path inside it, so indexing `...\Doc\html` gives `html/library/json.html`.
 - **Documents cannot close the block.** `<excerpts` and `</excerpts` inside a passage become `<excerpts_` and `</excerpts_`. As with packs, the notice is guidance to the model, not an enforced boundary.
+- **Documents cannot switch roles.** Chat-template control tokens in passages and citations become HTML entities, whatever the backend: `<|im_end|>` becomes `&lt;|im_end|&gt;`, and `[INST]` becomes `&#91;INST&#93;` (`knowledge.neutralize_control_tokens`).
+  - llama-server and the transformers backend read such strings in a prompt as real special tokens. The documentation of LLM tools quotes them, and a quoted `<|im_end|>` followed by `<|im_start|>system` would otherwise end the user's turn and open a system one.
+  - Covered: `<|…|>` and `<｜…｜>` with names up to 64 characters; `<s>`, `<bos>`, `<eos>`, `<start_of_turn>`, `<end_of_turn>`, `<think>`, `<tool_call>` and `<tool_response>`; `<<SYS>>`; `[INST]`, `[SYSTEM_PROMPT]`, `[AVAILABLE_TOOLS]`, `[TOOL_RESULTS]`, `[TOOL_CALLS]` and `[THINK]`. Closing forms are covered too.
+  - The change is visible rather than a zero-width character, so code the model copies from a passage cannot carry a hidden character into a program. HTML's `<s>` tag, in a code example, is escaped too.
+- **Citations can be imitated.** A line in a document such as `Topic: X; version: Y; source: …` looks like a citation. At worst, the model credits text to the wrong source.
 - **Nothing is stored.** The agent is stateless, and clients send back the question as typed. Each turn searches afresh, so earlier excerpts never pile up in the history.
 - **Every entry point retrieves.** `kumaru chat`, the API and web UI, `kumaru eval` and `kumaru bench run --use-agent-prompt` all go through `prepare()`. To measure the model without the documentation, leave the index out of the config.
 
@@ -155,7 +170,8 @@ Measured on a desktop PC:
 - Long questions stay cheap. A 350,000-character message took 173 ms to search, because words are cut to 64 characters and phrases to 8 words. FTS5's phrase matching is quadratic in phrase length: before the cap, one 8,000-word dotted phrase (`the.the.the...`) took 29 s.
 - HTML is the slowest format to build: almost all of the time goes to Python's `html.parser`.
 - Searches run inside `prepare()`, on the server's event loop, so other requests wait for them, as they do for token counting.
-- An open index costs only its path and labels in memory. Each search opens the file read-only and closes it again. The operating system's file cache keeps repeated searches fast.
+- An open index costs only its path and labels in memory. Each search opens the file read-only, checks it (see "Opening an index") and closes it again. The operating system's file cache keeps repeated searches fast.
+- Listing a folder checks each documentation file's ID once, about 0.1 ms per file on Windows. That is lost in the noise of a build.
 
 ## Public API
 
@@ -166,9 +182,10 @@ Measured on a desktop PC:
 | `MAX_FILES`, `MAX_TOTAL_BYTES`, `MAX_ENTRIES`, `MAX_DEPTH`, `MAX_DOC_FILE_BYTES` | `100_000`, `1 << 30`, `500_000`, `32`, `4 << 20` | Walk limits; see "Limits". |
 | `SKIPPED_DIRS`, `SKIPPED_FILES` | `frozenset[str]` | Folder and file names left out silently, in lower case. Pages named `genindex-*.html` are also left out. |
 | `CANDIDATES_PER_INDEX`, `RELATIVE_CUTOFF` | `16`, `0.25` | Passages taken from each index, and the fraction of the best score below which passages are dropped. |
-| `MIN_CUT_CHARS` | `200` | The least room in which the best passage is shortened rather than left out. |
+| `MIN_CUT_CHARS` | `200` | The least a shortened passage keeps, citation included; it also keeps at least one whole line of its text. A cut that would keep less leaves the passage out. |
 | `MIN_QUERY_TERMS`, `FOLLOW_UP_MESSAGES` | `3`, `2` | Below 3 terms and phrases, borrow terms from up to 2 earlier user messages. |
 | `MAX_QUERY_TERMS`, `MAX_QUERY_PHRASES`, `MAX_TERM_CHARS`, `MAX_PHRASE_WORDS` | `32`, `8`, `64`, `8` | Query caps. A longer phrase keeps its last 8 words. |
+| `MAX_SQL_STEPS` | `100_000_000` | The SQLite steps after which a connection to an index gives up, so a damaged or crafted file cannot hang the agent; see "Opening an index". |
 | `IndexLabel` | `class IndexLabel(BaseModel)` with `topic`, `version`, `source` | The labels every passage is cited by, with the same limits as `KnowledgePack`. |
 | `IndexInfo` | `class IndexInfo(IndexLabel)`, adding `format`, `format_version`, `files: int`, `chunks: int` | The `meta` table, validated by `open_index`. Both counts must be at least 1. Extra keys, such as `kumaru_version`, are ignored. |
 | `Skipped` | `@dataclass Skipped(path: str, reason: str)` | One file or folder left out, and why, such as `too large`. |
@@ -176,15 +193,15 @@ Measured on a desktop PC:
 | `build_index` | `build_index(folder: Path, output: Path, *, topic: str, version: str, progress: Callable[[int, int], None] \| None = None) -> BuildReport` | Builds a new index; see "Building an index". Calls `progress(done, total)` after each file. Raises `ConfigError`, and deletes the partial file on any failure. |
 | `format_types` | `format_types(types: Counter[str], limit: int = 8) -> str` | The commonest unsupported types, such as `.png (120), .js (40), 3 more`. |
 | `Hit` | `@dataclass Hit(score: float, index: int, chunk: int, citation: str, body: str)` | One retrieved passage; higher scores are better. `index` is the position in `agent.knowledge_indexes`, and `chunk` is the passage's row ID. |
-| `DocIndex` | `DocIndex(path: Path, info: IndexInfo)` | An opened index. `search(query: str, position: int = 0, limit: int = 16) -> list[Hit]` runs an FTS5 query read-only, best first. It raises `KumaruError` if the file has become unreadable. |
-| `open_index` | `open_index(path: Path) -> DocIndex` | Expands `~`, checks the file and its `meta` table, and runs a probe search. Raises `ConfigError` for a network-share path, a missing file, a file that is not an index, or an index of another format version. |
+| `DocIndex` | `DocIndex(path: Path, info: IndexInfo)` | An opened index. `search(query: str, position: int = 0, limit: int = 16) -> list[Hit]` checks the file's schema, then runs an FTS5 query read-only, best first. It raises `KumaruError` if the file has become unreadable or no longer passes the check, or the search passes `MAX_SQL_STEPS`. |
+| `open_index` | `open_index(path: Path) -> DocIndex` | Expands `~`, checks the file's schema (see "Opening an index") and its `meta` table, and runs a probe search. Raises `ConfigError` for a network-share path, a missing file, a file that is not an index or holds anything else, an index of another format version, or a read that passes `MAX_SQL_STEPS`. |
 | `STOPWORDS` | `frozenset[str]` | Words never searched. Words that name programming concepts, such as `new`, `set`, `use` and `show`, are deliberately left out of it. |
 | `query_terms` | `query_terms(messages: Sequence[Message]) -> tuple[list[str], list[str]]` | `(terms, phrases)` for the latest user message; see "Choosing passages for a question". |
 | `fts_query` | `fts_query(terms: Sequence[str], phrases: Sequence[str] = ()) -> str` | For example `"move" OR "slide" OR "move and slide"`. Quoting keeps any FTS5 syntax in a question inert. |
 | `EXCERPTS_RULE` | `str`, 233 characters | The system-prompt rule, added by `build_system_prompt(..., excerpts=True)`. |
 | `EXCERPTS_NOTICE` | `str`, 312 characters | The untrusted-data notice at the top of each block. |
 | `CUT_MARKER` | `"\n[…]"` | Ends a shortened passage. |
-| `excerpt_block` | `excerpt_block(hits: Sequence[Hit], limit: int) -> tuple[str, list[Hit]]` | The `<excerpts>` block in at most `limit` characters, and the hits it holds. Returns `("", [])` if nothing fits. |
+| `excerpt_block` | `excerpt_block(hits: Sequence[Hit], limit: int) -> tuple[str, list[Hit]]` | The `<excerpts>` block, never longer than `limit` characters, and the hits it holds. Control tokens in citations and passages are escaped first, and the escaped length is what counts. Returns `("", [])` if nothing fits. |
 | `find_passages` | `find_passages(indexes: Sequence[DocIndex], messages: Sequence[Message]) -> list[Hit]` | Searches every index, sorts the results and applies the cutoff. Returns `[]` without indexes or search terms. Logs `retrieval: N passages match <query> in Xms` at DEBUG. |
 | `with_excerpts` | `with_excerpts(messages: Sequence[Message], block: str) -> list[Message]` | A copy of `messages` with `block` and a blank line put before the latest user message's text. |
 
@@ -323,10 +340,12 @@ Add a converter to `doc_chunks._CONVERTERS` ([doc_chunks.md](doc_chunks.md)). `S
 ### Change the index format
 Bump `INDEX_FORMAT_VERSION`, and the `Literal` of `IndexInfo.format_version` with it, when this code can no longer read older files correctly. Examples are a renamed table or column, or a new required `meta` key. Old indexes then fail at startup with `format_version: Input should be '2'` and a hint to rebuild, rather than giving wrong results.
 
-The tokenizer and rank weights are stored in each file. Changing `TOKENIZER` or the weights in `_SCHEMA` affects only new indexes and needs no bump.
+The tokenizer is part of `_SCHEMA`, which `_connect` compares with each file exactly. So changing `_SCHEMA` or `TOKENIZER` makes every existing index fail at startup with `its table 'chunks' is not the one kumaru learn creates` and the hint to rebuild. Bump `INDEX_FORMAT_VERSION` with it, so the two formats have different names. To keep reading older indexes, `_expected_schema` would have to accept their schemas too.
+
+Searches give the ranking themselves (`_RANK`), so changing it re-ranks old indexes as well as new ones, with no bump.
 
 ### Tune the ranking
-`STOPWORDS`, `CANDIDATES_PER_INDEX`, `RELATIVE_CUTOFF` and the `bm25(2.0, 1.0)` weights decide what is sent. Check changes against a real documentation set with "See which passages match", and keep the order deterministic. `tests\test_doc_index.py` asserts three things:
+`STOPWORDS`, `CANDIDATES_PER_INDEX`, `RELATIVE_CUTOFF` and the `bm25(2.0, 1.0)` weights in `_RANK` decide what is sent. Check changes against a real documentation set with "See which passages match", and keep the order deterministic. `tests\test_doc_index.py` asserts three things:
 - the same question always gets the same passages;
 - ties go to the earlier index;
 - the matching section ranks first.
@@ -339,9 +358,10 @@ Embeddings would find the paraphrases that keywords miss, at the cost of a model
 - Never download a model while answering a question.
 
 Rules to keep:
-- The build reads only regular files inside the folder: no links, network, includes or execution.
+- The build reads only regular files inside the folder: no links, network, includes or execution. A file whose ID changed after the folder was listed is skipped, not read.
 - Searches stay read-only, local and deterministic.
-- Every passage stays inside the labelled block with its citation, and documents cannot close the block.
+- Index files are untrusted input. Check the schema before reading anything else, keep `trusted_schema` off and the step limit on, and rank with `_RANK`, never with a ranking stored in the file.
+- Every passage stays inside the labelled block with its citation, documents cannot close the block, and control tokens are escaped in every field, citations included.
 - Excerpts stay out of the system prompt, so its cached prefix survives.
 - Error messages name the file and the problem, never document text: `/healthz` serves them without authentication.
 
@@ -352,6 +372,8 @@ Rules to keep:
 | `error: Documentation index not found: <path>`, exit 1, before any model loads. The server's `/healthz` returns 503 with this text, and chat requests get 503 `Backend failed to load: ...`. | A wrong path in `agent.knowledge_indexes`, or a relative one, resolved against the current folder. | Use absolute paths to files built by `kumaru learn ... --source FOLDER`. |
 | `Cannot read documentation index <path>: file is not a database` | The path names something other than an index, such as a knowledge pack. | List packs in `agent.knowledge_files` and indexes in `agent.knowledge_indexes`. |
 | `Invalid documentation index <path>: format_version: Input should be '1'` | It was built by a Kumaru version with another index format. | Rebuild it with `kumaru learn TOPIC --source FOLDER --version VERSION -o NEW_FILE`. |
+| `Invalid documentation index <path>: it has an unexpected view 'meta'`, or `its table 'chunks' is not the one kumaru learn creates`, or `it has no table 'files'` | The file holds something `kumaru learn` does not create. It was changed after the build, for example by `ANALYZE` in the `sqlite3` shell, written by another tool, or crafted to run queries of its own. | Rebuild it as above. |
+| `Cannot read documentation index <path>: gave up after 100,000,000 SQLite steps`, or `Cannot search ...` with the same reason | A damaged or crafted file. A real search takes far fewer steps. | Rebuild it as above. |
 | `Documentation indexes on network shares are not supported: \\server\share\...` | SQLite's read-only mode cannot open UNC paths. | Copy the index to a local disk, or map the share to a drive letter. |
 | `Cannot search documentation index <path>: ...`, HTTP 500 | The file was deleted, replaced or damaged while Kumaru was running. | Rebuild it, then restart or send `POST /v1/backend`. |
 | `error: Cannot read local reference <path>: [Errno 2] No such file or directory: ...` from `kumaru learn` | The `--source` folder does not exist, so `learn` took the path for a pack's source file. | Check the path. |
@@ -363,15 +385,17 @@ Rules to keep:
 | `Python's SQLite <version> lacks full-text search (FTS5): ...` | A Python build whose SQLite has no FTS5. | Use a Python build that includes it, such as the python.org installers. |
 | `Skipped N (not UTF-8): ...` | Files saved in a legacy code page, such as Windows-1252. | Re-save them as UTF-8, then rebuild. |
 | `Skipped N (link): ...` | Links and junctions are never followed. | Index the target folder itself, or copy it in. |
+| `Skipped N (changed while indexing): ...` | Files were replaced or moved while the index was built, or a folder was swapped for a link, for example by a sync tool or `git checkout`. | Rebuild when the folder is no longer changing. |
 | `Skipped N (not downloaded): ...` | OneDrive files kept online only. Reading one would download it. | Choose "Always keep on this device" for the folder, then rebuild. |
 | `Skipped N (could not convert (ValueError)): ...` | A converter bug: it failed on these files. The others were indexed. | Set `$env:KUMARU_LOG_LEVEL = 'DEBUG'` and rebuild to log the traceback, then report it with one of the files. |
 | An answer ignores the documentation, and no `retrieval:` line is logged. | No passage matched. The question's words are not in the documentation, or they are all stop words, one-letter words or symbols. | Use the documentation's terms or the API's name. Check with "See which passages match". |
 | The wrong pages are retrieved, often release notes. | See "What keyword search cannot do". | Name the API, or index a copy without release notes. |
 | `retrieval: N passages, C chars (shortened to fit the prompt budget)` | The system prompt, history and question left too little room, so the block was halved. | Raise `agent.max_history_tokens` and the context, or shorten the question. |
 | `retrieval: N passages left out: no room in the prompt budget` | Even the shortest block did not fit. | As above. |
-| `retrieval: N passages left out: agent.max_retrieved_chars is too small` | No passage fits whole, and under 537 characters the best one is not shortened. | Raise it to at least 1,500, or set it to `0` to turn retrieval off. |
+| `retrieval: N passages left out: agent.max_retrieved_chars is too small` | No passage fits whole, and none keeps 200 characters and a line of its text when shortened. At 542 characters or fewer, that is always the case. | Raise it to at least 1,500, or set it to `0` to turn retrieval off. |
 | `Invalid configuration` with `Input should be less than or equal to 24000` | `max_retrieved_chars` is outside 0–24,000. | Stay in range. |
 | The model follows an instruction found in the documentation. | The notice is guidance to the model, not an enforced boundary. | Index only documentation you trust and have reviewed. |
+| Code the model quotes from the documentation shows `&lt;\|im_end\|&gt;` or `&#91;INST&#93;`. | Chat control tokens are escaped so that they cannot switch roles. | Expected. Read them as `<\|im_end\|>` and `[INST]`. |
 | Documentation text reaches another machine. | With `openai_compat`, or a `llamacpp_server` on another host, the prompt goes to that server, excerpts included. | Use a local backend for private documentation. |
 
 ## Related files

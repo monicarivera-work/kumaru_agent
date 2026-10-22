@@ -136,7 +136,8 @@ Paragraphs are split at blank lines and kept as written.
 
 ### Linear time
 `doc_index` reads files of up to 4 MiB. A converter that is quadratic on some input, even input no real page contains, could stall a build for hours on one crafted file. So every converter takes time proportional to the file's size:
-- **Regular expressions never rescan.** A repeat stops at the next opener: `[^\[\]]*`, not `.*?`. No two repeats compete for the same run of characters.
+- **Regular expressions never rescan.** A repeat stops at the next opener: `[^\[\]]*`, not `.*?`.
+- **No two parts of a pattern can match the same character.** Otherwise a failed match retries every way of sharing it, which doubles the work with each repeat. That is exponential, not just slow: `_MD_TAG_LINE` once let both the attribute text and an optional `/` take the `/` of `<a b="c" />`, so 20 such tags before some text took a second, and 40 would have taken weeks. Now the `/` belongs to one part only, and 5,000 tags take 10 ms. This is the pattern to look for when you add a regular expression: an optional part or a repeat next to another that accepts the same character.
 - **Code spans** are paired in one pass (`_protect_code_spans`), because a regular expression would rescan the rest of the text from each unclosed run of backticks.
 - **HTML is guarded.** `html.parser` without the CVE-2025-6069 fix rescans the rest of the page from every `<` whose construct never closes.
   - `_escape_unclosed` escapes openers that come after the last closer of their kind, since they are text anyway.
@@ -150,6 +151,7 @@ Measured on a busy desktop PC, with files of 4 MiB, the largest `doc_index` read
 | Input | Time |
 |---|---|
 | Crafted openers that never close, such as `[`, `<a `, `<!--` or `:ref:` | 0.75–4.3 s |
+| One line of 220,000 `<Icon name="ok" />` tags and then text, or 10,500 lines of 20 | 0.65 s, 0.5 s |
 | `<div>` nested 247,000 deep, around as many `<pre>` blocks | 7 s |
 | reStructuredText nested 2,900 levels deep | 0.7 s |
 | One-letter paragraphs, the most blocks a file can hold | Markdown 17 s, reStructuredText 13 s, HTML 7 s, plain text 4 s |
