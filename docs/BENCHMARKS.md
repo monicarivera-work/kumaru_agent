@@ -23,7 +23,7 @@ Accuracy (%) on the same questions, same engine, same harness. In parentheses: t
 
 **What to use:** Qwen3.6 (`-c qwen36`) with Think off, the profile's default. It is the measured upgrade over the 7B, and in this run thinking bought no significant accuracy for 2.4 times the tokens. Think on is still worth trying on hard multi-step problems: chat does not cap thinking, so uncapped thinking is not yet measured. A rerun with a larger `--thinking-budget` would measure it.
 
-**Other programming languages:** HumanEval measures Python only. [§11](#11-programming-languages-multipl-e) adds MultiPL-E, the same problems in JavaScript, TypeScript, C#, Java, C++, Go and Rust, graded by running each language's unit tests. It has not been run on these models yet.
+**Other programming languages:** HumanEval measures Python only. [§11](#11-programming-languages-multipl-e) adds MultiPL-E, the same problems in JavaScript, TypeScript, C#, Java, C++, Go and Rust, graded by running each language's unit tests. On 100 of them, Qwen3.6 with Think off scored 98 in Python, 96 in TypeScript, 95 in C++, 94 in JavaScript and C#, 93 in Java and Go, and 92 in Rust. None is significantly below Python, and each translation loses 1 or 2 of its points to defects in its tests. Half its mistakes in C#, Java, C++, Go and Rust were compile errors ([§11.5](#115-results)).
 
 The Think-on run was stopped after three benchmarks to free the GPU. To finish IFEval and HumanEval, run its original command again with `--out`; finished questions are skipped ([§9](#9-run-mechanics)):
 
@@ -272,6 +272,8 @@ Every number in this document can be traced to individual answers.
 
 The 9-fold gap to the 7B has two factors. Qwen3.6 generated about a quarter as many tokens per second in these runs (about 44 against 185, all requests together), partly because 18 layers of its experts ran from system RAM to leave room for a game ([§3](#3-how-the-comparison-was-run)). And it writes about twice as many tokens per answer (3.5 times as many on MMLU-Pro).
 
+MultiPL-E's eight languages, 100 problems each, took 95 minutes with Qwen3.6 and Think off: from 7 minutes for JavaScript to 16 for Java and C#, in step with the length of their answers ([§11.5](#115-results)).
+
 ## 10. Where evaluation goes next
 
 Evaluation has to scale with the model, or you lose the ability to tell whether changes help. In rough order of value:
@@ -371,11 +373,11 @@ All 8 disagreements are differences between toolchains, not grader errors:
 - **C#, 1.** An answer to `HumanEval_94` timed out under MultiPL-E's 5 s limit on Mono. On .NET 10 it takes about 4 s and passes.
 - **Go, 2.** An answer to `HumanEval_114` calls `min`, which has been built into Go since version 1.21; MultiPL-E's older Go rejected it. An answer to `HumanEval_136` timed out under MultiPL-E's 30 s limit, which covers building as well as running; here it builds and passes.
 
-The check grades each answer on the tests as MultiPL-E published them, because those gave its verdicts, so the comparison is like with like. `kumaru bench run` grades C# on fixed tests instead (below); on the published ones, MultiPL-E and Kumaru fail a right List or Dictionary result alike.
+The check grades each answer on the tests as MultiPL-E published them, because those gave its verdicts, so the comparison is like with like. `kumaru bench run` grades C# on fixed tests instead (below); on the published ones, MultiPL-E and Kumaru fail a right List or Dictionary result alike. C++'s 200 happen to include none of the 24 answers to `HumanEval_114` that MultiPL-E passed. On Windows those fail (below), so a larger sample would show disagreements that the check doesn't yet explain.
 
 Agreement compares verdicts, pass or fail. The kind of failure can differ without changing a verdict. Of the 10 C# timeouts sampled, for example, Kumaru reports 7 as plain failures: 4 programs stop at their first failed `Debug.Assert`, where Mono's carries on, and 3 runaway loops hit the 4 GB memory cap before the time limit.
 
-**What the check does not cover.** MultiPL-E's answers continue its prompt, as base models do, so they rarely bring the extras a chat model's answer does. How the assemblers handle those is covered by unit tests and by each language's self-test, not by this agreement. The check caught one assembler bug: Go's `[]interface{}` was taken for a block, which cut functions in two. Tests of whole answers caught two more: a JavaScript `import { … } from` was cut at its `}`, and a Java or C# `void main` was missed, which left two `main`s. All three are fixed and pinned by unit tests. Once a chat model has been run, read a few of each language's `compile_error`s in its `items.jsonl` before believing a low score: each keeps its `mode`, its `stage` and the compiler's output.
+**What the check does not cover.** MultiPL-E's answers continue its prompt, as base models do, so they rarely bring the extras a chat model's answer does. How the assemblers handle those is covered by unit tests and by each language's self-test, not by this agreement. The check caught one assembler bug: Go's `[]interface{}` was taken for a block, which cut functions in two. Tests of whole answers caught two more: a JavaScript `import { … } from` was cut at its `}`, and a Java or C# `void main` was missed, which left two `main`s. All three are fixed and pinned by unit tests. After a run, read a few of each language's `compile_error`s in its `items.jsonl` before believing a low score: each keeps its `mode`, its `stage` and the compiler's output. In Qwen3.6's run ([§11.5](#115-results)), every compile error was the model's own, apart from Go's on `HumanEval_87`, a defect (below).
 
 **Deliberate differences from MultiPL-E's harness.**
 - Answers may be whole functions, as chat models write them, as well as continuations.
@@ -388,24 +390,62 @@ Agreement compares verdicts, pass or fail. The kind of failure can differ withou
 
 The full table is in [`multipl_e.md`](howto/src/kumaru/eval/benchmarks/multipl_e.md#differences-from-multipl-es-own-harness).
 
-**Defects in the dataset.** The pinned dataset (revision 28441b6, July 2025, still the newest on the Hub) has tests that no answer can pass. Kumaru applies only fixes MultiPL-E has made itself, and only when they treat every language alike:
+**Defects in the dataset.** The pinned dataset (revision 28441b6, July 2025, still the newest on the Hub) has tests that no answer can pass, and Windows adds two in C++. Kumaru applies only fixes MultiPL-E has made itself, and only when they treat every language alike:
 
 - **Fixed: C#'s List and Dictionary results, 43 of the 152 problems** ([nuprl/MultiPL-E#71](https://github.com/nuprl/MultiPL-E/issues/71)). The tests compare them with `.Equals`, which .NET (and Mono) answers by reference, so a right answer fails: `new List<long>().Equals(new List<long>())` is false. MultiPL-E fixed its translator in January 2026 (commit 85833ac) but has not regenerated the dataset. Kumaru rewrites each of those assertions as the fixed translator writes them (`SequenceEqual` for a List; `Count` and `Except` for a Dictionary), and refuses to load unless exactly those 43 problems change. Unfixed, an answer can pass at most 107 of C#'s 152 problems; fixed, 150, on a par with the other languages. C# results graded before the fix can't be resumed with it.
 - **Not fixed: `HumanEval_92` (`any_int`), in all 7 translations.** The answer turns on telling `3` from `3.0`, which Python can and the translations can't, so each asks for the same call to be both true and false: JavaScript and TypeScript have one number type, C#, Java, C++ and Go pass floating-point numbers, and Rust asserts `candidate(3.0, 4.0, 7.0)` both ways. MultiPL-E's fix ([#142](https://github.com/nuprl/MultiPL-E/issues/142)) drops contradictory assertions only when they are written alike, which only Rust's are. Kumaru doesn't apply it: Rust alone would gain a problem that the other six can't pass, whereas 92 unsolvable in all seven favours none of them. #71, by contrast, puts C# back on a par with the rest.
-- **Not fixed: `HumanEval_136` (`largest_smallest_integers`), in C#.** The function returns `Tuple<Nullable<long>,Nullable<long>>`, but the tests expect values such as `Tuple.Create((Nullable<long>)null, 1L)`, a `Tuple<Nullable<long>,long>`, and tuples of different types are never equal. MultiPL-E hasn't fixed it.
+- **Not fixed: `HumanEval_136` (`largest_smallest_integers`), in C# and Java.** The function returns a pair of optional numbers, and the tests compare it with values of other types, which are never equal. C#'s expect values such as `Tuple.Create((Nullable<long>)null, 1L)`, a `Tuple<Nullable<long>,long>`. Java's wrap them once too often: `Optional.of(Optional.empty())` for a missing number, and `Optional.of(Pair.with(-2l, 1l))` for a whole pair. MultiPL-E fixed Java's other `Optional` tests ([#47](https://github.com/nuprl/MultiPL-E/issues/47)), but its translator still writes these; it hasn't fixed C#'s either.
 - **Not fixed: `HumanEval_51` (`remove_vowels`), in JavaScript.** A test string holds a raw line break, a syntax error in JavaScript.
+- **Not fixed: `HumanEval_87` (`get_row`), in Go.** The function returns pairs, which Go's translation writes as `[]interface{}`. But some expected values put those pairs inside a `[][]int` literal, and one test passes a `[]interface{}` where the function takes `[][]int`. The test file never compiles, so no answer passes. MultiPL-E has no issue for it.
+- **Can't pass on Windows: `HumanEval_114` (`minSubArraySum`) and `HumanEval_139` (`special_factorial`), in C++.** The C++ translations write Python's integers as `long`, which is 64 bits on Linux, where MultiPL-E grades, but 32 bits on Windows, with MinGW as with MSVC. 114's test passes −9999999999999999 in a `std::vector<long>`, which cuts it to 32 bits before the call, so no answer passes on Windows. 139's expects 125411328000, so an answer passes only if it widens the prompt's `long` return type to `long long`. A right answer graded by hand bears both out. On Linux both can pass, so the Docker sandbox should grade them as MultiPL-E does (not yet tested). No other C++ test holds a number beyond 32 bits.
 
-So with all 152 problems, the best possible score is 152 in Python, 151 in TypeScript, Java, C++, Go and Rust, and 150 in JavaScript and C#.
+So with all 152 problems, the best possible score is 152 in Python; 151 in TypeScript and Rust, and in C++ on Linux; and 150 in JavaScript, C#, Java and Go, and in C++ on Windows, where 139 also needs that wider type. The fix for #71 and the scan for numbers beyond 32 bits covered all 152 problems. The other defects were found by reading every failure of the run below, which asked 100 of them, and by grading a right answer written by hand wherever no published answer had passed either; the other 52 problems haven't been audited, so a language's best score may be lower.
 
 ### 11.5 Results
 
-Not measured yet: the first run waits for the GPU. With the settings of [§3](#3-how-the-comparison-was-run), it is:
+Qwen3.6-35B-A3B with Think off, on the same 100 problems in every language, with the settings of [§3](#3-how-the-comparison-was-run) and the toolchains in [§11](#11-programming-languages-multipl-e)'s table. The programs ran on the machine itself, without `--sandbox`, 2 at a time.
+
+| Language | pass@1 (95% CI) | Best possible | The model's mistakes | Defects ([§11.4](#114-are-its-graders-right)) | Tokens per answer | Minutes |
+|---|---|---|---|---|---|---|
+| Python | 98.0 (93.0–99.4) | 100 | 64, 92 | none | 301 | 10.5 |
+| JavaScript | 94.0 (87.5–97.2) | 98 | 95, 113, 126, 134 | 51, 92 | 194 | 7.0 |
+| TypeScript | 96.0 (90.2–98.4) | 99 | 95, 126, 134 | 92 | 256 | 9.1 |
+| C# | 94.0 (87.5–97.2) | 98 | 49\*, 129\*, 132\*, 134 | 92, 136 | 437 | 15.9 |
+| Java | 93.0 (86.3–96.6) | 98 | 54, 95, 113, 129\*, 134 | 92, 136 | 448 | 16.0 |
+| C++ | 95.0 (88.8–97.8) | 99 | 75\*, 134, 156\* | 92; 139 on Windows | 352 | 12.9 |
+| Go | 93.0 (86.3–96.6) | 98 | 7\*, 29\*, 95, 126, 134\* | 87\*, 92 | 368 | 13.2 |
+| Rust | 92.0 (85.0–95.9) | 99 | 37, 68\*, 95, 121\*, 122\*, 126, 159 | 92 | 281 | 9.9 |
+
+- Problems are numbered as in HumanEval (134 is `HumanEval_134_check_if_last_char_is_a_letter`), and \* marks a compile error.
+- **Best possible** counts the problems among these 100 that an answer can pass. C++'s includes 139, which passes on Windows only if the answer widens the prompt's `long` return type to `long long`. Qwen3.6's answer kept the signature, as the instruction asks, so its failure counts as a defect, not a mistake.
+- **The model's mistakes** are failures that some answer shows to be passable: Qwen3.6's own in its other C# run, an answer MultiPL-E published, or a right answer written by hand.
+- **TypeScript ran with its types stripped** (no `tsc`), so a type error would not have failed it.
+- **C#'s row comes from a second run**, after the fix to its tests ([§11.4](#114-are-its-graders-right)). The next paragraph compares it with the first.
+
+**C#, published tests against fixed ones.** The first run predates the fix and graded C# on the tests as published: 70.0 (60.4–78.1), 28 points below Python. All 27 of the 100 problems with a List or Dictionary result failed, right or wrong. Regraded on the fixed tests by the same grader, the same answers score 96.0 (90.2–98.4): 26 of those 27 pass, and the 27th, 74, returns the second list on a tie where the docstring asks for the first. No verdict changed on the other 73 problems. The second run, with the fix, gave the table's 94.0. Only 25 of its answers match the first run's word for word (and get the same grades), and the two runs' mistakes don't overlap: only the first run's answers pass 49, 129, 132 and 134, only the second's 74 and 95 (p = 0.688). That is the run-to-run noise of [§6.2](#62-the-noise-floor-the-same-model-twice).
+
+**What it shows.**
+
+- **No language is clearly weaker than Python.** Problem by problem (McNemar's exact test, [§4](#4-reading-the-numbers)), Rust comes closest: Python alone passed 7 problems and Rust alone 1, p = 0.0703, or 0.492 after Holm's correction for seven languages. Java and Go are 6 to 1 (p = 0.125), JavaScript and C# 5 to 1 (p = 0.219), C++ 4 to 1 (p = 0.375) and TypeScript 3 to 1 (p = 0.625). The 1 is always 64, the only problem that Python failed and every other language passed. A hundred problems detect only large gaps ([§7](#7-caveats-read-before-quoting-these-numbers)); `--full` asks all 152.
+- **Four problems account for 17 of the 31 mistakes in the translations**, and Python passed all four:
+  - **134**, in six languages. Every failing answer strips trailing spaces before it looks at the last character, though the docstring's own example says `"apple pi e "` gives false; Go's also holds two attempts and doesn't compile. Python's answer stripped them too, and passed only because its last check looked at the unstripped text.
+  - **95**, in five, and in C#'s first run. Python's test has an integer key, `5`, which the translations had to write as the string `"5"`. Python's answer turned the integer away for not being a string. Every failing answer took `"5"`, which has no letters, for a lower-case key, so the test's dictionary passed as all lower case. The prompt's own example, a key `8` that makes the answer false, hints at the rule. It is passable, so not a defect, but only the translations set this trap.
+  - **126**, in four: "more than 1 duplicate of the same number" read as any duplicate, though the docstring's own example says `[1, 2, 2, 3, 3, 4]` is sorted.
+  - **113**, in two: the expected sentence is the docstring's, with each "i" replaced by a count. JavaScript's answer wrote "o" where the "i"s go and replaced every "o", and Java's put spaces beside the "i"s.
+- **Half the mistakes in the compiled languages are compile errors**, 12 of 24 in C#, Java, C++, Go and Rust: a name declared twice or reused from an enclosing scope (C# 129 and 132, Java 129, Go 134); a parameter the prompt names `strings`, which hides Go's `strings` package (Go 7 and 29); a type error (C# 49's `BigInteger` not cast to `long`, Rust 68's `usize` where an `isize` was due, Rust 121's `%` on a `&&isize`); an assignment to an immutable argument (Rust 122); a header that doesn't exist (C++ 156's `<pair>`); and `vector` without `std::` (C++ 75). The compiler points at each, so a model that compiled its code and read the errors could fix them, but the benchmark grades the first answer as written. One wrong answer is a Rust trap: 159 calls `saturating_sub` on a signed `isize`, which saturates at `isize::MIN`, not at 0, so it returned −6 carrots left where 0 was due.
+- **Time follows answer length.** The answers came at 45 to 48 tokens a second, all requests together, and the programs compiled and ran alongside, so each language took about as long as its answers took to write: 7 minutes for JavaScript's 194 tokens per answer, 16 for Java's 448.
+
+**The runs.**
 
 ```powershell
-kumaru bench run multipl_e -c qwen36 --context 65536 --no-think -n 100 --allow-code-exec
+$env:KUMARU_BACKEND__MODELS_DIR = 'D:\kumaru\models'      # where the model is stored
+$env:KUMARU_BACKEND__LLAMA_SERVER__N_CPU_MOE = '18'       # the GPU split of §3
+$env:KUMARU_CODE_WORKERS = '2'                            # programs at a time (§11.2)
+kumaru bench run multipl_e -c qwen36 --context 65536 --no-think -n 100 --allow-code-exec --out runs\bench\20261022-082009-qwen36-nothink
+kumaru bench run multipl_e_cs -c qwen36 --context 65536 --no-think -n 100 --allow-code-exec --out runs\bench\20261022-095557-qwen36-nothink-cs
 ```
 
-Each language's score, beside `multipl_e_py`'s, goes here.
+The second, after the fix, gave the C# row. The first took 95 minutes, the second 16. Neither had an error, an answer cut off at the token cap, a timeout or a skipped language.
 
 ## Related files
 

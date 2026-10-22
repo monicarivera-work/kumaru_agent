@@ -195,7 +195,7 @@ Kumaru finds tools in `PATH`'s absolute folders (`codeexec.find_program`), never
 | TypeScript | Node.js 22.7+; for type checking, also `npm install -g typescript` | Without `tsc`, types are stripped and not checked, so an answer with a type error can still pass. The fingerprint records which (`checker`), and runs with and without `tsc` don't mix. |
 | C# | [.NET 10 SDK](https://dotnet.microsoft.com/download) | Builds single-file apps (`dotnet build program.cs`). Each answer takes a few seconds to build. |
 | Java | a JDK, 17+ (e.g. [Eclipse Temurin](https://adoptium.net)), and the javatuples jar the tests import | Kumaru checks the jar's SHA-256 but never downloads it. Get it once: `curl.exe -L --create-dirs -o "$HOME\.cache\kumaru\javatuples-1.2.jar" https://repo1.maven.org/maven2/org/javatuples/javatuples/1.2/javatuples-1.2.jar`, or point `KUMARU_JAVATUPLES_JAR` at a copy. `javac` is found on `PATH` or in `JAVA_HOME` (an absolute one). |
-| C++ | GCC: on Windows [WinLibs](https://winlibs.com) or MSYS2's MinGW-w64; on Linux `build-essential` | The tests include `<bits/stdc++.h>`, which only GCC's standard library has. On Windows, programs are linked statically with Linux's 8 MB stack. |
+| C++ | GCC: on Windows [WinLibs](https://winlibs.com) or MSYS2's MinGW-w64; on Linux `build-essential` | The tests include `<bits/stdc++.h>`, which only GCC's standard library has. On Windows, programs are linked statically with Linux's 8 MB stack, but `long` stays 32 bits, so two problems can't pass there as they do on Linux ([below](#problems-no-answer-can-pass)). |
 | Go | [Go](https://go.dev/dl/) | Runs offline (`GOPROXY=off`, `GOTOOLCHAIN=local`). The first programs are slower while Go compiles the standard library into its cache. |
 | Rust | [rustup](https://rustup.rs) (`rustc`) | Windows builds get Linux's 8 MB stack too. |
 
@@ -214,21 +214,23 @@ Kumaru finds tools in `PATH`'s absolute folders (`codeexec.find_program`), never
 | C# | Mono (`csc`, then `mono`) | the .NET 10 SDK, `Debug` build |
 | Rust | edition 2015 | edition 2021, warnings allowed |
 | TypeScript | always type-checked with `tsc` | `tsc` when installed, else types stripped |
-| Windows | (Linux only) | C++ and Rust get Linux's 8 MB stack; C++ links statically |
+| Windows | (Linux only) | C++ and Rust get Linux's 8 MB stack; C++ links statically. C++'s `long` is 32 bits, not 64 ([below](#problems-no-answer-can-pass)). |
 | Go | the Go in MultiPL-E's container, older than 1.21 | the installed Go, offline. Newer Go accepts code that older Go rejected, such as the built-in `min` and `max` (Go 1.21). |
 | C# tests of a List or Dictionary result | `.Equals`, by reference: no answer passes ([#71](https://github.com/nuprl/MultiPL-E/issues/71); fixed in the translator since, not in the dataset) | rewritten as the fixed translator writes them (`SequenceEqual`; `Count` and `Except`) |
 
 ### Problems no answer can pass
 
-Kumaru applies only fixes MultiPL-E has made. These defects of the pinned dataset remain, so some languages can't score every problem:
+Kumaru applies only fixes MultiPL-E has made. These defects of the pinned dataset remain, plus one that Windows adds, so some languages can't score every problem:
 
 | Problem | Languages | Why |
 |---|---|---|
 | `HumanEval_92` (`any_int`) | all 7 translations | The answer turns on telling `3` from `3.0`, which Python can and the translations can't: each asks for the same call to be both true and false. JavaScript and TypeScript have one number type; C#, Java, C++ and Go pass floating-point numbers; Rust asserts `candidate(3.0, 4.0, 7.0)` both ways. MultiPL-E's fix ([#142](https://github.com/nuprl/MultiPL-E/issues/142)) drops contradictory assertions only when they are written alike, which only Rust's are. Kumaru doesn't apply it: Rust alone would gain a problem the other six can't pass, whereas leaving 92 unsolvable in all seven favours none. (#71, by contrast, puts C# back on a par with the others.) |
-| `HumanEval_136` (`largest_smallest_integers`) | C# | The function returns `Tuple<Nullable<long>,Nullable<long>>`, but the tests expect values such as `Tuple.Create((Nullable<long>)null, 1L)`, a `Tuple<Nullable<long>,long>`. Tuples of different types are never equal, so only the 2 of its 11 assertions that expect two nulls can pass. MultiPL-E hasn't fixed it. |
+| `HumanEval_136` (`largest_smallest_integers`) | C#, Java | The function returns a pair of optional numbers, and the tests compare it with values of other types, which are never equal. C# returns `Tuple<Nullable<long>,Nullable<long>>`, but the tests expect values such as `Tuple.Create((Nullable<long>)null, 1L)`, a `Tuple<Nullable<long>,long>`, so only the 2 of its 11 assertions that expect two nulls can pass. Java's wrap the expected values once too often: `Optional.of(Optional.empty())` for a missing number, and `Optional.of(Pair.with(-2l, 1l))` for a whole pair. MultiPL-E fixed Java's other `Optional` tests ([#47](https://github.com/nuprl/MultiPL-E/issues/47)), but its translator still writes these; it hasn't fixed C#'s either. |
 | `HumanEval_51` (`remove_vowels`) | JavaScript | A test string holds a raw line break, a syntax error in JavaScript. |
+| `HumanEval_87` (`get_row`) | Go | The function returns pairs, which Go's translation writes as `[]interface{}`. But some expected values put those pairs inside a `[][]int` literal, and one test passes a `[]interface{}` where the function takes `[][]int`. The test file never compiles, so no answer passes. MultiPL-E has no issue for it. |
+| `HumanEval_114` (`minSubArraySum`), `HumanEval_139` (`special_factorial`) | C++, on Windows only | The C++ translations write Python's integers as `long`, which is 64 bits on Linux, where MultiPL-E grades, but 32 bits on Windows, with MinGW as with MSVC. 114's test passes −9999999999999999 in a `std::vector<long>`, which cuts it to 32 bits before the call, so no answer passes on Windows. 139's expects 125411328000, so an answer passes only if it widens the prompt's `long` return type to `long long`. On Linux both can pass, so the Docker sandbox should grade them as MultiPL-E does (not yet tested). |
 
-So with all 152 problems, the best score is 152 in Python, 151 in TypeScript, Java, C++, Go and Rust, and 150 in JavaScript and C#.
+So with all 152 problems, the best score is 152 in Python; 151 in TypeScript and Rust, and in C++ on Linux; and 150 in JavaScript, C#, Java and Go, and in C++ on Windows, where 139 also needs that wider type. The fix for #71 and the scan for C++ numbers beyond 32 bits covered all 152 problems. The other defects were found by reading every failure of the first run, Qwen3.6's ([`BENCHMARKS.md`](../../../../../BENCHMARKS.md#115-results)), which asked 100 of them; the other 52 haven't been audited, so a language's best score may be lower.
 
 ## How to extend it
 

@@ -98,6 +98,8 @@ Three kinds of disagreement are excused and listed as `expected difference(s)`, 
 
 Anything else is a problem. Some differences are not visible in the agreement at all, because both sides fail the answer for different reasons: [`BENCHMARKS.md`](../../BENCHMARKS.md) explains each language's.
 
+One difference isn't excused yet. On Windows, C++'s `long` is 32 bits, not 64 as on Linux, so the answers to `HumanEval_114` that MultiPL-E passed fail here ([`multipl_e.md`](../src/kumaru/eval/benchmarks/multipl_e.md#problems-no-answer-can-pass)). The default sample of 200 holds none of them, but a larger `--sample` would report them as problems.
+
 ## Things worth knowing
 
 - **It has caught a real grader bug.** GSM8K answers used to match within a relative tolerance of 1e-6. Before the fix, the GSM8K line ended `wrong answer rejected 1317/1319` and the output finished with:
