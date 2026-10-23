@@ -628,7 +628,17 @@ def test_the_arms_and_the_pilot_differ_only_where_they_must() -> None:
     assert {k for k in teacher if teacher[k] != gold[k]} == {
         "output_dir", "run_name", "data.train_file", "data.eval_file",
     }  # fmt: skip
-    assert {k for k in teacher if teacher[k] != pilot[k]} == {"base_model", "output_dir", "run_name"}
+    # The pilot may also split the batch differently, to fit in memory, but not
+    # change it: the loss is averaged over the answer tokens of the whole batch.
+    split = {"optim.per_device_batch_size", "optim.gradient_accumulation_steps"}
+    assert {k for k in teacher if teacher[k] != pilot[k]} - split == {
+        "base_model", "output_dir", "run_name",
+    }  # fmt: skip
+    teacher_batch, pilot_batch = (
+        arm["optim.per_device_batch_size"] * arm["optim.gradient_accumulation_steps"]
+        for arm in (teacher, pilot)
+    )
+    assert pilot_batch == teacher_batch
     # The adapter kept is the checkpoint with the lowest eval loss, and the
     # trainer can only return to an evaluation it also saved.
     assert teacher["save_steps"] == teacher["eval_steps"]

@@ -1,9 +1,10 @@
 # Distillation pilot: the teacher-arm recipe of distill-gsm8k.yaml on the 0.5B
 # student. It needs about a third of the compute, so it is the cheap way to
 # check the whole pipeline, and to see whether distillation helps at all,
-# before spending the 1.5B run. It saves time, not memory: the loss over the
-# 151,936-token vocabulary, the same in both models, sets the peak, so expect
-# only 2-3 GB less than the 1.5B run.
+# before spending the 1.5B runs. It saves time, not memory: the loss over the
+# 151,936-token vocabulary, the same in both models, sets the peak. Measured on
+# an RTX 3090 (2026-10-22): 58 minutes and a peak of 21.6 GB reserved, at 2 rows
+# per forward pass; the 1.5B teacher arm, at 1 row, took 117 minutes and 13.8 GB.
 #
 #   kumaru train configs/train/distill-gsm8k-0.5b.yaml --dry-run
 #   kumaru train configs/train/distill-gsm8k-0.5b.yaml
@@ -11,10 +12,13 @@
 #   kumaru bench run gsm8k -c student -m Qwen/Qwen2.5-0.5B-Instruct --full --max-tokens 1024 --adapter runs/distill/qwen0.5b-teacher/adapter --label student0.5b-teacher -o runs/distill/eval-0.5b-teacher
 #   kumaru bench compare runs/distill/eval-0.5b-base runs/distill/eval-0.5b-teacher
 #
-# Identical to distill-gsm8k.yaml apart from base_model, output_dir and
-# run_name (a test enforces it), so what the pilot shows carries over. On the
-# smaller model, 8 x 4 instead of 4 x 8 (same effective batch) would run a
-# little faster; it is kept equal so the pilot is exactly the same recipe.
+# Identical to distill-gsm8k.yaml apart from base_model, output_dir, run_name
+# and the batch split (a test enforces it), so what the pilot shows carries
+# over. The same batch of 32 is split 2 x 16, not the arms' 1 x 32: two rows
+# per pass fit the smaller model, in half the passes, and the loss is the same
+# either way. At 4 x 8 the GPU's memory was full within 9 steps (24,234 of
+# 24,576 MiB in use across all processes, read with nvidia-smi), so that run
+# was stopped.
 
 task: lora
 base_model: Qwen/Qwen2.5-0.5B-Instruct
@@ -39,8 +43,8 @@ lora:
 
 optim:
   epochs: 2                # each question is seen twice; more mostly memorizes
-  per_device_batch_size: 4
-  gradient_accumulation_steps: 8    # effective batch = 4 x 8 = 32
+  per_device_batch_size: 2          # rows per forward pass: they set the peak memory
+  gradient_accumulation_steps: 16   # effective batch = 2 x 16 = 32, as in the arms
   learning_rate: 1.0e-4    # the low end for LoRA: the student must keep what it knows
   lr_scheduler: cosine
   warmup_ratio: 0.03

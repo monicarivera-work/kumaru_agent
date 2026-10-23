@@ -371,7 +371,7 @@ kumaru bench run gsm8k_train -c qwen36 --no-think --full --max-tokens 1024 --con
 - **`gsm8k_train`, never `gsm8k`.** `gsm8k` is the test split the student will be scored on. `kumaru distill` refuses runs of it, because training on test questions inflates exactly the score being measured.
 - **`--no-think`.** With thinking on, the student would see each answer without the reasoning that produced it, so `kumaru distill` refuses thinking runs by default.
 - **The 200-question pilot** checks the setup: `kumaru bench report runs\distill\teacher-qwen36` shows its accuracy and how many answers were cut off. The second command continues the same run and keeps those 200 answers.
-- **About 16 hours** (estimated): ~7,500 answers of ~330 tokens is ~2.5 million tokens, at the ~44 tokens per second Qwen3.6 generated beside a game ([BENCHMARKS.md §9](BENCHMARKS.md#9-run-mechanics)). The rest takes about 36 times as long as the pilot, a better estimate on your machine. Stop it whenever you need the GPU; repeating the command resumes it.
+- **16 hours**, measured: 7,473 answers of 365 tokens on average, at about 47 tokens per second, beside a game, with 18 expert layers in system RAM as in [BENCHMARKS.md §3](BENCHMARKS.md#3-how-the-comparison-was-run). The pilot took 28 minutes and the rest 34 times as long, so on your machine the pilot gives the estimate. Stop it whenever you need the GPU; repeating the command resumes it.
 
 ## Step 2 — Build the two datasets
 
@@ -393,7 +393,7 @@ kumaru train configs\train\distill-gsm8k-0.5b.yaml --dry-run
 kumaru train configs\train\distill-gsm8k-0.5b.yaml
 ```
 
-About 20–30 minutes (estimated). Afterwards, `runs\distill\qwen0.5b-teacher\metrics.json` holds two measurements: `train_seconds`, and `peak_gpu_memory_gb`, the most GPU memory the run held. The 1.5B arm takes two to three times as long and needs 2–3 GB more. To read the pilot's own score, see [its how-to](howto/configs/distill-gsm8k-0.5b.yaml.md#reading-the-result).
+58 minutes, measured. Afterwards, `runs\distill\qwen0.5b-teacher\metrics.json` holds two measurements: `train_seconds`, and `peak_gpu_memory_gb`, the most GPU memory the run held (21.6 GB). Each 1.5B arm took about twice as long but held less, because it takes one row per forward pass and the pilot two ([why that matters](howto/configs/distill-gsm8k.yaml.md#cost)). To read the pilot's own score, see [its how-to](howto/configs/distill-gsm8k-0.5b.yaml.md#reading-the-result).
 
 ## Step 4 — Score the untrained student
 
@@ -401,7 +401,7 @@ About 20–30 minutes (estimated). Afterwards, `runs\distill\qwen0.5b-teacher\me
 kumaru bench run gsm8k -c student --full --max-tokens 1024 --label student-base -o runs\distill\eval-base
 ```
 
-The [`student` profile](howto/configs/student.yaml.md) decodes greedily, 32 questions at a time, so all 1,319 test questions take minutes, in about 5 GB. Its first run downloads Qwen2.5-1.5B-Instruct, about 3 GB. Measure this baseline rather than quoting one: the Qwen2.5 report gives about 73% for this model, but prompts and grading differ between setups.
+The [`student` profile](howto/configs/student.yaml.md) decodes greedily, 32 questions at a time, so all 1,319 test questions take about 20 minutes (measured), in about 5 GB (estimated). Its first run downloads Qwen2.5-1.5B-Instruct, about 3 GB. Measure this baseline rather than quoting one: the Qwen2.5 report gives about 73% for this model, but prompts and grading differ between setups.
 
 ## Step 5 — Train both arms
 
@@ -413,7 +413,7 @@ kumaru train configs\train\distill-gsm8k-gold.yaml
 
 - **Check the dry run first**, as in [Part 1](#step-2--the-five-minute-smoke-run): the `SUPERVISED TOKENS` section of `runs\distill\qwen1.5b-teacher\example_preview.txt` must hold the answer and nothing of the question.
 - **Each run ends on its best checkpoint**, the one with the lowest validation loss, saved as `adapter\` in its `output_dir`.
-- **Out of memory:** set `per_device_batch_size: 2` and `gradient_accumulation_steps: 16` in all three recipes. The effective batch is unchanged, and the peak drops to about 10 GB.
+- **Out of memory, or steps far slower than ~17 seconds:** the arms already take one row per forward pass, and peaked at 13.8 GB (teacher) and 6.4 GB (gold). Free the GPU: close any game or other program using it. On Windows, running short shows as a slowdown rather than an error, because the driver spills into shared system memory (*Shared GPU memory* in Task Manager). Lowering `data.max_seq_length` in all three recipes also saves memory, but drops the longest answers ([details](howto/configs/distill-gsm8k.yaml.md#tuning-it)).
 
 ## Step 6 — Score both students and compare
 
@@ -421,39 +421,107 @@ kumaru train configs\train\distill-gsm8k-gold.yaml
 kumaru bench run gsm8k -c student --full --max-tokens 1024 --adapter runs\distill\qwen1.5b-teacher\adapter --label student-teacher -o runs\distill\eval-teacher
 kumaru bench run gsm8k -c student --full --max-tokens 1024 --adapter runs\distill\qwen1.5b-gold\adapter --label student-gold -o runs\distill\eval-gold
 kumaru bench compare runs\distill\eval-base runs\distill\eval-teacher
+kumaru bench compare runs\distill\eval-base runs\distill\eval-gold
 kumaru bench compare runs\distill\eval-gold runs\distill\eval-teacher -e 5
 ```
 
-`--label` names each run in the tables; without it, all three would be called `student-default`. `-e 5` also prints up to five questions the two runs answered differently.
+`--label` names each run in the tables; without it, all three would be called `student-default`. The comparisons ask, in order: did training on the teacher's answers help, did training on human answers help, and did the teacher's answers teach more than human ones. `-e 5` also prints up to five questions the two runs answered differently.
 
 ## What it costs
 
-On an RTX 3090. Every number is estimated, except what the pilot measures.
+Measured on an RTX 3090 (24 GB) under Windows 11, in [the 2026-10-22 run](#results-2026-10-22), except where marked.
 
 | Step | Time | GPU memory |
 |---|---|---|
-| 1. The teacher's answers | ~16 h beside a game | the `qwen36` profile's |
+| 1. The teacher's answers | 16.0 h, beside a game | the `qwen36` profile's |
 | 2. Both datasets | seconds | none (CPU) |
-| 3. The pilot, 0.5B | 20–30 min | peak ~12 GB |
-| 4 and 6. Each GSM8K score | minutes | ~5 GB |
-| 5. Teacher arm, 1.5B | ~1 h | plan for ~15 GB |
-| 5. Gold arm, 1.5B | ~½ h | ~9 GB |
+| 3. The pilot, 0.5B | 58 min | 21.6 GB, at 2 rows per pass |
+| 4. Scoring the untrained student | 20 min | ~5 GB (estimated) |
+| 5. Teacher arm, 1.5B | 117 min | 13.8 GB |
+| 5. Gold arm, 1.5B | 134 min with a game sharing the GPU; about 2 h without | 6.4 GB |
+| 6. Scoring each trained student | 78 min (teacher arm), 29 min (gold arm), perhaps with a game sharing the GPU | ~5 GB (estimated) |
 
-Those peaks are large for LoRA on a small model, and the loss is why. At every position, the model scores all 151,936 tokens of its vocabulary, in fp32: about 1.5 MB per token. The teacher's long answers make long batches, so the loss alone takes 4–10 GB ([the arithmetic](howto/configs/distill-gsm8k.yaml.md#cost)). The gold arm's short answers need less.
+- **Memory follows the rows per forward pass, not the model.** At every position the model scores all 151,936 tokens of its vocabulary, in fp32: about 1.5 MB per token, so one long answer needs ~2 GB for the loss alone. That is why the 0.5B pilot, at two rows per pass, held more than the 1.5B arms at one. The figures are what PyTorch reserved, its cache included, which is well above what the tensors needed: about 6 GB in the teacher arm, estimated ([the arithmetic](howto/configs/distill-gsm8k.yaml.md#cost)).
+- **Time follows the passes.** At one row per pass, a step of 32 passes took ~16.6 seconds in both arms, though the teacher's rows are twice as long: the cost of a pass, not its length, sets the pace. The pilot's 16 passes per step took half that.
+- **Scoring with an adapter is slower.** Unmerged, the adapter runs beside the base weights at every decoding step (one new token for each of the 32 answers decoded together), and a step took about twice as long: 1.96 times the base model's for the 0.5B, scored with and without its adapter back to back. The 1.5B arms measured 2.6 times, but were scored hours after their base, perhaps still beside the game that slowed the gold arm's training. The teacher arm's answers are also longer, and more of them run to the 1,024-token limit. `$env:KUMARU_BACKEND__EXTRA__MERGE_ADAPTER = 'true'` folds the adapter into the weights at load ([`backend.extra`](howto/configs/default.yaml.md#backendextra)), which should remove most of the adapter's cost; it was not tried here.
 
 ## Reading the result
 
 `kumaru bench compare` pairs two runs question by question: McNemar's exact test gives the p-value, and a paired bootstrap the interval ([how to read it](BENCHMARKS.md#4-reading-the-numbers)). At 1,319 questions, about 3 points is the smallest difference it reliably detects. Before concluding, train three seeds per arm: copy each recipe and change `optim.seed`, `output_dir` and `run_name`.
 
-| Result | What it means |
-|---|---|
-| Teacher arm significantly above gold | The teacher's answers taught more than human ones: distillation worked. |
-| No significant difference, both above base | Practice on GSM8K-style questions helped; the teacher added nothing measurable. |
-| Gold significantly above the teacher arm | Human solutions were better data for this student. Next: shorter teacher answers, or a mix of both datasets. |
-| Neither arm above base | Training changed nothing measurable. Check `example_preview.txt`, and that the training loss fell. |
+Read the teacher arm against base first: only a gain there is a gain. The arms against each other then say where it came from.
+
+| Teacher arm against base | Teacher arm against gold | What it means |
+|---|---|---|
+| Above | Above | Distillation worked: the teacher's answers taught more than human ones. |
+| Above | No difference | Practice on GSM8K-style questions helped; the teacher added nothing measurable. |
+| Any | Below | Human solutions were better data for this student. Next: shorter teacher answers, or a mix of both datasets. |
+| No difference | Above | No gain. The arms differ because the gold arm lost points, not because the teacher arm gained any. [The 2026-10-22 run](#results-2026-10-22) ended here. |
+| No difference | No difference | Training changed nothing measurable. Check `example_preview.txt`, and that the training loss fell. |
+| Below | Above or no difference | Training on the teacher's answers hurt. Look at the `-e 5` examples, and at how many answers were cut off (`kumaru bench report`). The [0.5B pilot](howto/configs/distill-gsm8k-0.5b.yaml.md#reading-the-result) fell this way against its untrained model. |
+
+"Above" and "below" mean a difference with a p-value under 0.05; "no difference", one without.
 
 - **Never compare the arms' validation losses.** Each is measured on its own kind of answer; only the GSM8K scores compare.
-- **The arms differ in length by design.** The teacher's answers are over three times as long (333 tokens on average in a sample, against 93). So a teacher win cannot say whether the teacher reasons better or only writes out more steps. A gold win is plausible too: Li et al. (2025) found that students of 3B parameters or fewer often learn more from short reasoning than from a strong teacher's long reasoning, and best from a mix of both ([details](howto/configs/distill-gsm8k-gold.yaml.md#cost-and-length)).
+- **The arms differ in length by design.** The teacher arm trains on 2.26 million answer tokens, the gold arm on 0.62 million: 335 against 92 per answer. So a teacher win cannot say whether the teacher reasons better or only writes out more steps. A gold win is plausible too: Li et al. (2025) found that students of 3B parameters or fewer often learn more from short reasoning than from a strong teacher's long reasoning, and best from a mix of both ([details](howto/configs/distill-gsm8k-gold.yaml.md#cost-and-length)).
+
+## Results, 2026-10-22
+
+Every step above, run once on an RTX 3090 (24 GB) under Windows 11 with a Ryzen 7 5700X, at commit `fd2dadd`, with the recipes as they are now: only their batch split differed from that commit's. One seed per arm.
+
+**Data.** The teacher answered all 7,473 training questions in 16.0 hours, 95.3% of them correctly. `kumaru distill build` kept 7,089 answers (6,751 for training, 338 for validation); it dropped 352 wrong, 21 unfinished, 7 that failed the arithmetic check and 4 as too close to a test question. `kumaru distill gold` matched 7,069 of those questions (6,732 and 337); for the other 20, GSM8K's own solution failed the arithmetic check.
+
+**Training.** Each run took 422 steps of 32 rows.
+
+| Run | Rows per pass × passes | Time | Peak GPU memory | Validation loss: first evaluation → kept checkpoint |
+|---|---|---|---|---|
+| Pilot, 0.5B, teacher's answers | 2 × 16 | 58 min | 21.6 GB | 0.331 → 0.285, last step |
+| Teacher arm, 1.5B | 1 × 32 | 117 min | 13.8 GB | 0.260 → 0.221, last step |
+| Gold arm, 1.5B | 1 × 32 | 134 min | 6.4 GB | 0.422 → 0.410, step 200 (0.411 at the last) |
+
+The teacher arm's validation loss fell at every evaluation. The gold arm's was lowest after about one epoch, so the run kept that checkpoint. Until step ~175, its steps took as long as the teacher arm's; then a game took about 5 GB of the GPU, and they slowed by about a quarter.
+
+**Scores.** All 1,319 GSM8K test questions, greedy, `--max-tokens 1024`:
+
+| Student | Accuracy (95% CI) | Cut off | Tokens per answer | Scoring time |
+|---|---|---|---|---|
+| 1.5B, untrained | 72.3 (69.8–74.6) | 6 | 293 | 20 min |
+| 1.5B, teacher arm | 71.9 (69.4–74.2) | 47 | 356 | 78 min |
+| 1.5B, gold arm | 61.2 (58.5–63.8) | 9 | 97 | 29 min |
+| 0.5B, untrained | 50.3 (47.6–53.0) | 17 | 307 | 21 min |
+| 0.5B, teacher's answers (the pilot) | 44.7 (42.0–47.3) | 63 | 356 | 54 min |
+
+The two 1.5B arms were scored after the gold arm's training, perhaps still beside the game, so their scoring times may be inflated ([why an adapter is slower anyway](#what-it-costs)).
+
+| Comparison, A → B | B − A, points (95% CI) | Only A right / only B right | p | Verdict |
+|---|---|---|---|---|
+| Untrained → teacher arm | −0.4 (−2.9 to +2.1) | 148 / 143 | 0.815 | no clear difference |
+| Untrained → gold arm | −11.1 (−13.8 to −8.3) | 258 / 112 | 2.19e-14 | untrained better |
+| Gold arm → teacher arm | +10.7 (+7.8 to +13.6) | 128 / 269 | 1.24e-12 | teacher arm better |
+| 0.5B untrained → 0.5B pilot | −5.6 (−8.3 to −2.9) | 206 / 132 | 6.74e-05 | untrained better |
+
+**What the answers show.**
+
+- **Each student took the format of its training answers.** The teacher arm opens steps with `**Step` headers (1,120 of 1,319 answers) and ends with an `Answer:` line (all 1,272 it finished), where the untrained model often boxes its answer instead (`\boxed`, 784 answers). The gold arm writes GSM8K's terse plain text: 82 tokens at the median, and an `Answer:` line in all 1,310 it finished.
+- **The teacher arm ran long.** 47 of its answers hit the token limit (the untrained model's: 6), 12 of them repeating themselves; the untrained model got 22 of those 47 questions right. On the 1,266 questions where neither run was cut off, the untrained model got 931 right and the teacher arm 944: a difference picked after the fact, and within noise.
+- **The gold arm stopped reaching the answer.** The questions only the untrained model got right, sorted by what went wrong:
+
+| Student | Only the untrained model right | Cut off | Right number in the working, wrong final answer | Right number nowhere |
+|---|---|---|---|---|
+| 1.5B, teacher arm | 148 | 22 | 39 | 87 |
+| 1.5B, gold arm | 258 | 4 | 36 | 218 |
+| 0.5B, the pilot | 206 | 19 | 48 | 139 |
+
+**What it means.**
+
+- **Distillation added nothing measurable at 1.5B.** The teacher arm learned the teacher's format, not more math: fine-tuning teaches [form](#first-do-you-actually-need-to-train). A likely reason: Qwen2.5-Instruct's own fine-tuning already included step-by-step math solutions, filtered for correct answers by rejection sampling (Qwen2.5 technical report, 2024), much like the data this pipeline makes.
+- **The gold arm lost 11 points.** Trained on GSM8K's terse solutions, the student learned to skip the working: its answers are a third as long, and in 218 of its 258 losses the right number appears nowhere.
+- **So the teacher arm's lead over gold is not a teacher gain.** It is mostly long worked answers beating terse ones, as [the length caveat](#reading-the-result) warns.
+- **The 0.5B lost 5.6 points where the 1.5B held even.** That fits Li et al. (2025): students of 3B parameters or fewer gain less from a strong teacher. The 0.5B also took the teacher's format (`**Step` in 1,134 answers) and was cut off more often (63 answers against 17).
+
+**Caveats.** One seed per arm, where this guide recommends three. The 11-point gaps are far larger than a change of seed usually moves a score; teacher arm against base could move by a point or two. About 3 points is the smallest difference 1,319 questions reliably detect, so a smaller gain would go unseen.
+
+**Decision.** Training on GSM8K stopped here. The pipeline works end to end, from the teacher's answers to the comparison, but this student, already tuned on math, gained nothing measurable from it on GSM8K. If you take it further, a task the student was not already tuned on is the more telling test ([below](#where-to-take-it-next), item 3).
 
 ## Where to take it next
 
