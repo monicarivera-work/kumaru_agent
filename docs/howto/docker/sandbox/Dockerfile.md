@@ -6,7 +6,7 @@
 
 ---
 
-> **Status: built and checked** on 2026-10-23, with Docker Desktop 4.39.0 (engine 28.0.1, WSL 2). It built the first time, as written, in about 3 minutes, to 3.54 GB. Graded in it, [`check_graders.py`](../../scripts/check_graders.py.md) reproduces HumanEval's verdicts and MultiPL-E's in all 8 languages as closely as the local runner does ([`BENCHMARKS.md` §11.4](../../../BENCHMARKS.md#114-are-its-graders-right)). Rerun that check after a rebuild, since the Ubuntu packages aren't pinned.
+> **Status: built and checked** on 2026-10-23, with Docker Desktop 4.39.0 (engine 28.0.1, WSL 2). It built the first time, as written, in about 3 minutes, to 3.54 GB. Graded in it, [`check_graders.py`](../../scripts/check_graders.py.md) passes all 492 of HumanEval's programs and reproduces MultiPL-E's verdicts as closely as the local runner does ([`BENCHMARKS.md` §11.4](../../../BENCHMARKS.md#114-are-its-graders-right)): 200 of 200 in Python, JavaScript, Java, C++ and Rust; 196 in TypeScript, 199 in C# and 198 in Go, the rest expected differences. C++'s `HumanEval_114` and `HumanEval_139`, which Windows's 32-bit `long` breaks, get MultiPL-E's verdict on all 100 of its published answers. Rerun that check after a rebuild, since the Ubuntu packages aren't pinned.
 
 ## What it does
 
@@ -27,11 +27,11 @@ Then it:
 - prints every tool's version, so a broken stage fails the build;
 - ends as `USER 65534:65534` (nobody) in `/work`.
 
-What the 2026-10-23 build contains:
+What the 2026-10-23 build contains, on Ubuntu 24.04.5:
 
 | Tool | Version | Size |
 |---|---|---|
-| Python | 3.12.3 (Ubuntu's `python3` 3.12.3-0ubuntu2.1) | |
+| Python | 3.12.3 (Ubuntu's `python3` 3.12.3-0ubuntu2.1, `python3.12` 3.12.3-1ubuntu0.17) | |
 | Node.js, TypeScript | 24.22.1, 5.9.3 | 23 MB for TypeScript |
 | .NET SDK | 10.0.402 (runtime 10.0.13) | 624 MB |
 | OpenJDK | 21.0.12.1 (`openjdk-21-jdk-headless` 21.0.12.1+1-1~24.04.4), javatuples 1.2 | 286 MB |

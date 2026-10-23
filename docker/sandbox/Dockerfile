@@ -5,9 +5,13 @@
 #
 # STATUS: built and checked on 2026-10-23, with Docker Desktop 4.39.0 (engine
 # 28.0.1, WSL 2), as first written: 3.54 GB, in about 3 minutes. Graded in
-# it, scripts/check_graders.py reproduced HumanEval's verdicts and MultiPL-E's
-# in all 8 languages as closely as the local runner does (docs/BENCHMARKS.md,
-# section 11.4). Rerun that check after rebuilding, before trusting results:
+# it, scripts/check_graders.py passed HumanEval's 492 programs and reproduced
+# MultiPL-E's verdicts as closely as the local runner does (docs/BENCHMARKS.md,
+# section 11.4): 200 of 200 in Python, JavaScript, Java, C++ and Rust; 196 in
+# TypeScript, 199 in C# and 198 in Go, the rest expected differences. C++'s
+# HumanEval_114 and _139, which Windows's 32-bit long breaks, got MultiPL-E's
+# verdict on all 100 of its published answers. Rerun the check after
+# rebuilding, before trusting results:
 #
 #   python scripts/check_graders.py humaneval multipl_e --sandbox docker --workers 2
 #
@@ -37,7 +41,9 @@
 # imagetools inspect node:24-bookworm-slim` prints the digest), or override
 # one at build time: --build-arg NODE_IMAGE=node:24-bookworm-slim@sha256:...
 # The Ubuntu packages below (python3, g++, OpenJDK) are not pinned; the
-# 2026-10-23 build got Python 3.12.3, g++ 13.3.0 and OpenJDK 21.0.12.1.
+# 2026-10-23 build got Ubuntu 24.04.5 with python3.12 3.12.3-1ubuntu0.17,
+# g++-13 13.3.0-6ubuntu2~24.04.1 and openjdk-21-jdk-headless
+# 21.0.12.1+1-1~24.04.4.
 ARG GO_IMAGE=golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437
 ARG RUST_IMAGE=rust:1.90-slim-bookworm@sha256:64232e656c058f4468e8d024e990acff04f0fd5a5c0a88a574dc37773d7325c9
 ARG NODE_IMAGE=node:24-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205

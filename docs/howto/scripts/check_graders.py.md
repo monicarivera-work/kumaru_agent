@@ -13,7 +13,7 @@
 | `gsm8k` | Each of the 1,319 reference answers, in 5 phrasings (`Answer: 18`, `**Answer:** $1,080`, `\boxed{1{,}080}`, ...), grades correct; the reference + 1 grades wrong | 7,914 gradings |
 | `mmlu_pro` | Each of the 12,032 gold letters, in 6 phrasings (`The answer is (C)`, `\boxed{\text{(C)}}`, "not (A). The answer is (C)", ...), grades correct; a wrong letter grades wrong; removing junk options never moves the gold option, which still appears in the prompt | 84,224 gradings |
 | `humaneval` | All 164 reference solutions pass their hidden tests in 3 forms (whole function, body only, unindented body); a wrong solution fails; an infinite loop times out; the guard blocks `os.remove` | 495 Python processes |
-| `multipl_e`, or one language: `multipl_e_<lang>` | MultiPL-E has no reference solutions in most languages, so this replays answers its authors already ran and graded with their own harness: StarCoder2-15B's (Python: replit-code-v1-3b's), from `nuprl/MultiPL-E-completions` at a pinned commit. Kumaru grades each through `kumaru bench`'s own path (answer reading, assembly, compile, run) and must reach the same pass/fail verdict, apart from three excused kinds of difference (below). `multipl_e` checks every language whose toolchain is installed and reports the rest as not checked; a language named on its own fails the check if its toolchain is missing | `--sample` (200) model-written programs per language |
+| `multipl_e`, or one language: `multipl_e_<lang>` | MultiPL-E has no reference solutions in most languages, so this replays answers its authors already ran and graded with their own harness: StarCoder2-15B's (Python: replit-code-v1-3b's), from `nuprl/MultiPL-E-completions` at a pinned commit. Kumaru grades each through `kumaru bench`'s own path (answer reading, assembly, compile, run) and must reach the same pass/fail verdict, apart from four excused kinds of difference (below). `multipl_e` checks every language whose toolchain is installed and reports the rest as not checked; a language named on its own fails the check if its toolchain is missing | `--sample` (200) model-written programs per language |
 
 With no names it runs `gsm8k`, `mmlu_pro` and `humaneval`, which need no compilers. It prints one line per benchmark (`passed/total` for each phrasing; for MultiPL-E, the agreement) and exits 0 only if everything held.
 
@@ -76,11 +76,12 @@ multipl_e_py (python 3.12.6): 200/200 of MultiPL-E's verdicts on replit_code com
   MultiPL-E OK               100: Kumaru {'passed': 100}
   MultiPL-E SyntaxError       48: Kumaru {'failed': 48}
   MultiPL-E Timeout            4: Kumaru {'timeout': 4}
-multipl_e_ts (node v24.17.0; types stripped): 195/200 of MultiPL-E's verdicts on starcoder2_15b completions reproduced, 120 problems, 155s
+multipl_e_ts (node v24.17.0; types stripped): 195/200 of MultiPL-E's verdicts on starcoder2_15b completions reproduced, 120 problems, 115s
   ...
   MultiPL-E SyntaxError       30: Kumaru {'failed': 25, 'passed': 5}
   MultiPL-E Timeout           10: Kumaru {'timeout': 10}
-  5 expected difference(s): tsc rejected it; without tsc, types are not checked
+  4 expected difference(s): tsc failed on top-level statements Kumaru drops (not declarations), such as a file path
+  1 expected difference(s): tsc rejected it; without tsc, types are not checked
 multipl_e_go: not checked, Go needs the go command, which is not on PATH. Install Go: https://go.dev/dl/
 ```
 
@@ -99,7 +100,7 @@ Four kinds of disagreement are excused and listed as `expected difference(s)`, b
 
 Anything else is a problem. Some differences are not visible in the agreement at all, because both sides fail the answer for different reasons: [`BENCHMARKS.md`](../../BENCHMARKS.md) explains each language's.
 
-One difference isn't excused yet. On Windows, C++'s `long` is 32 bits, not 64 as on Linux, so the answers to `HumanEval_114` that MultiPL-E passed fail here ([`multipl_e.md`](../src/kumaru/eval/benchmarks/multipl_e.md#problems-no-answer-can-pass)). The default sample of 200 holds none of them, but a larger `--sample` would report them as problems.
+One difference isn't excused yet. On Windows, C++'s `long` is 32 bits, not 64 as on Linux, so the answers to `HumanEval_114` that MultiPL-E passed fail here ([`multipl_e.md`](../src/kumaru/eval/benchmarks/multipl_e.md#problems-no-answer-can-pass)). Under `--sandbox docker`, which is Linux, they pass, as they did for MultiPL-E. The default sample of 200 holds none of them, but on Windows a larger `--sample` would report them as problems.
 
 ## Things worth knowing
 
