@@ -247,6 +247,9 @@ class Replay:
     status: str
     completion: str
     stderr: str
+    # The program MultiPL-E ran, and its output: where tsc reports its errors.
+    program: str = ""
+    stdout: str = ""
 
 
 def completion_rows(lang: str) -> list[dict[str, Any]]:
@@ -291,9 +294,17 @@ def sample_replays(rows: list[dict[str, Any]], size: int, seed: int = 0) -> list
     rng = random.Random(seed)
     by_status: dict[str, dict[str, list[Replay]]] = defaultdict(lambda: defaultdict(list))
     for row in rows:
-        verdicts = zip(row["completions"], row["statuses"], row["stderrs"], strict=True)
-        for index, (completion, status, stderr) in enumerate(verdicts):
-            replay = Replay(row["problem"], index, status, completion, stderr or "")
+        blank = [""] * len(row["completions"])
+        verdicts = zip(
+            row["completions"],
+            row["statuses"],
+            row["stderrs"],
+            row.get("programs") or blank,
+            row.get("stdouts") or blank,
+            strict=True,
+        )
+        for index, (completion, status, stderr, program, stdout) in enumerate(verdicts):
+            replay = Replay(row["problem"], index, status, completion, stderr or "", program or "", stdout or "")
             by_status[status][row["problem"]].append(replay)
     counts = {status: sum(map(len, problems.values())) for status, problems in by_status.items()}
     picked: list[Replay] = []
@@ -310,8 +321,39 @@ def sample_replays(rows: list[dict[str, Any]], size: int, seed: int = 0) -> list
     return picked
 
 
-def expected_difference(bench: multipl_e.MultiPLE, replay: Replay, grade: Grade) -> str:
+# Where tsc reports an error: "<file>(<line>,<column>): error TS<code>: ...".
+_TSC_ERROR_LINE = re.compile(r"\((\d+),\d+\): error TS\d+")
+
+
+def dropped_by_kumaru(bench: multipl_e.MultiPLE, replay: Replay, item: BenchItem) -> bool:
+    """Is the first line MultiPL-E's tsc rejected one that Kumaru's program leaves out?
+
+    Kumaru keeps a TypeScript answer's declarations and drops its other
+    top-level statements (multipl_e._assemble_js); MultiPL-E compiles them.
+    StarCoder2 often writes a file path after the function, such as
+    `/src/kata/7kyu/sum.ts`, which tsc reads as a regular expression, or an
+    example call cut off mid-string. tsc lists errors in file order, and the
+    later ones can follow from the first (an unterminated string runs into
+    the next line), so only the first counts.
+    """
+    numbers = [int(n) for n in _TSC_ERROR_LINE.findall(replay.stdout)]
+    lines = replay.program.splitlines()
+    if bench.lang != "ts" or not numbers or max(numbers) > len(lines):
+        return False
+    meta, entry = item.meta, item.meta["entry_point"]
+    code = multipl_e.extract_answer(replay.completion, "ts", entry)
+    source, _ = multipl_e.solution_source(meta["prompt"], code, entry, "ts")
+    program = multipl_e.assemble("ts", meta["prompt"], source, meta["tests"], "", entry)
+    kept = {line.strip() for line in program.splitlines()}
+    return lines[min(numbers) - 1].strip() not in kept
+
+
+def expected_difference(
+    bench: multipl_e.MultiPLE, replay: Replay, grade: Grade, item: BenchItem | None = None
+) -> str:
     """Why Kumaru may rightly disagree with MultiPL-E here ("" if it may not)."""
+    if replay.status == "SyntaxError" and grade.correct and item and dropped_by_kumaru(bench, replay, item):
+        return "tsc failed on top-level statements Kumaru drops (not declarations), such as a file path"
     strip_only = bench.lang == "ts" and bench.toolchain.checker == "strip"
     if strip_only and replay.status == "SyntaxError" and grade.correct:
         return "tsc rejected it; without tsc, types are not checked"
@@ -367,7 +409,7 @@ def check_multipl_e_language(lang: str, *, skip_missing: bool = False) -> list[s
         if grade.correct == (replay.status == "OK"):
             agree += 1
             continue
-        reason = expected_difference(bench, replay, grade)
+        reason = expected_difference(bench, replay, grade, items[replay.problem])
         if reason:
             explained[reason] += 1
             continue

@@ -143,5 +143,5 @@ Results and method: [docs/BENCHMARKS.md](../BENCHMARKS.md).
 | `scripts/setup.ps1` | [page](scripts/setup.ps1.md) | One-shot install |
 | `scripts/get-llama-server.ps1` | [page](scripts/get-llama-server.ps1.md) | Installing or upgrading the llama.cpp server |
 | `scripts/verify.ps1` | [page](scripts/verify.ps1.md) | Full self-check, layer by layer |
-| `docker/sandbox/Dockerfile` | [page](docker/sandbox/Dockerfile.md) | The `--sandbox docker` image for code benchmarks (not yet built or tested) |
+| `docker/sandbox/Dockerfile` | [page](docker/sandbox/Dockerfile.md) | The `--sandbox docker` image for code benchmarks (built and checked on 2026-10-23) |
 | `tests/` | [page](tests/README.md) | What the suite protects, and how to add to it |

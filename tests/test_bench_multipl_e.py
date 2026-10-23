@@ -965,6 +965,27 @@ def test_only_documented_differences_from_multipl_e_are_excused(check_graders) -
     ts._toolchain = dataclasses.replace(ts._toolchain, checker="tsc")
     assert excuse(ts, type_error, passed) == ""
 
+    # tsc failed on a file path written after the function, which Kumaru drops.
+    prompt = "function f(x: number): number {\n"
+    completion = "    return x;\n}\n/src/kata/7kyu/f.ts\n"
+    tests = "declare var require: any;\nconst assert = require('node:assert');\nassert.deepEqual(f(1), 1);\n"
+    item = BenchItem(id="HumanEval_0_f", prompt="", meta={"prompt": prompt, "tests": tests, "entry_point": "f"})
+    tsc_says = "x.ts(4,6): error TS1499: Unknown regular expression flag.\n"
+    stray = replay("HumanEval_0_f", 0, "SyntaxError", completion, "", prompt + completion + tests, tsc_says)
+    assert "Kumaru drops" in excuse(ts, stray, passed, item)
+    assert excuse(ts, stray, failed, item) == ""
+    assert excuse(js, stray, passed, item) == ""
+    # An error on a line Kumaru keeps is not excused, unless an earlier one led to it.
+    kept_error = "x.ts(2,5): error TS2322: Type 'string' is not assignable.\n"
+    assert excuse(ts, dataclasses.replace(stray, stdout=kept_error), passed, item) == ""
+    assert excuse(ts, dataclasses.replace(stray, stdout=kept_error + tsc_says), passed, item) == ""
+    assert excuse(ts, dataclasses.replace(stray, stdout=""), passed, item) == ""
+    cut_off = "    return x;\n}\nconsole.log(f(\"1.txt.\n"
+    runs_on = "x.ts(4,15): error TS1002: Unterminated string literal.\nx.ts(5,1): error TS1005: ',' expected.\n"
+    call = replay("HumanEval_0_f", 0, "SyntaxError", cut_off, "", prompt + cut_off + tests, runs_on)
+    assert "declare var require" in call.program.splitlines()[4]
+    assert "Kumaru drops" in excuse(ts, call, passed, item)
+
 
 def test_the_self_check_grades_in_the_sandbox_it_is_given(
     check_graders, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

@@ -219,7 +219,7 @@ Only 104 of the 427 answers came out identical word for word, and most of the re
 - **Contamination.** GSM8K and HumanEval have been public since 2021, MultiPL-E's translations of HumanEval since 2022 and MMLU-Pro since 2024; newer models may have seen them in training. Your golden set is immune; grow it.
 - **The thinking cap.** Think-on scores used a 4,096-token thinking budget to bound run time ([§3](#3-how-the-comparison-was-run)). It cut short 24 of the 100 MMLU-Pro answers, so it likely understates Think on. Chat thinks without that cap.
 - **One run per configuration**, with the run-to-run noise measured in [§6.2](#62-the-noise-floor-the-same-model-twice).
-- **HumanEval and MultiPL-E run model-written code** on your machine, as you. Each program gets a fresh temporary folder, a scrubbed environment and time limits (HumanEval: 15 s; MultiPL-E: 120 s to compile, 15 s to run), and everything it started is killed when it ends. On Windows its memory is also capped (4 GB). HumanEval's Python also gets a guard that disables destructive `os`/`shutil`/`subprocess` calls. That stops accidents, not a determined adversary: it is not a sandbox. `--sandbox docker` runs each program in a throwaway container with no network, a read-only root and CPU, memory and process limits, but its image is not yet built or tested ([§11.3](#113-where-the-code-runs)). Until it is, evaluate models you do not trust in a container or VM.
+- **HumanEval and MultiPL-E run model-written code** on your machine, as you. Each program gets a fresh temporary folder, a scrubbed environment and time limits (HumanEval: 15 s; MultiPL-E: 120 s to compile, 15 s to run), and everything it started is killed when it ends. On Windows its memory is also capped (4 GB). HumanEval's Python also gets a guard that disables destructive `os`/`shutil`/`subprocess` calls. That stops accidents, not a determined adversary: it is not a sandbox. `--sandbox docker` runs each program in a throwaway container with no network, a read-only root and CPU, memory and process limits ([§11.3](#113-where-the-code-runs)). Evaluate models you do not trust with it, or in a container or VM.
 
 ## 8. Your own golden questions
 
@@ -259,7 +259,7 @@ Every number in this document can be traced to individual answers.
 | `-j N` | Questions in flight (default: as many as the backend can batch) |
 | `--use-agent-prompt` | Include Kumaru's system prompt, as chat does |
 | `--allow-code-exec` | Required for `humaneval` and `multipl_e`: they run model-written code |
-| `--sandbox docker` | Run that code in a container without network instead of on your machine ([§11.3](#113-where-the-code-runs); the image is not yet tested) |
+| `--sandbox docker` | Run that code in a container without network instead of on your machine ([§11.3](#113-where-the-code-runs); build its image first) |
 | `-o <folder>` | Write to (or resume) this folder |
 
 **How long it takes** on the hardware above, for golden plus 100 questions of each public benchmark:
@@ -342,7 +342,7 @@ That stops accidents, not adversaries: the program runs as you, can read your fi
 
 `--sandbox docker` runs each program in a throwaway container instead: no network, a read-only root, an unprivileged user without capabilities, 2 CPUs, 2 GB of memory and 512 processes. That is a real boundary. The image, built from [`docker/sandbox/Dockerfile`](howto/docker/sandbox/Dockerfile.md), carries every toolchain, because nothing can be downloaded inside it. The sandbox and the compiler versions are part of a run's fingerprint, so one run never mixes programs graded inside and outside it.
 
-**Status: the image is written but has not been built or tested**, because Docker was not set up on the machine this was developed on. Build it, check its graders, then use it:
+**Status: built and checked** on 2026-10-23, with Docker Desktop 4.39.0 on WSL 2. The image built the first time, as written: 3.54 GB, with Python 3.12.3, Node.js 24.22.1 with TypeScript 5.9.3, .NET SDK 10.0.402, OpenJDK 21.0.12.1, g++ 13.3.0, Go 1.25.14 and rustc 1.90.0. Its graders agree with HumanEval's and MultiPL-E's as closely as the local ones do ([§11.4](#114-are-its-graders-right)). Starting a container adds about a second to each program. Building takes about 11 GB of Docker's disk ([`Dockerfile.md`](howto/docker/sandbox/Dockerfile.md#how-to-use-it)). Build it, check its graders, then use it:
 
 ```powershell
 docker build -t kumaru-sandbox -f docker/sandbox/Dockerfile .
@@ -381,6 +381,7 @@ Agreement compares verdicts, pass or fail. The kind of failure can differ withou
 
 **Deliberate differences from MultiPL-E's harness.**
 - Answers may be whole functions, as chat models write them, as well as continuations.
+- JavaScript, TypeScript and C# keep only an answer's declarations and imports, so a stray statement after the function, such as an example call, can't fail it.
 - Time limits: 120 s to compile and 15 s to run, where MultiPL-E allows 5 to 30 s by language.
 - C# builds with .NET 10 instead of Mono.
 - Rust compiles as edition 2021 with warnings allowed, instead of 2015.

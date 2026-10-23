@@ -271,6 +271,7 @@ def test_docker_runs_each_program_without_network_privileges_or_a_writable_root(
         "--pull never",
         "--pids-limit 512",
         "--memory 2g --memory-swap 2g",
+        "--ulimit core=1",
     ):
         assert flag in joined
     assert joined.index("--env A=1") < joined.index("--env B=2")

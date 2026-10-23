@@ -210,6 +210,7 @@ Kumaru finds tools in `PATH`'s absolute folders (`codeexec.find_program`), never
 | | MultiPL-E | Kumaru |
 |---|---|---|
 | Answers | base-model completions of the body | whole functions from a chat model (completions still work) |
+| Statements after the function | compiled and run with the tests, so a stray one (an example call, or a file path StarCoder2 wrote after the function) can fail the answer | JavaScript, TypeScript and C# keep only declarations and imports ([above](#how-each-languages-program-is-assembled)) |
 | Time limits | 5 to 30 s by language | 120 s to compile, 15 s to run |
 | C# | Mono (`csc`, then `mono`) | the .NET 10 SDK, `Debug` build |
 | Rust | edition 2015 | edition 2021, warnings allowed |

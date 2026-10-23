@@ -599,6 +599,10 @@ def docker_command(docker: str, image: str, name: str, env: dict[str, str], scri
 
     `docker` is the docker program's absolute path. The program's files arrive
     on stdin as a tar archive; only /work and /tmp (both in memory) are writable.
+
+    `--ulimit core=1` stops core dumps of crashed programs. Docker Desktop's WSL
+    VM pipes them to Windows, into %TEMP%\\wsl-crashes (1.1 GB for one crashed
+    Node.js); Linux skips a piped dump only when the limit is exactly 1, not 0.
     """
     argv = [
         docker, "run", "--rm", "-i", "--pull", "never", "--name", name,
@@ -606,6 +610,7 @@ def docker_command(docker: str, image: str, name: str, env: dict[str, str], scri
         "--tmpfs", "/work:rw,exec,nosuid,nodev,size=512m,mode=1777",
         "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=1g,mode=1777",
         "--memory", "2g", "--memory-swap", "2g", "--cpus", "2", "--pids-limit", "512",
+        "--ulimit", "core=1",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
         "--user", "65534:65534", "--workdir", "/work",
         "--env", "HOME=/tmp/home", "--env", "TMPDIR=/tmp", "--env", "DOTNET_CLI_HOME=/tmp/home",

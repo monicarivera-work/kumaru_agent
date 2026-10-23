@@ -148,14 +148,16 @@ Each program then runs as (`docker` being the absolute path `find_program` found
 ```
 docker run --rm -i --pull never --name kumaru-<random> --network none --read-only
   --tmpfs /work:rw,exec,nosuid,nodev,size=512m,mode=1777 --tmpfs /tmp:rw,exec,nosuid,nodev,size=1g,mode=1777
-  --memory 2g --memory-swap 2g --cpus 2 --pids-limit 512 --cap-drop ALL --security-opt no-new-privileges
+  --memory 2g --memory-swap 2g --cpus 2 --pids-limit 512 --ulimit core=1 --cap-drop ALL --security-opt no-new-privileges
   --user 65534:65534 --workdir /work --env HOME=/tmp/home --env TMPDIR=/tmp --env DOTNET_CLI_HOME=/tmp/home
   [--env <the language's variables>] --entrypoint /bin/sh kumaru-sandbox -c <script>
 ```
 
 The script unpacks the files from stdin, runs each step as `timeout -k 2 <limit> <command>`, and after each prints a record fenced by a random token: the step number, its exit code, its milliseconds, whether the marker appeared, and the last 4 KB of each stream. Kumaru allows the container the sum of every step's limit plus 2 s each, plus 30 s to start; past that it runs `docker rm -f` and records a `timeout`.
 
-> The image has not yet been built or tested ([`Dockerfile.md`](../../../../docker/sandbox/Dockerfile.md)). Before trusting results from it, run `python scripts\check_graders.py humaneval multipl_e --sandbox docker`.
+`--ulimit core=1` turns off core dumps. Without it, a program that crashes (a segfault or an abort) leaves one, and Docker Desktop's WSL VM sends it to Windows, into `%TEMP%\wsl-crashes`: 1.1 GB for one Node.js that aborted. Linux skips that kind of dump only when the limit is exactly 1, so `core=0` doesn't stop it.
+
+> The image was built and checked on 2026-10-23 ([`Dockerfile.md`](../../../../docker/sandbox/Dockerfile.md)): graded in it, HumanEval's and MultiPL-E's verdicts are reproduced as closely as on the host. After rebuilding it, run `python scripts\check_graders.py humaneval multipl_e --sandbox docker` again before trusting results from it.
 
 ## How to extend it
 
