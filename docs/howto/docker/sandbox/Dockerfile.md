@@ -73,7 +73,7 @@ Build it once, from the Kumaru folder:
 docker build -t kumaru-sandbox -f docker/sandbox/Dockerfile .
 ```
 
-It needs about 11 GB free where Docker keeps its data: after the build, `docker system df` counted 7.6 GB of images (the 3.54 GB image, plus layers it was built from) and 3.4 GB of build cache. On Windows that is Docker Desktop's virtual disk (`docker_data.vhdx`), which grows as needed but doesn't shrink by itself when images are deleted. Building pulls 4 images from Docker Hub, which allows anonymous users about 10 pulls an hour, so rebuild from the cache rather than after `docker system prune`.
+It needs about 11 GB free where Docker keeps its data: after the build, `docker system df` counted 7.6 GB of images, for the one 3.54 GB image, and 3.4 GB of build cache. On Windows that is Docker Desktop's virtual disk (`docker_data.vhdx`), which grows as needed but doesn't shrink by itself when images are deleted. Building pulls 4 images from Docker Hub, which allows anonymous users about 10 pulls an hour, so rebuild from the cache rather than after `docker system prune`.
 
 Check that its graders agree with HumanEval's and MultiPL-E's own verdicts, then grade in it:
 
@@ -103,7 +103,7 @@ Each base image can be replaced at build time, with its tag and digest together 
 | The build fails at the final version checks | A stage changed its layout (e.g. a new base image). | Read which tool failed and fix its `COPY` or `PATH`. |
 | `Sandbox setup step 'cp -R /opt/gocache /tmp/gocache' failed` | The image lacks the warm Go cache. | Rebuild from this file. |
 | Every C# answer fails or times out in the sandbox | `dotnet build` tries to reach the network or a writable folder that isn't there. The image as built doesn't: 199 of 200 C# verdicts match MultiPL-E's. | Check `HOME` and `DOTNET_CLI_HOME` (both `/tmp/home`) and the `#:property` lines in `multipl_e.py`, then run `check_graders.py multipl_e_cs --sandbox docker`. |
-| `%TEMP%\wsl-crashes` fills with `wsl-crash-*.dmp` files, up to 1.1 GB each | Docker Desktop's WSL VM sends the core dump of every crashed process to Windows. Kumaru's containers get `--ulimit core=1`, the only limit that stops them (0 doesn't), so a container started some other way. | Delete the files; start containers with `--ulimit core=1`. |
+| `%TEMP%\wsl-crashes` fills with `wsl-crash-*.dmp` files, up to 1.1 GB each | Docker Desktop's WSL VM sends the core dump of every crashed process to Windows. Kumaru's containers get `--ulimit core=1`, the only limit that stops them (0 doesn't), so the dumps come from a container started some other way. | Delete the files; start containers with `--ulimit core=1`. |
 
 ## Related files
 
