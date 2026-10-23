@@ -411,3 +411,41 @@ def test_check_docker_says_how_to_get_docker_and_the_image(monkeypatch: pytest.M
     answer.update(code=0, out="sha256:abc\n")
     assert codeexec.check_docker() == "sha256:abc"
     assert calls[-1][:3] == [DOCKER, "image", "inspect"]
+
+
+def test_check_docker_wakes_a_paused_docker_desktop_before_calling_the_image_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Docker Desktop's Resource Saver answers a lookup by name with "No such
+    # image" until a container starts; a missing image can't start one either.
+    monkeypatch.delenv("KUMARU_SANDBOX_IMAGE", raising=False)
+    find_docker(monkeypatch)
+    calls: list[list[str]] = []
+    state = {"awake": False, "image": True}
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[1] == "run":
+            if not state["image"]:
+                return subprocess.CompletedProcess(argv, 125, "", "No such image: kumaru-sandbox:latest")
+            state["awake"] = True
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if state["awake"]:
+            return subprocess.CompletedProcess(argv, 0, "sha256:abc\n", "")
+        return subprocess.CompletedProcess(argv, 1, "", 'Error response from daemon: {"message":"No such image"}')
+
+    monkeypatch.setattr(codeexec.subprocess, "run", run)
+    assert codeexec.check_docker() == "sha256:abc"
+    inspect = [DOCKER, "image", "inspect", "--format", "{{.Id}}", "kumaru-sandbox"]
+    wake = [DOCKER, "run", "--rm", "--pull", "never", "--network", "none", "--entrypoint", "/bin/true", "kumaru-sandbox"]
+    assert calls == [inspect, wake, inspect]
+
+    calls.clear()
+    assert codeexec.check_docker() == "sha256:abc"
+    assert calls == [inspect]  # awake: no container
+
+    state.update(awake=False, image=False)
+    calls.clear()
+    with pytest.raises(ToolchainMissing, match="no image 'kumaru-sandbox'.*kumaru-sandbox:latest"):
+        codeexec.check_docker()
+    assert calls == [inspect, wake]

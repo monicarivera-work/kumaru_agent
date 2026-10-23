@@ -48,7 +48,8 @@ Without a sandbox, model-written programs run as you, with your files and your n
 ```
 docker build  ->  kumaru-sandbox (3.54 GB, about 3 minutes)
 kumaru bench run ... --sandbox docker
-  -> preflight: docker image inspect kumaru-sandbox  (its ID goes into the results fingerprint)
+  -> preflight: docker image inspect kumaru-sandbox  (its ID goes into the results fingerprint; if that
+                fails, a container running /bin/true wakes a paused Docker Desktop, and it asks again)
   -> per answer: docker run --rm -i --pull never --network none --read-only ...
                    --entrypoint /bin/sh kumaru-sandbox -c <script>
        stdin: a tar of the program's files -> /work (in memory)
@@ -96,6 +97,7 @@ Each base image can be replaced at build time, with its tag and digest together 
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `Docker has no image 'kumaru-sandbox', or the Docker daemon is not running` | Not built yet, or Docker Desktop isn't running. | Start Docker, then build it (above). |
+| `docker image inspect kumaru-sandbox` says `No such image`, though `docker image ls` lists it | Docker Desktop's [Resource Saver](https://docs.docker.com/desktop/use-desktop/resource-saver/) paused the engine after 5 minutes without a container. Until a container starts, Docker answers other commands without waking it, and finds the image by its ID but not by its name. Kumaru's preflight starts one (`/bin/true`) before it calls the image missing, so only commands you type see this. | Start any container from it (`docker run --rm kumaru-sandbox true`), or turn Resource Saver off in Docker Desktop's **Settings > Resources**. |
 | The build fails at `ADD --checksum` | Maven Central served a different file, or an old Docker without BuildKit. | Check the download; use a current Docker (BuildKit is the default). |
 | The build fails at `FROM` with `not found` for a `sha256:` digest | The registry no longer serves that pinned digest. | Move the pin: the same tag with its current digest (`docker buildx imagetools inspect <tag>`), passed as `--build-arg` or edited in the file. |
 | The build fails at the final version checks | A stage changed its layout (e.g. a new base image). | Read which tool failed and fix its `COPY` or `PATH`. |

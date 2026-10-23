@@ -569,14 +569,10 @@ def _docker_program(image: str) -> str:
     return docker
 
 
-def check_docker(image: str | None = None) -> str:
-    """The sandbox image's ID. Raises ToolchainMissing unless Docker runs and has the image."""
-    image = image or docker_image()
-    build = _build_command(image)
-    docker = _docker_program(image)
+def _ask_docker(argv: list[str], image: str) -> subprocess.CompletedProcess[str]:
     try:
-        proc = subprocess.run(
-            [docker, "image", "inspect", "--format", "{{.Id}}", image],
+        return subprocess.run(
+            argv,
             capture_output=True,
             text=True,
             timeout=60,
@@ -585,6 +581,28 @@ def check_docker(image: str | None = None) -> str:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ToolchainMissing(f"Could not ask Docker about image '{image}': {exc}") from exc
+
+
+def check_docker(image: str | None = None) -> str:
+    """The sandbox image's ID. Raises ToolchainMissing unless Docker runs and has the image.
+
+    After 5 minutes without a container, Docker Desktop's Resource Saver
+    pauses the engine, and answers commands that start no container without
+    waking it. Paused, it finds an image by its ID but not by its name, so the
+    lookup fails ("No such image") although the image exists. Starting a
+    container wakes it. So when the lookup fails, this starts one from the
+    image (`/bin/true`, no network) and looks again; if the image really is
+    missing, the container can't start either, and Docker says why.
+    """
+    image = image or docker_image()
+    build = _build_command(image)
+    docker = _docker_program(image)
+    inspect = [docker, "image", "inspect", "--format", "{{.Id}}", image]
+    proc = _ask_docker(inspect, image)
+    if proc.returncode != 0:
+        wake = [docker, "run", "--rm", "--pull", "never", "--network", "none", "--entrypoint", "/bin/true", image]
+        woken = _ask_docker(wake, image)
+        proc = _ask_docker(inspect, image) if woken.returncode == 0 else woken
     if proc.returncode != 0:
         raise ToolchainMissing(
             f"Docker has no image '{image}', or the Docker daemon is not running: "

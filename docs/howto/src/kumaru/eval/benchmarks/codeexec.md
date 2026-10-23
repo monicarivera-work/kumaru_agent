@@ -91,7 +91,7 @@ The job object also carries three limits:
 | `child_env` | `child_env(program: Program, workdir: Path) -> dict[str, str]` | The environment a local step sees. |
 | `memory_limit_mb` | `memory_limit_mb() -> int` | `KUMARU_CODE_MEMORY_MB`, else 4096. |
 | `docker_image` | `docker_image() -> str` | `KUMARU_SANDBOX_IMAGE`, else `kumaru-sandbox`. |
-| `check_docker` | `check_docker(image: str \| None = None) -> str` | The image's ID. Raises `ToolchainMissing`, with a hint that gives the `docker build` command, when Docker isn't installed (not in a `PATH` folder), isn't running or lacks the image. |
+| `check_docker` | `check_docker(image: str \| None = None) -> str` | The image's ID. Raises `ToolchainMissing`, with a hint that gives the `docker build` command, when Docker isn't installed (not in a `PATH` folder), isn't running or lacks the image. When the lookup by name fails, it first starts a container from the image (`/bin/true`, no network) and looks again: Docker Desktop's Resource Saver, which pauses the engine after 5 minutes without a container, answers lookups by name with `No such image` until a container starts. |
 | `docker_command` | `docker_command(docker: str, image: str, name: str, env: dict[str, str], script: str) -> list[str]` | The `docker run` argv, starting with `docker`, the docker program's absolute path from `find_program` (limits listed in [Run it in Docker](#run-it-in-docker)). |
 | `docker_script` | `docker_script(program: Program, token: str) -> str` | The `/bin/sh` script a container runs. |
 | `parse_docker_output` | `parse_docker_output(stdout: str, token: str, program: Program) -> Outcome` | The script's records back into an `Outcome`. A step that exits with 124 or 137 after at least 95% of its limit timed out. |
@@ -168,7 +168,7 @@ The script unpacks the files from stdin, runs each step as `timeout -k 2 <limit>
 - **Another isolation** (a VM, a remote runner) would be a third value in `SANDBOXES` and a `_run_<name>` that returns the same `Outcome`s. Keep the pass rule (exit 0 and the marker) and the per-stage statuses.
 - **A setup step** (`stage="setup"`) prepares the folder, e.g. the Go cache copy in Docker. Its failure raises instead of failing the answer, because the answer never ran.
 
-Pinned behaviour: `tests\test_bench_codeexec.py` (the pass rule, stages, a timeout that kills a grandchild process, secrets withheld, the folder removed, the output tail, the memory and process caps, the worker limit, `find_program` passing over decoys in the current folder and in relative `PATH` entries, and the Docker command, script, record parsing and failure handling, with Docker faked).
+Pinned behaviour: `tests\test_bench_codeexec.py` (the pass rule, stages, a timeout that kills a grandchild process, secrets withheld, the folder removed, the output tail, the memory and process caps, the worker limit, `find_program` passing over decoys in the current folder and in relative `PATH` entries, and the Docker command, script, record parsing and failure handling, and waking a paused Docker Desktop, with Docker faked).
 
 ## Failure modes
 
