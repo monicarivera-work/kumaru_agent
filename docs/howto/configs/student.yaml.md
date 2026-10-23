@@ -37,6 +37,8 @@ Everything not listed below comes from [`configs/default.yaml`](default.yaml.md)
 
 **VRAM, estimated:** the weights take 1.5B × 2 bytes ≈ 3.1 GB, and the KV cache ≈ 1.1 GB. About 5 GB in all, so it fits beside other work.
 
+**Time, measured** on an RTX 3090 on 2026-10-22, for all 1,319 GSM8K questions at `--max-tokens 1024`: 20 minutes for the untrained student, 78 with the teacher arm's adapter and 29 with the gold arm's. The adapter runs unmerged, beside the base weights, at every token: about 2.6 times the base model's time per token. The teacher arm's answers were also longer, and more of them ran to the limit. `$env:KUMARU_BACKEND__EXTRA__MERGE_ADAPTER = 'true'` folds the adapter into the weights at load ([`backend.extra`](default.yaml.md#backendextra)), which should remove most of the difference; it was not tried here.
+
 **Batching, measured** on Qwen2.5-0.5B with 16 GSM8K questions:
 
 | Precision | Speed-up at batch 8 | Answers identical to one-at-a-time | Accuracy |

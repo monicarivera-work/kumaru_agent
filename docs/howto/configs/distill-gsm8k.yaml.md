@@ -16,9 +16,9 @@ Three files, one recipe:
 |---|---|---|
 | `distill-gsm8k.yaml` | (the reference) | Does training on the teacher's answers raise the student's GSM8K score? |
 | [`distill-gsm8k-gold.yaml`](distill-gsm8k-gold.yaml.md) | the data: GSM8K's human-written solutions to the same questions | Did the gain come from the teacher, or only from practice on GSM8K-style questions? |
-| [`distill-gsm8k-0.5b.yaml`](distill-gsm8k-0.5b.yaml.md) | `base_model`: Qwen2.5-0.5B-Instruct | Does the pipeline work, and does distillation help at all, for a third of the compute? |
+| [`distill-gsm8k-0.5b.yaml`](distill-gsm8k-0.5b.yaml.md) | `base_model`: Qwen2.5-0.5B-Instruct; and the batch split, 2 × 16 | Does the pipeline work, and does distillation help at all, in half the time? |
 
-A comparison is fair only if nothing but the tested factor changed, so `test_the_arms_and_the_pilot_differ_only_where_they_must` (in `tests/test_distill.py`) fails if any other setting differs.
+A comparison is fair only if nothing but the tested factor changed, so `test_the_arms_and_the_pilot_differ_only_where_they_must` (in `tests/test_distill.py`) fails if any other setting differs. The pilot may split the batch of 32 rows differently, to fit its memory, but not change its size.
 
 ## When to use this profile
 
@@ -45,14 +45,14 @@ A comparison is fair only if nothing but the tested factor changed, so `test_the
 | `lora.target_modules` | list[string] | all seven projections | The layers that get an adapter: attention (`q`, `k`, `v`, `o`) and MLP (`gate`, `up`, `down`). | Keep all seven. In the QLoRA paper, adapters on every linear layer were needed to match full fine-tuning (Dettmers et al., 2023). |
 | `lora.bias` | string | `none` | Whether biases train. | Keep `none`. |
 | `optim.epochs` | float | `2` | Passes over the training rows. | Each question twice. The validation loss, logged every 50 steps, shows whether more would help: if it is still falling at the end, try 3. |
-| `optim.per_device_batch_size` | int | `4` | Rows per forward pass. | It sets peak memory (see below). On out-of-memory, use 2 with `gradient_accumulation_steps: 16`. |
-| `optim.gradient_accumulation_steps` | int | `8` | Forward passes summed into one optimizer step. | Effective batch 4 × 8 = 32 rows: ~210 steps per epoch. |
+| `optim.per_device_batch_size` | int | `1` | Rows per forward pass. | It sets the peak memory ([Cost](#cost)). One row per pass fits either arm beside a game; the 0.5B pilot takes 2. |
+| `optim.gradient_accumulation_steps` | int | `32` | Forward passes summed into one optimizer step. | Effective batch 1 × 32 = 32 rows: 211 steps per epoch. Any split of the 32 rows computes the same loss: transformers divides it by the answer tokens of all 32, not by the number of passes. |
 | `optim.learning_rate` | float | `1.0e-4` | Peak learning rate. | The low end of LoRA's usual 1e-4 to 3e-4. The student is already a capable instruction model; the update should change how it reasons without erasing what it knows. |
 | `optim.lr_scheduler` | string | `cosine` | How the learning rate decays after warmup. | Keep. |
 | `optim.warmup_ratio` | float | `0.03` | Share of the steps over which the learning rate ramps up from 0. | 13 of ~420 steps. Must be below 1. |
 | `optim.weight_decay` | float | `0.0` | Shrinks the trained weights each step. | 0, as in the other LoRA recipes. |
 | `optim.max_grad_norm` | float | `1.0` | Gradient clipping. | Keep. |
-| `optim.gradient_checkpointing` | bool | `true` | Recompute each layer's activations during the backward pass instead of storing them. | Keep. About 30% slower, but storing them takes roughly 100 KB per token per layer: ~15 GB on the longest batches (estimated). |
+| `optim.gradient_checkpointing` | bool | `true` | Recompute each layer's activations during the backward pass instead of storing them. | Keep. About 30% slower, but storing them takes roughly 100 KB per token per layer: ~4 GB for the longest row (estimated). |
 | `optim.optimizer` | string | `adamw_torch` | PyTorch's AdamW. | Keep. Needs no bitsandbytes, and its state for 18.5M parameters is only ~150 MB. |
 | `optim.bf16` | bool | `true` | bfloat16 weights and compute. | Keep on an RTX 30-series or newer. |
 | `optim.seed` | int | `42` | LoRA initialization, row order and dropout. | Change it, with `output_dir` and `run_name`, for each repeat: three seeds per arm show how much of a difference is luck. The held-out questions do not move; `kumaru distill build --seed` chose them. |
@@ -66,21 +66,24 @@ Fields not listed keep their defaults ([`config.md`](../src/kumaru/train/config.
 
 ## Cost
 
-On an RTX 3090; estimated, not yet measured. The [0.5B pilot](distill-gsm8k-0.5b.yaml.md) measures both time and memory first: its `metrics.json` records `train_seconds` and `peak_gpu_memory_gb`.
+Measured on an RTX 3090 (24 GB) under Windows 11, on 2026-10-22 ([the whole run](../../TRAINING.md#results-2026-10-22)).
 
-- **Steps.** About 7,000 of the teacher's answers pass the checks, ~6,700 of them training rows: ~210 steps per epoch, ~420 in all. `--dry-run` prints the real number.
-- **Time.** About an hour, or two to three times the pilot's time; longer while a game shares the GPU.
-- **Memory.** Plan for ~15 GB, or the pilot's peak plus 2-3 GB. A typical batch needs about 9 GB, but the batches holding the longest answers peak near 15, and PyTorch keeps the peak reserved for the rest of the run, so the peak is what must fit beside a game.
+- **Steps.** 7,089 of the teacher's answers passed the checks, 6,751 of them training rows: 211 steps per epoch, 422 in all. `--dry-run` prints the number for your data.
+- **Time.** 117 minutes: about 16.6 seconds per step of 32 one-row passes. At this size a pass costs about the same whatever its length: the gold arm's steps, on rows half as long, took as long, until a game sharing the GPU slowed them by about a quarter.
+- **Memory.** A peak of 13.8 GB, as `metrics.json` reports it (`peak_gpu_memory_gb`). That is what PyTorch reserved, its cache included; the tensors themselves need about 6 GB at the longest row (estimated):
 
-| Part | Size | Why |
+| Part | At the longest row | Why |
 |---|---|---|
 | Base weights | 3.1 GB | 1.54B parameters × 2 bytes (bf16). |
 | Adapter, gradients, AdamW state | ~0.3 GB | 18.5M parameters × 16 bytes, all in fp32. |
-| Activations | 0.5-1 GB | Only each layer's input is stored; one layer at a time is recomputed. |
-| The loss over the vocabulary | 4-10 GB | 1.5-1.8 MB per token: see below. |
-| CUDA context and allocator slack | ~1 GB | |
+| Activations | ~0.3 GB | Only each layer's input is stored; one layer at a time is recomputed. |
+| The loss over the vocabulary | 2.0-2.4 GB | 1.5-1.8 MB per token, over up to ~1,330 tokens: see below. |
+| In use, at most | ~6 GB | The sum, estimated. |
+| Reserved, measured | 13.8 GB | Most likely the rest is PyTorch's cache: see below. |
 
-The loss is the surprise. At every position the model scores all 151,936 tokens of its vocabulary, and transformers upcasts those scores to fp32 to compute the loss: the bf16 scores, their fp32 copy and the log-probabilities together take about 1.5 MB per token, more in the backward pass. A batch is padded to its longest row. Encoded the way the trainer encodes them, the teacher's answers to a 100-question sample give rows of 455 tokens at the median, and a typical batch of 4 pads to ~2,300 positions: ~4 GB. A batch holding one of the longest rows (up to ~1,330 tokens) pads to ~5,300: nearly 10 GB for the loss alone. That is why the 0.5B pilot, with the same vocabulary, saves only 2-3 GB, and why halving the batch is the fix for out-of-memory errors.
+The loss is the surprise. At every position the model scores all 151,936 tokens of its vocabulary, and transformers upcasts those scores to fp32 to compute the loss: the bf16 scores, their fp32 copy and the log-probabilities together take about 1.5 MB per token, more in the backward pass. Encoded the way the trainer encodes them, the teacher's answers to a 100-question sample give rows of 455 tokens at the median (~0.7 GB for the loss) and up to ~1,330 (~2.4 GB). Rows that share a pass are padded to the longest of them, so the cost grows with the rows per pass: at 4, as this recipe first had, a pass holding one of the longest rows pads to ~5,300 positions, nearly 10 GB for the loss alone. That is why the rows per pass, not the model, set the peak. The 0.5B pilot scores the same vocabulary, and at 2 rows per pass it held 21.6 GB, more than this arm at 1.
+
+**Why the reservation is so much larger.** `peak_gpu_memory_gb` is `torch.cuda.max_memory_reserved()`. PyTorch keeps freed memory reserved for reuse, and rows of every length leave blocks of every size, so the reservation most likely grows well past what is in use at any moment: 13.8 GB against ~6 here, 6.4 against ~4.4 in the gold arm, and 21.6 against ~6 for the pilot (estimates). PyTorch hands its cache back only when the card refuses an allocation. On Windows, by default, the driver does not refuse: past the card's memory, it hands out shared system memory (*sysmem fallback*), and training slows instead of failing. At 4 rows per pass, the pilot's reservation reached the card's 24 GB within 9 steps.
 
 ## How to use it
 
@@ -109,7 +112,7 @@ To repeat an arm with another seed, copy the file, then change `optim.seed`, `ou
 
 Change all three files together; the arm test fails otherwise.
 
-1. **Out of memory:** `per_device_batch_size: 2` and `gradient_accumulation_steps: 16`. Same effective batch; the peak drops to about 10 GB.
+1. **Out of memory, or steps far slower than ~17 seconds:** this recipe already takes one row per pass. Free the GPU first: close any game, OBS or anything else that holds GPU memory. Next, lower `data.max_seq_length` in all three recipes; that drops the longest answers, often those to the hardest questions, and the dry run says how many. On Windows, setting NVIDIA Control Panel's *CUDA - Sysmem Fallback Policy* to *Prefer No Sysmem Fallback* should turn the slowdown into a refused allocation, which PyTorch answers by emptying its cache and retrying; this was not tried here.
 2. **Validation loss still falling at the last evaluation:** `epochs: 3`.
 3. **Validation loss lowest early, rising after:** the run already ends on the best checkpoint. For the next run, lower `learning_rate` to `5.0e-5`, or train 1 epoch.
 4. **Two teacher answers per question** (`kumaru distill build` given two runs): about twice the rows, steps and time. `lora.r: 32` gives the adapter room for them.
@@ -121,8 +124,8 @@ Change all three files together; the arm test fails otherwise.
 |---|---|---|
 | `Training data not found: runs\distill\data-teacher\train.jsonl` | The dataset is not built, or `kumaru train` ran in another folder. | `kumaru distill build ...` (above); run from the Kumaru folder. |
 | `dropped N/M example(s) (x%) longer than 1536 tokens` | Answers longer than `kumaru distill build --max-tokens` allowed, or a much longer prompt. | A few are harmless. Many: rebuild with a lower `--max-tokens`, or raise `max_seq_length` (more memory). |
-| CUDA out of memory, early or at one long batch | The loss over the vocabulary on 4 long rows, plus what a game or OBS holds. | Tuning, step 1; or close the game while training. |
-| `test_the_arms_and_the_pilot_differ_only_where_they_must` fails | One file was edited alone. | Make the same change in all three. |
+| CUDA out of memory, or steps far slower than ~17 seconds | What a game or OBS holds, on top of PyTorch's cache. On Windows, running short slows training instead of failing: *Shared GPU memory* rises in Task Manager. | Tuning, step 1. |
+| `test_the_arms_and_the_pilot_differ_only_where_they_must` fails | One file was edited alone, or the pilot's batch split no longer makes 32 rows. | Make the same change in all three. The pilot may split the batch differently, but not change its size. |
 | Size-mismatch error when scoring the adapter | It is scored on another base model (for example a 0.5B adapter on the 1.5B student). | Pass the matching `-m` to `kumaru bench run`. |
 | The two arms score within a few points of each other | Possibly no real difference: at 1,319 questions, about 3 points is the smallest reliably detectable. | Read `kumaru bench compare`'s p-value; train three seeds per arm before concluding. |
 
