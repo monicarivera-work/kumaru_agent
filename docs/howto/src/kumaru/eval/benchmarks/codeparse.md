@@ -48,7 +48,7 @@ A reply can degenerate into tens of thousands of characters of repetition (`@@@@
 - **Each lookup is indexed once.**
   - `matching` pairs every bracket of a text in one pass, and remembers the last 8 texts.
   - `chunks` measures each run of whitespace once.
-  - `defines` finds the `=` after JavaScript's `const name: Type` in a sorted list of the `=` and `;` positions.
+  - `defines` finds the `=` after JavaScript's `const name: Type` in a sorted list of the `=` and `;` positions, and a binding's brace depth in a sorted list of the braces.
   - `find_definition` reads back from each `name(` for the type before it.
 
 Before these, 4,000 `@` took 1 s to read as C#, and a reply of 20,000 took 148 s to grade; 10,000 `const add:` took 8 s as JavaScript. The tests read every ASCII punctuation character and every prefix the scanner probes, repeated to 4,000 characters, in each language, and fail if one takes more than 0.25 s. The slowest now takes under 0.02 s.
@@ -91,7 +91,7 @@ int main() { twice({1}); }     // piece 4: multipl_e.py drops it, since the test
 | `matching` | `matching(masked: str, i: int) -> int` | The index of the bracket closing `masked[i]` (`(`, `[` or `{`), or -1. Raises `KeyError` for any other character. |
 | `Chunk` | `Chunk(start, end, text, code)`, `.head` | One piece: its span, its original text and its masked text. |
 | `chunks` | `chunks(text, lang, *, masked=None, start=0, end=None) -> list[Chunk]` | The top-level pieces of `text[start:end]`. Pass `start` and `end` to cut the inside of a class body. |
-| `defines` | `defines(code: str, name: str, lang: str, *, masked: str \| None = None) -> bool` | Whether `code` defines function `name`. |
+| `defines` | `defines(code: str, name: str, lang: str, *, masked: str \| None = None) -> bool` | Whether `code` defines function `name`. In JavaScript and TypeScript that is `function name(`, or a `const`, `let` or `var` binding at the code's top level, its shallowest brace depth. Code that closes a `}` it never opened is a function body, and a binding in it is a local variable, even one named after the function (`let intersection = …` in `intersection`). |
 | `find_definition` | `find_definition(masked: str, name: str) -> int` | C++, Java, C#: where `T name(...) {` (or `=> …`) starts, or -1. The word before `name` must be a type, not a keyword such as `return` or `new`. |
 | `LANGUAGES` | `("js", "ts", "java", "cs", "cpp", "go", "rs")` | |
 
@@ -122,9 +122,10 @@ See [`multipl_e.md`](multipl_e.md).
 - **Keep it linear.** A probe that can fail must not be retried from each following character: remember what it read, as `_cs_fail` and `_dead` do. Recursion must be bounded, as holes are by `_MAX_NESTING`. Add each new prefix to `PUMPS` in `tests\test_bench_codeparse.py`, which times a long run of it in every language.
 - **A token that continues a statement after `}`**: add it to `_AFTER_BRACE` for the language, or to `_AFTER_BRACE_WORDS`.
 - **A new language**: add it to `LANGUAGES`, then to the language checks in `_Scanner` (`_literal`, comments) and `chunks` (statement ends), and to `defines`. Then test `mask` and `chunks` on what models write in it: imports, generics, lambdas, nested types, attributes.
-- **Bugs show up as compile errors.** When a MultiPL-E answer fails to compile, run `scripts\check_graders.py multipl_e_<lang>`: a disagreement on an answer MultiPL-E passed often means a piece was cut in the wrong place. Two such bugs, found while checking whole answers, are pinned as tests:
+- **Bugs show up as compile errors.** When a MultiPL-E answer fails to compile, run `scripts\check_graders.py multipl_e_<lang>`: a disagreement on an answer MultiPL-E passed often means a piece was cut in the wrong place. Three such bugs are pinned as tests:
   - `import { a } from "m"` was cut at its `}`, which is why `from` now continues a statement;
-  - `void` was taken for a keyword, so `void main(` was missed and a model's own `main` was kept beside the tests' `main`.
+  - `void` was taken for a keyword, so `void main(` was missed and a model's own `main` was kept beside the tests' `main`;
+  - a function body that names a local variable after its function (`let intersection = …` in `intersection`) was taken for a whole answer, so the program never defined the function, and `tsc` reported `TS2349` (`… has no call signatures`) at the tests' calls. A binding now counts only at the top level. This one was found in the Docker sandbox, which type-checks TypeScript; 52 completions that MultiPL-E passed (19 JavaScript, 33 TypeScript) had failed this way.
 
 Pinned behaviour: `tests\test_bench_codeparse.py`.
 
@@ -133,6 +134,7 @@ Pinned behaviour: `tests\test_bench_codeparse.py`.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | A MultiPL-E answer fails with `compile_error`, and the assembled program has half a function, or one split across pieces | A literal form or continuation this module doesn't know: the masked text has a stray bracket, or a piece ended early. | Reproduce with `chunks(answer, lang)`; fix the scanner or the continuation tokens, and add a test. |
+| `mode: whole` on an answer that is a function body, and the tests fail with `TypeError: candidate is not a function`, or `ReferenceError` for one of the function's parameters (`tsc`: `TS2349`) | `defines` took something in the body for the function's definition. | Reproduce with `defines(answer, name, lang)`, and add the case to `test_defines_tells_definitions_from_calls`. |
 | A model's helper function is missing from the assembled program | The helper's piece was classified as something to drop (an example call, a test). | Check `Chunk.head` for the piece and the caller's rules in `multipl_e.py`. |
 | `ValueError: unsupported language 'py'` | Python isn't handled here; it doesn't need to be (`humaneval.py` assembles Python). | Use one of `LANGUAGES`. |
 | Grading one answer takes seconds or more, the CPU busy in this module | A scan went quadratic on a long, repetitive reply: a probe or a regex that reads again what it read. | Profile `mask` and `chunks` on the item's `output` (`python -m cProfile`); fix the probe, and add the repeated piece to `PUMPS`. |

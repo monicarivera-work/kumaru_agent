@@ -1,6 +1,6 @@
 # `tests/`
 
-> The offline regression suite. 736 tests, no GPU, no downloads, under a minute.
+> The offline regression suite. 740 tests, no GPU, no downloads, under a minute.
 
 **Read this when:** you have changed something and want to know whether you broke it, or you are adding a feature and need to know where its test belongs.
 
@@ -52,7 +52,7 @@ $env:KUMARU_TEST_TOOLCHAINS = '1'; .\.venv\Scripts\python.exe -m pytest tests\te
 | `test_cli.py` | Flag handling, one-shot chat, `config` and the `bench` commands breaking; every command runs in-process on the echo backend |
 | `test_llamacpp_server.py` | llama-server model resolution, command line, request payload and failure handling regressing; no process is started and nothing is downloaded |
 | `test_bench_codeexec.py` | A model-written program passing without printing the marker after its last test, outliving its time limit, leaving processes or its temporary folder behind, starting more than 512 processes, or seeing environment variables it wasn't given; the Windows memory cap or the worker limit not holding; a missing compiler being scored instead of reported; a toolchain or Docker found in the current folder or a relative `PATH` entry; the Docker path losing `--network none`, its read-only root or a limit (Docker itself is faked) |
-| `test_bench_codeparse.py` | Braces in strings or comments read as code, or an answer cut in the wrong place (a JavaScript or Go statement at a line break, the `{}` of Go's `interface{}`, an `import { … } from` list), which turns a right answer into a compile error; a long, repetitive reply (`@@@@…`, `/[/[…`, deep `${` holes) taking quadratic time or a `RecursionError` |
+| `test_bench_codeparse.py` | Braces in strings or comments read as code, or an answer cut in the wrong place (a JavaScript or Go statement at a line break, the `{}` of Go's `interface{}`, an `import { … } from` list), which turns a right answer into a compile error; a JavaScript or TypeScript function body that names a local variable after its function taken for the whole function, which leaves the function out; a long, repetitive reply (`@@@@…`, `/[/[…`, deep `${` holes) taking quadratic time or a `RecursionError` |
 | `test_bench_extract.py` | Answer extraction misreading a reply, which silently corrupts every benchmark score; a long reply of backquotes, fences or blank lines taking quadratic time |
 | `test_bench_graders.py` | Question sampling or a grader deciding right vs wrong incorrectly, including a shipped golden format row accepting a reply its prompt rules out |
 | `test_bench_ifeval.py` | IFEval's instruction checks, strict/loose readings or its four metrics drifting |

@@ -588,10 +588,18 @@ def defines(code: str, name: str, lang: str, *, masked: str | None = None) -> bo
 
 def _js_defines(masked: str, word: str) -> bool:
     """`function word(`, or `const word = ...` (`let`, `var`, maybe with a
-    `: Type` before the "="), but not `word == ...` or `word => ...`."""
+    `: Type` before the "=") at the code's top level, but not `word == ...`
+    or `word => ...`.
+
+    The top level is the shallowest brace depth. Code that closes a "}" it
+    never opened is the body of a function, and a binding in that body is a
+    local variable that shares the function's name (`let intersection = ...`
+    in `intersection`), not the function.
+    """
     if re.search(rf"(?<![\w$.])function\s*(?:\*\s*)?{word}\s*[<(]", masked):
         return True
     stops: list[int] | None = None  # where each "=" and ";" is, once a type needs them
+    levels: tuple[list[int], list[int], int] | None = None  # once a binding needs them
     for match in re.finditer(rf"(?=(?<![\w$.])(?:const|let|var)\s+{word}\s*([:=]))", masked):
         at = match.start(1)
         if masked[at] == ":":  # the type runs to the first "=" or ";"
@@ -601,9 +609,28 @@ def _js_defines(masked: str, word: str) -> bool:
             if k == len(stops) or masked[stops[k]] != "=":
                 continue
             at = stops[k]
-        if masked[at + 1 : at + 2] not in ("=", ">"):
+        if masked[at + 1 : at + 2] in ("=", ">"):
+            continue
+        if levels is None:
+            levels = _brace_depths(masked)
+        braces, depths, top = levels
+        k = bisect.bisect_left(braces, match.start())
+        if (depths[k - 1] if k else 0) == top:
             return True
     return False
+
+
+def _brace_depths(masked: str) -> tuple[list[int], list[int], int]:
+    """Where each "{" and "}" is, the depth after it, and the shallowest depth (0 or less)."""
+    braces: list[int] = []
+    depths: list[int] = []
+    depth = top = 0
+    for brace in re.finditer(r"[{}]", masked):
+        depth += 1 if brace.group() == "{" else -1
+        top = min(top, depth)
+        braces.append(brace.start())
+        depths.append(depth)
+    return braces, depths, top
 
 
 def find_definition(masked: str, name: str) -> int:

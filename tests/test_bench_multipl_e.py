@@ -269,6 +269,9 @@ def test_a_whole_function_is_used_as_written_and_a_body_completes_the_prompt() -
     )
     js = CANARIES["js"]  # this body closes the function itself
     assert multipl_e.solution_source(js.prompt, js.bad, "add", "js") == (js.prompt + js.bad, "continuation")
+    # A body that names a local variable like its function is still a body.
+    body = "  let add = x + y;\n  return add;\n}\n"
+    assert multipl_e.solution_source(js.prompt, body, "add", "js") == (js.prompt + body, "continuation")
 
 
 @pytest.mark.parametrize("lang", sorted(set(multipl_e.LANGUAGES) - {"py"}))

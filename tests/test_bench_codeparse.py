@@ -162,7 +162,11 @@ def test_preprocessor_lines_and_inner_attributes_are_pieces_of_their_own() -> No
         ("js", "const add = (a, b) => a + b;", True),
         ("js", "let total = add(1, 2);", False),
         ("js", "// function add(a, b) {}\nconst x = 1;", False),
+        ("js", "  let add = a + b;\n  return add;\n}\n", False),  # a body's local, named like its function
+        ("js", "if (on) {\n  var add = 1;\n}", False),  # a block's
+        ("js", "  return 0;\n}\nconst add = (a, b) => a + b;", True),  # after the body it closes
         ("ts", "function add<T>(a: T): T { return a }", True),
+        ("ts", "  const add = (x: number): number => x;\n  return add(a);\n}\n", False),
         ("go", "func add(a int) int { return a }", True),
         ("go", "func (s S) add() {}", False),  # a method, not the function
         ("rs", "pub fn add(a: i32) -> i32 { a }", True),
