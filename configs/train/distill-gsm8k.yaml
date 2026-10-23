@@ -11,10 +11,11 @@
 # question, 335 answer tokens on average), 2 epochs = 422 optimizer steps, 117
 # minutes, a peak of 13.8 GB reserved. The rows per forward pass, not the
 # model, set the peak: at every position the loss covers all 151,936 tokens of
-# Qwen's vocabulary. At 4 rows the 0.5B pilot (distill-gsm8k-0.5b.yaml) filled
-# the card's 24 GB within 9 steps, and at 2 it still peaked at 21.6 GB, so each
-# pass here takes one row and 32 passes make a step. The loss is the same
-# however the 32 rows are split: transformers divides it by their answer tokens.
+# Qwen's vocabulary. The 0.5B pilot (distill-gsm8k-0.5b.yaml), at 2 rows per
+# pass, peaked at 21.6 GB reserved; at 4, the GPU's memory was full within 9
+# steps (nvidia-smi, all processes) and that run was stopped. So each pass here
+# takes one row, and 32 passes make a step. The loss is the same however the
+# 32 rows are split: transformers divides it by their answer tokens.
 #
 # Rows carry no system message, exactly like `kumaru bench run` without
 # --use-agent-prompt: the student is trained the way it is tested.

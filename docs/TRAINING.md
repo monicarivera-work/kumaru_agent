@@ -371,7 +371,7 @@ kumaru bench run gsm8k_train -c qwen36 --no-think --full --max-tokens 1024 --con
 - **`gsm8k_train`, never `gsm8k`.** `gsm8k` is the test split the student will be scored on. `kumaru distill` refuses runs of it, because training on test questions inflates exactly the score being measured.
 - **`--no-think`.** With thinking on, the student would see each answer without the reasoning that produced it, so `kumaru distill` refuses thinking runs by default.
 - **The 200-question pilot** checks the setup: `kumaru bench report runs\distill\teacher-qwen36` shows its accuracy and how many answers were cut off. The second command continues the same run and keeps those 200 answers.
-- **16 hours**, measured: 7,473 answers of 365 tokens on average, at about 47 tokens per second, beside a game, with 18 expert layers in system RAM as in [BENCHMARKS.md §9](BENCHMARKS.md#9-run-mechanics). The pilot took 28 minutes and the rest 34 times as long, so on your machine the pilot gives the estimate. Stop it whenever you need the GPU; repeating the command resumes it.
+- **16 hours**, measured: 7,473 answers of 365 tokens on average, at about 47 tokens per second, beside a game, with 18 expert layers in system RAM as in [BENCHMARKS.md §3](BENCHMARKS.md#3-how-the-comparison-was-run). The pilot took 28 minutes and the rest 34 times as long, so on your machine the pilot gives the estimate. Stop it whenever you need the GPU; repeating the command resumes it.
 
 ## Step 2 — Build the two datasets
 
@@ -439,11 +439,11 @@ Measured on an RTX 3090 (24 GB) under Windows 11, in [the 2026-10-22 run](#resul
 | 4. Scoring the untrained student | 20 min | ~5 GB (estimated) |
 | 5. Teacher arm, 1.5B | 117 min | 13.8 GB |
 | 5. Gold arm, 1.5B | 134 min with a game sharing the GPU; about 2 h without | 6.4 GB |
-| 6. Scoring each trained student | 78 min (teacher arm), 29 min (gold arm) | ~5 GB (estimated) |
+| 6. Scoring each trained student | 78 min (teacher arm), 29 min (gold arm), perhaps with a game sharing the GPU | ~5 GB (estimated) |
 
 - **Memory follows the rows per forward pass, not the model.** At every position the model scores all 151,936 tokens of its vocabulary, in fp32: about 1.5 MB per token, so one long answer needs ~2 GB for the loss alone. That is why the 0.5B pilot, at two rows per pass, held more than the 1.5B arms at one. The figures are what PyTorch reserved, its cache included, which is well above what the tensors needed: about 6 GB in the teacher arm, estimated ([the arithmetic](howto/configs/distill-gsm8k.yaml.md#cost)).
 - **Time follows the passes.** At one row per pass, a step of 32 passes took ~16.6 seconds in both arms, though the teacher's rows are twice as long: the cost of a pass, not its length, sets the pace. The pilot's 16 passes per step took half that.
-- **Scoring with an adapter is slower.** The adapter runs beside the base weights at every token, unmerged: about 2.6 times the base model's time per token. The teacher arm's answers are also longer, and more of them run to the 1,024-token limit. `$env:KUMARU_BACKEND__EXTRA__MERGE_ADAPTER = 'true'` folds the adapter into the weights at load ([`backend.extra`](howto/configs/default.yaml.md#backendextra)), which should remove most of that; it was not tried here.
+- **Scoring with an adapter is slower.** Unmerged, the adapter runs beside the base weights at every decoding step (one new token for each of the 32 answers decoded together), and a step took about twice as long: 1.96 times the base model's for the 0.5B, scored with and without its adapter back to back. The 1.5B arms measured 2.6 times, but were scored hours after their base, perhaps still beside the game that slowed the gold arm's training. The teacher arm's answers are also longer, and more of them run to the 1,024-token limit. `$env:KUMARU_BACKEND__EXTRA__MERGE_ADAPTER = 'true'` folds the adapter into the weights at load ([`backend.extra`](howto/configs/default.yaml.md#backendextra)), which should remove most of the adapter's cost; it was not tried here.
 
 ## Reading the result
 
@@ -490,6 +490,8 @@ The teacher arm's validation loss fell at every evaluation. The gold arm's was l
 | 1.5B, gold arm | 61.2 (58.5–63.8) | 9 | 97 | 29 min |
 | 0.5B, untrained | 50.3 (47.6–53.0) | 17 | 307 | 21 min |
 | 0.5B, teacher's answers (the pilot) | 44.7 (42.0–47.3) | 63 | 356 | 54 min |
+
+The two 1.5B arms were scored after the gold arm's training, perhaps still beside the game, so their scoring times may be inflated ([why an adapter is slower anyway](#what-it-costs)).
 
 | Comparison, A → B | B − A, points (95% CI) | Only A right / only B right | p | Verdict |
 |---|---|---|---|---|

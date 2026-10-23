@@ -35,7 +35,7 @@ Five fields differ from the teacher arm: three by design, and the two that split
 | `optim.per_device_batch_size` | `2` | `1` | Two rows per forward pass fit the smaller model, in half the passes. |
 | `optim.gradient_accumulation_steps` | `16` | `32` | Keeps the effective batch at 2 × 16 = 32 rows, as in the arms. |
 
-The batch split changes the memory and the time, not what is learned. Each optimizer step still sees the same 32 rows, and the loss is the same however they are split: transformers divides it by the answer tokens of all 32, not by the number of passes. At 4 × 8, the recipes' first split, the pilot's reservation reached the card's 24 GB within 9 steps; at 2 × 16 it peaked at 21.6 GB. The test allows the pilot this difference and no other: its rows per pass times its passes must equal the arms'.
+The batch split changes the memory and the time, not what is learned. Each optimizer step still sees the same 32 rows, and the loss is the same however they are split: transformers divides it by the answer tokens of all 32, not by the number of passes. At 2 × 16, PyTorch's peak reservation was 21.6 GB. The recipes' first split, 4 × 8, was stopped after 9 steps, when nvidia-smi showed the GPU's memory full: 24,234 of 24,576 MiB in use, across all processes. The test allows the pilot this difference and no other: its rows per pass times its passes must equal the arms'.
 
 ## Cost
 

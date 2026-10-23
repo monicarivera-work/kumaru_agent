@@ -16,7 +16,9 @@
 # and the batch split (a test enforces it), so what the pilot shows carries
 # over. The same batch of 32 is split 2 x 16, not the arms' 1 x 32: two rows
 # per pass fit the smaller model, in half the passes, and the loss is the same
-# either way. At 4 x 8 the pilot filled the card's 24 GB within 9 steps.
+# either way. At 4 x 8 the GPU's memory was full within 9 steps (24,234 of
+# 24,576 MiB in use across all processes, read with nvidia-smi), so that run
+# was stopped.
 
 task: lora
 base_model: Qwen/Qwen2.5-0.5B-Instruct
