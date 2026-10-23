@@ -5,16 +5,16 @@ the model writes the function; hidden unit tests decide pass or fail. The
 headline metric is pass@1: the share of problems solved on the first attempt.
 
 Running the tests means running code a model wrote, on your machine. So it is
-opt-in (`--allow-code-exec`), and each program runs in a separate Python
-process with a time limit, an empty temporary working directory, a scrubbed
-environment, and a guard that disables the destructive parts of `os`,
-`shutil` and `subprocess` (the same idea as the reference harness's
-`reliability_guard`). That stops *accidents* — a model's `shutil.rmtree` — not
-a determined adversary. It is not a sandbox; use a container or VM to
-evaluate models you do not trust. Two known gaps: a timeout kills the program's
-own process but not processes it started (`multiprocessing` is not blocked),
-and the isolated interpreter (`-I`, the base Python rather than the venv) sees
-only the standard library, which is all HumanEval needs.
+opt-in (`--allow-code-exec`), and each program runs through `codeexec`: a
+separate Python process in an empty temporary directory, with a time limit,
+a memory cap, a scrubbed environment, and everything it starts killed when it
+ends. A guard also disables the destructive parts of `os`, `shutil` and
+`subprocess` (the same idea as the reference harness's `reliability_guard`).
+That stops *accidents* — a model's `shutil.rmtree` — not a determined
+adversary. It is not a sandbox; use `--sandbox docker` (a throwaway container
+with no network) or a VM to evaluate models you do not trust. The isolated
+interpreter (`-I`, the base Python rather than the venv) sees only the
+standard library, which is all HumanEval needs.
 
 A program passes only if it exits cleanly *and* prints a random marker placed
 after the tests: model code that calls `sys.exit(0)` before them would
@@ -26,18 +26,14 @@ dataset `openai/openai_humaneval`, split `test`.
 
 from __future__ import annotations
 
-import os
-import re
-import secrets
-import subprocess
 import sys
-import tempfile
 import textwrap
-from pathlib import Path
 from typing import Any
 
+from kumaru.core.errors import KumaruError
+from kumaru.eval.benchmarks import codeexec
 from kumaru.eval.benchmarks.base import BenchItem, Benchmark, Grade, load_hf_rows
-from kumaru.eval.benchmarks.extract import extract_code
+from kumaru.eval.benchmarks.extract import defines_python, extract_code
 
 PROMPT = (
     "Complete the following Python function. Return the complete function, including "
@@ -64,18 +60,14 @@ for _kumaru_module in ("ipdb", "joblib", "resource", "psutil", "tkinter"):
     _kumaru_sys.modules[_kumaru_module] = None
 """
 
-# Environment variables a child Python needs to start; everything else
-# (API keys, tokens) is withheld from model-written code.
-_ENV_KEEP = {"SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP", "HOME", "USERPROFILE", "LANG"}
+# What the sandbox image calls its Python (docker/sandbox/Dockerfile).
+DOCKER_PYTHON = "python3"
 
 
 def assemble_program(prompt: str, completion: str, test: str, entry_point: str) -> str:
     """Join the problem, the model's code and the hidden tests into one script."""
     code = extract_code(completion, entry_point)
-    defines = re.search(
-        rf"^\s*(?:async\s+)?def\s+{re.escape(entry_point)}\s*\(", code, re.MULTILINE
-    )
-    if defines:
+    if defines_python(code, entry_point):
         # The prompt still contributes imports and helper functions; its stub
         # (a docstring-only body, which is valid Python) is then overridden.
         body = prompt + "\n\n" + code
@@ -89,43 +81,32 @@ def assemble_program(prompt: str, completion: str, test: str, entry_point: str) 
     return f"{GUARD}\n{body}\n\n{test}\n\ncheck({entry_point})\n"
 
 
-def run_program(program: str, timeout_s: float) -> tuple[str, str]:
+def run_program(program: str, timeout_s: float, *, sandbox: str = "none") -> tuple[str, str]:
     """Run a script in a fresh interpreter. Returns `(status, stderr_tail)`.
 
     "passed" needs exit code 0 *and* a fresh random marker that only the end of
     the script prints, written straight to file descriptor 1 so a replaced
     `sys.stdout` or `print` cannot swallow it.
     """
-    marker = f"kumaru-finished-{secrets.token_hex(8)}"
+    marker = codeexec.new_marker()
     finish = f"\n\nimport os as _kumaru_finish\n_kumaru_finish.write(1, b'\\n{marker}\\n')\n"
     # The base interpreter, not the venv launcher: on Windows the launcher is a
-    # parent process, and killing it on timeout would orphan the real child.
+    # parent process, and the real interpreter would be its child.
     python = getattr(sys, "_base_executable", None) or sys.executable
-    env = {k: v for k, v in os.environ.items() if k.upper() in _ENV_KEEP}
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    with tempfile.TemporaryDirectory(prefix="kumaru-humaneval-", ignore_cleanup_errors=True) as tmp:
-        script = Path(tmp) / "program.py"
-        script.write_text(program + finish, encoding="utf-8")
-        try:
-            proc = subprocess.run(
-                [python, "-I", "-X", "utf8", str(script)],
-                cwd=tmp,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout_s,
-                creationflags=flags,
-            )
-        except subprocess.TimeoutExpired:
-            return "timeout", ""
-    if proc.returncode == 0 and marker in (proc.stdout or ""):
+    if sandbox == "docker":
+        python = DOCKER_PYTHON
+    step = codeexec.Step((python, "-I", "-X", "utf8", "program.py"), timeout_s)
+    outcome = codeexec.run(
+        codeexec.Program({"program.py": program + finish}, (step,), marker), sandbox=sandbox
+    )
+    if outcome.passed:
         return "passed", ""
-    if proc.returncode == 0:
+    if outcome.status == "timeout":
+        return "timeout", ""
+    if outcome.note == codeexec.EARLY_EXIT_NOTE:
         return "failed", "exited with code 0 before the tests finished (an early sys.exit?)"
-    return "failed", (proc.stderr or "")[-800:]
+    # Any other note says what stopped it, e.g. the sandbox's memory limit.
+    return "failed", "\n".join(part for part in (outcome.note, outcome.stderr[-800:]) if part)
 
 
 class HumanEval(Benchmark):
@@ -135,6 +116,25 @@ class HumanEval(Benchmark):
     needs_code_execution = True
     blocking_grader = True
     timeout_s = 15.0
+    sandbox = "none"
+    _image = ""
+
+    def configure(self, *, sandbox: str = "none") -> None:
+        if sandbox not in codeexec.SANDBOXES:
+            raise KumaruError(
+                f"Unknown sandbox '{sandbox}'.", hint=f"Use one of: {', '.join(codeexec.SANDBOXES)}."
+            )
+        self.sandbox = sandbox
+
+    def preflight(self) -> None:
+        if self.sandbox == "docker":
+            self._image = codeexec.check_docker()
+
+    def fingerprint_extra(self) -> dict[str, Any]:
+        # Nothing for local runs, so runs made before the sandbox option still resume.
+        if self.sandbox == "none":
+            return {}
+        return {"sandbox": self.sandbox, "image": self._image}
 
     def load(self) -> list[BenchItem]:
         return [
@@ -154,7 +154,7 @@ class HumanEval(Benchmark):
     def grade(self, item: BenchItem, output: str) -> Grade:
         meta = item.meta
         program = assemble_program(meta["prompt"], output, meta["test"], meta["entry_point"])
-        status, stderr = run_program(program, self.timeout_s)
+        status, stderr = run_program(program, self.timeout_s, sandbox=self.sandbox)
         detail: dict[str, Any] = {"status": status}
         if stderr:
             detail["stderr"] = stderr

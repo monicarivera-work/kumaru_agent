@@ -109,8 +109,9 @@ def test_chat_flags_beat_the_profiles_thinking_preset(scratch_dir: Path) -> None
 
 def test_bench_list_names_every_benchmark() -> None:
     text = run_cli("bench", "list")
-    for name in ("golden", "gsm8k", "mmlu_pro", "ifeval", "humaneval"):
+    for name in ("golden", "gsm8k", "mmlu_pro", "ifeval", "humaneval", "multipl_e_py", "multipl_e_rs"):
         assert name in text
+    assert "multipl_e " in text  # the suite of all eight languages
 
 
 def test_bench_run_report_and_compare(
@@ -163,3 +164,17 @@ def test_errors_become_a_message_a_hint_and_exit_code_1(
     out = ANSI.sub("", capsys.readouterr().out)
     assert "error: 'humaneval' grades answers by running model-written code" in out
     assert "hint: Add --allow-code-exec" in out
+
+
+def test_an_unknown_sandbox_is_refused(
+    echo_profile: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = ["kumaru", "bench", "run", "multipl_e", "--allow-code-exec", "--sandbox", "vm", "-c", str(echo_profile)]
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setenv("COLUMNS", "200")
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+    assert exit_info.value.code == 1
+    out = ANSI.sub("", capsys.readouterr().out)
+    assert "error: Unknown sandbox 'vm'." in out
+    assert "hint: Use one of: none, docker." in out

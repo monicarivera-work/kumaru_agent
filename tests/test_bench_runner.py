@@ -6,6 +6,7 @@ requests and bad graders, and the paired comparison of two runs.
 """
 
 import asyncio
+import dataclasses
 import io
 import json
 from datetime import datetime, timedelta
@@ -252,9 +253,67 @@ async def test_code_execution_benchmarks_need_explicit_consent(
     # Refused while resolving names: no download, no model load, nothing written.
     with pytest.raises(ConfigError, match="model-written code"):
         await bench(echo_config, ["humaneval"], scratch_dir / "code")
+    # A suite is named as the user wrote it; "on this machine" unless sandboxed.
+    with pytest.raises(ConfigError, match="'multipl_e' grades answers by running model-written code on this machine"):
+        await bench(echo_config, ["multipl_e"], scratch_dir / "code")
+    with pytest.raises(ConfigError, match=r"'humaneval' grades answers by running model-written code\. "):
+        await bench(echo_config, ["humaneval"], scratch_dir / "code", sandbox="docker")
     with pytest.raises(ConfigError, match="No benchmarks given"):
         await bench(echo_config, [], scratch_dir / "none")
     assert not (scratch_dir / "code").exists()
+
+
+async def test_a_suite_skips_languages_without_a_toolchain_and_says_so(
+    echo_config: KumaruConfig, scratch_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kumaru.eval.benchmarks import codeexec, multipl_e
+    from kumaru.eval.benchmarks.codeexec import Outcome, ToolchainMissing
+
+    absent = [lang for lang in multipl_e.LANGUAGES if lang != "py"]
+
+    def not_installed(lang: str):
+        def detect():
+            raise ToolchainMissing(f"No {lang} here.", hint=f"Install {lang} (see its site).")
+
+        return detect
+
+    for lang in absent:
+        monkeypatch.setitem(multipl_e._DETECT, lang, not_installed(lang))
+    rows = [
+        {"task_id": f"HumanEval/{n}", "entry_point": f"f{n}", "prompt": f"def f{n}():\n", "test": "\n"}
+        for n in range(164)
+    ]
+    monkeypatch.setattr(multipl_e, "load_hf_rows", lambda *args, **kwargs: rows)
+
+    def run(program, *, sandbox="none"):  # no subprocesses: only the canary's right answer passes
+        passed = "return x + y" in "".join(program.files.values())
+        return Outcome("passed" if passed else "failed", "run", 0 if passed else 1, "", "", 0.1)
+
+    monkeypatch.setattr(codeexec, "run", run)
+    out, console = scratch_dir / "suite", io.StringIO()
+    suite = runner.BenchRunner(
+        echo_config,
+        BenchSettings(out_dir=out, limit=2, allow_code_exec=True),
+        console=Console(file=console, width=200),
+        show_progress=False,
+    )
+    [summary] = await suite.run(["multipl-e"])
+
+    assert (summary.benchmark, summary.n) == ("multipl_e_py", 2)
+    expected = {f"multipl_e_{lang}": f"No {lang} here. Install {lang} (see its site)." for lang in absent}
+    assert suite.skipped == expected
+    run_json = json.loads((out / "run.json").read_text(encoding="utf-8"))
+    assert (run_json["benchmarks"], run_json["skipped"]) == (["multipl_e_py"], expected)
+    assert "skipped multipl_e_rs: No rs here. Install rs (see its site)." in console.getvalue()
+
+    # Asked for by name, a missing toolchain is an error, not a skip.
+    with pytest.raises(ToolchainMissing, match="No rs here"):
+        await bench(echo_config, ["multipl_e_rs"], scratch_dir / "rs", allow_code_exec=True)
+    # Another compiler version is another run.
+    real = multipl_e._DETECT["py"]
+    monkeypatch.setitem(multipl_e._DETECT, "py", lambda: dataclasses.replace(real(), version="python 0.0"))
+    with pytest.raises(ConfigError, match="different settings"):
+        await bench(echo_config, ["multipl_e_py"], out, allow_code_exec=True, limit=2)
 
 
 async def test_two_golden_files_with_the_same_name_are_refused(

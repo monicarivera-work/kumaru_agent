@@ -56,7 +56,7 @@ So on 100 paired questions, a real gain shows up at about 8–14 points, dependi
 
 **The CI and the verdict can disagree at the margin.** With 0 : 5 disagreements on 100 questions, the bootstrap gives +5.0 (+1.0 to +10.0): it excludes zero. Yet McNemar p = 0.0625. A percentile bootstrap is slightly optimistic when the discordant count is tiny. The verdict follows the exact, Holm-corrected p.
 
-**The intervals cover sampling noise only.** Systematic error doesn't widen them: a binding token cap, a broken chat template or an extraction failure moves accuracy while the CI stays as narrow as ever. The commonest is the cap. Every benchmark's default answer budget is 8,192 tokens (plus the thinking budget when thinking is on), and an answer cut there is graded as it stands and usually fails. `n_truncated`, the **cut off** column, is how you spot a binding cap. Check it, and the `answers found by:` line (`tests:` for HumanEval), before reading a CI or a verdict. If one side of a comparison has many more cut-offs, the comparison measures the budget, not the model.
+**The intervals cover sampling noise only.** Systematic error doesn't widen them: a binding token cap, a broken chat template or an extraction failure moves accuracy while the CI stays as narrow as ever. The commonest is the cap. Every benchmark's default answer budget is 8,192 tokens (plus the thinking budget when thinking is on), and an answer cut there is graded as it stands and usually fails. `n_truncated`, the **cut off** column, is how you spot a binding cap. Check it, and the `answers found by:` line (`tests:` for the code benchmarks), before reading a CI or a verdict. If one side of a comparison has many more cut-offs, the comparison measures the budget, not the model.
 
 ## Public API
 
@@ -95,7 +95,7 @@ paired_bootstrap_ci(a, b)         # (0.17, 0.07, 0.27)  -> +17 points, CI +7 to 
 ### Plan the sample size before a run
 
 - Accuracy CI: aim for the width you need. `-n 100` gives ±9–10 near 50–70%, `-n 500` gives ±4.
-- A/B decision: assume the models disagree on about 25% of questions. Then a 5-point gain needs roughly 500 paired questions to reach p < 0.05 (125 disagreements split 50 : 75 give p = 0.031; at 400 questions, 40 : 60 gives p = 0.057). Use `-n 500`, or `--full` when the benchmark is small (IFEval 541, HumanEval 164).
+- A/B decision: assume the models disagree on about 25% of questions. Then a 5-point gain needs roughly 500 paired questions to reach p < 0.05 (125 disagreements split 50 : 75 give p = 0.031; at 400 questions, 40 : 60 gives p = 0.057). Use `-n 500`, or `--full` when the benchmark is small (IFEval 541, HumanEval 164, each MultiPL-E language 152).
 - Same `-n` and `--seed` for both runs, or the comparison loses pairs (`unpaired` in the table).
 
 ## How to extend it

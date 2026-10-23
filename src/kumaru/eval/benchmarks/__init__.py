@@ -10,8 +10,10 @@ Modules, in reading order:
 * `base`      — the `Benchmark` contract and the deterministic question sampler.
 * `extract`   — pulling the final answer out of free-form model text.
 * `stats`     — confidence intervals and paired significance tests.
-* `gsm8k`, `mmlu_pro`, `ifeval` (+ `ifeval_checks`), `humaneval`, `golden`
+* `gsm8k`, `mmlu_pro`, `ifeval` (+ `ifeval_checks`), `humaneval`,
+  `multipl_e` (+ `codeparse`), `golden`
               — one module per benchmark.
+* `codeexec`  — runs the code benchmarks' model-written programs.
 * `runner`    — runs benchmarks, resumes interrupted runs, compares results.
 
 Benchmarks are registered lazily in `kumaru.core.registry.BENCHMARKS`, so
