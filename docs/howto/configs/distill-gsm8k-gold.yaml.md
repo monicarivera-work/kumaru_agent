@@ -15,7 +15,7 @@ A student trained on the teacher's answers can beat the base model for two reaso
 ## When to use this profile
 
 - After the teacher dataset is built; `--match` reads it. Train it alongside the teacher arm: without it, a teacher-arm gain has two possible explanations.
-- Not for the 0.5B pilot, which has no control arm. To add one, copy this file and change `base_model`, `output_dir` and `run_name` as [`distill-gsm8k-0.5b.yaml`](distill-gsm8k-0.5b.yaml.md) does.
+- Not for the 0.5B pilot, which has no control arm. To add one, copy this file and change `base_model`, `output_dir`, `run_name` and the batch split as [`distill-gsm8k-0.5b.yaml`](distill-gsm8k-0.5b.yaml.md) does.
 
 ## Every field explained
 
@@ -38,11 +38,11 @@ GSM8K's solutions are short. These counts were measured with the trainer's own e
 | Whole row, median | 206 tokens | 455 tokens |
 | Longest row | 506 tokens | up to ~1,330 |
 
-- **Steps:** the same ~420 as the teacher arm, when the teacher dataset holds one answer per question.
-- **Time:** a batch is about half as long, so the run takes about half the teacher arm's time, roughly half an hour (estimated).
-- **Memory:** no batch exceeds ~2,050 positions, so the loss needs at most ~3.7 GB, and the whole run ~9 GB (estimated).
+- **Steps:** 422, as in the teacher arm, when the teacher dataset holds one answer per question: 6,732 training rows against 6,751.
+- **Time:** 134 minutes, measured on 2026-10-22. Shorter rows did not make it faster: at one row per pass, a step costs about the same whatever its length, and the first ~175 steps took about 16.6 seconds each, as in the teacher arm. A game then shared the GPU and slowed the rest by about a quarter. Alone, the run would have taken about two hours, as the teacher arm did.
+- **Memory:** a peak of 6.4 GB reserved, measured, against 13.8 GB for the teacher arm. The longest row is 506 tokens, so the loss over the vocabulary needs under 1 GB (estimated; [the arithmetic](distill-gsm8k.yaml.md#cost)).
 
-**The arms differ in length by design.** With equal rows and steps, the gold arm trains on about a quarter as many answer tokens. That is part of what is being compared, since writing out every step is part of what a teacher gives. But it means a teacher win cannot say whether the teacher reasons better, or only writes more steps. The opposite can happen too. Li et al. (2025, *Small Models Struggle to Learn from Strong Reasoners*) found that students of 3B parameters or fewer often learn more from short reasoning than from a strong teacher's long reasoning. So the short human solutions can win.
+**The arms differ in length by design.** With equal rows and steps, the gold arm trains on about a quarter as many answer tokens: 0.62 million against 2.26 million in the 2026-10-22 run. That is part of what is being compared, since writing out every step is part of what a teacher gives. But it means a teacher win cannot say whether the teacher reasons better, or only writes more steps. The opposite can happen too. Li et al. (2025, *Small Models Struggle to Learn from Strong Reasoners*) found that students of 3B parameters or fewer often learn more from short reasoning than from a strong teacher's long reasoning. So the short human solutions can win.
 
 ## How to use it
 
@@ -63,14 +63,18 @@ kumaru bench compare runs\distill\eval-base runs\distill\eval-gold
 
 ### Reading the result
 
-"Significant" means `kumaru bench compare` reports a p-value below 0.05. At 1,319 questions, a difference of about 3 points is the smallest it reliably detects. Train three seeds per arm before concluding ([how](distill-gsm8k.yaml.md#how-to-use-it)).
+"Above" and "below" mean `kumaru bench compare` reports a difference with a p-value below 0.05; "no difference", one without. "No difference" means none was detected, not that there was none. At 1,319 questions, a difference of about 3 points is the smallest it reliably detects. Train three seeds per arm before concluding ([how](distill-gsm8k.yaml.md#how-to-use-it)).
 
-| Result | What it means |
-|---|---|
-| Teacher arm significantly above gold | The teacher's answers taught more than human ones: distillation worked. |
-| No significant difference, both above base | The gain came from GSM8K-style practice; the teacher added nothing measurable. |
-| Gold significantly above the teacher arm | Human solutions were better data for this student, likely for the reason above. Next: shorter teacher answers, or both datasets mixed. |
-| Neither arm above base | Training changed nothing measurable. Check `example_preview.txt`, and whether the training loss fell (`log_history` in the last checkpoint's `trainer_state.json`). |
+A teacher arm above gold says only that the teacher's answers beat human ones, not that either helped. Read the teacher arm against base first. Where a row turns on what human answers did on their own, read the gold arm against base (the second comparison above); never work it out from the other two. A teacher arm 2 points below base and 2 above gold can show no difference in either, while the gold arm, 4 points below base, shows one.
+
+| Teacher arm against base | Teacher arm against gold | What it means |
+|---|---|---|
+| Above | Above | The teacher's answers taught more than human ones: distillation worked. |
+| Above | No difference | A gain, but the teacher's answers added nothing measurable over human ones. If the gold arm is above base too, GSM8K-style practice alone was enough for a gain; if not, these runs cannot say whether the practice or the teacher's answers brought the teacher arm's gain. |
+| Any | Below | Human solutions were better data for this student, likely for the reason above. Next: shorter teacher answers, or both datasets mixed. |
+| No difference | Above | No measurable gain. Only the gold arm against base says why the arms differ. If the gold arm is below base, they differ at least partly because it lost points; if not, neither arm moved measurably on its own. [The 2026-10-22 run](../../TRAINING.md#results-2026-10-22) ended here: compared directly, the gold arm against base was −11.1 points (−13.8 to −8.3), p 2.19e-14, with answers a third as long. |
+| No difference | No difference | The teacher's answers changed nothing measurable. Only the gold arm against base says whether human answers did. If neither did, check `example_preview.txt`, and whether the training loss fell (`log_history` in the last checkpoint's `trainer_state.json`). |
+| Below | Above or no difference | Training on the teacher's answers hurt. Look at the `-e 5` examples, and at how many answers were cut off (`kumaru bench report`), as for [the pilot](distill-gsm8k-0.5b.yaml.md#reading-the-result). |
 
 ## Tuning it
 

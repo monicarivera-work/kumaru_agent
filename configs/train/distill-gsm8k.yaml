@@ -7,13 +7,15 @@
 #   kumaru train configs/train/distill-gsm8k.yaml
 #   kumaru bench run gsm8k -c student --full --max-tokens 1024 --adapter runs/distill/qwen1.5b-teacher/adapter --label student-teacher -o runs/distill/eval-teacher
 #
-# Cost on an RTX 3090, estimated, not yet measured: ~7,000 answers (one per
-# question, ~340 tokens on average), 2 epochs = ~420 optimizer steps, about an
-# hour. Plan for ~15 GB of VRAM: a typical batch needs ~9 GB, but the batches
-# holding the longest answers peak near 15, and PyTorch keeps that peak
-# reserved. The loss over Qwen's 151,936-token vocabulary, not the model, sets
-# it. The 0.5B pilot (distill-gsm8k-0.5b.yaml) runs the same steps at about a
-# third of the compute and nearly the same memory, so it measures both first.
+# Cost on an RTX 3090, measured 2026-10-22: 6,751 training rows (one answer per
+# question, 335 answer tokens on average), 2 epochs = 422 optimizer steps, 117
+# minutes, a peak of 13.8 GB reserved. The rows per forward pass, not the
+# model, set the peak: at every position the loss covers all 151,936 tokens of
+# Qwen's vocabulary. The 0.5B pilot (distill-gsm8k-0.5b.yaml), at 2 rows per
+# pass, peaked at 21.6 GB reserved; at 4, the GPU's memory was full within 9
+# steps (nvidia-smi, all processes) and that run was stopped. So each pass here
+# takes one row, and 32 passes make a step. The loss is the same however the
+# 32 rows are split: transformers divides it by their answer tokens.
 #
 # Rows carry no system message, exactly like `kumaru bench run` without
 # --use-agent-prompt: the student is trained the way it is tested.
@@ -45,8 +47,8 @@ lora:
 
 optim:
   epochs: 2                # each question is seen twice; more mostly memorizes
-  per_device_batch_size: 4
-  gradient_accumulation_steps: 8    # effective batch = 4 x 8 = 32
+  per_device_batch_size: 1          # rows per forward pass: they set the peak memory (see above)
+  gradient_accumulation_steps: 32   # effective batch = 1 x 32 = 32
   learning_rate: 1.0e-4    # the low end for LoRA: the student must keep what it knows
   lr_scheduler: cosine
   warmup_ratio: 0.03

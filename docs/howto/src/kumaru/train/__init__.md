@@ -78,8 +78,8 @@ kumaru train configs\train\distill-gsm8k.yaml
 | `lora-small.yaml` | Pipeline smoke test on Qwen2.5-0.5B | A few minutes, about 2 GB VRAM. |
 | `lora-qwen.yaml` | Practical QLoRA on Qwen2.5-7B-Instruct | About 9-11 GB VRAM; about 20-40 minutes per epoch on 1,000 examples of about 1k tokens. |
 | `pretrain-nano.yaml` | Understanding and debugging from-scratch training | Under an hour for the ~101M-parameter model on sample-sized data; quality is not assistant-grade. |
-| `distill-gsm8k-0.5b.yaml` | Distillation pilot on Qwen2.5-0.5B | Estimated 20-30 minutes; peak about 12 GB, because a batch of 4 long teacher answers makes the loss over the vocabulary large. |
-| `distill-gsm8k.yaml` | Distillation into Qwen2.5-1.5B-Instruct | Estimated about an hour; plan for about 15 GB at peak. The pilot's `metrics.json` gives measured numbers. |
+| `distill-gsm8k-0.5b.yaml` | Distillation pilot on Qwen2.5-0.5B | Measured 58 minutes; peak 21.6 GB reserved, at 2 rows per forward pass. The rows per pass, not the model, set the peak: the loss over the vocabulary grows with them. |
+| `distill-gsm8k.yaml` | Distillation into Qwen2.5-1.5B-Instruct | Measured 117 minutes; peak 13.8 GB reserved, at 1 row per forward pass. The gold arm (`distill-gsm8k-gold.yaml`) peaked at 6.4 GB. |
 
 The most important knobs live below this package:
 

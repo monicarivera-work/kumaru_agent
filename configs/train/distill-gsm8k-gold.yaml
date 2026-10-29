@@ -1,17 +1,24 @@
 # Distillation, control arm: the same student, the same questions and the
 # same training recipe as distill-gsm8k.yaml, but the answers are GSM8K's own
-# human-written solutions. If the teacher arm beats this one, the gain came
-# from the teacher; if not, it came from extra GSM8K-style practice.
+# human-written solutions. If the teacher arm beats the untrained student,
+# this arm says why: if the teacher arm also beats this one, the teacher's
+# answers taught more than human ones; if this one beats the untrained student
+# too (the last command below), GSM8K-style practice alone was enough for a
+# gain. Read each pair from its own comparison: "no difference" means none was
+# detected, not that there was none.
 #
 #   kumaru distill gold -o runs/distill/data-gold --match runs/distill/data-teacher
 #   kumaru train configs/train/distill-gsm8k-gold.yaml
 #   kumaru bench run gsm8k -c student --full --max-tokens 1024 --adapter runs/distill/qwen1.5b-gold/adapter --label student-gold -o runs/distill/eval-gold
 #   kumaru bench compare runs/distill/eval-gold runs/distill/eval-teacher
+#   kumaru bench compare runs/distill/eval-base runs/distill/eval-gold
 #
 # Identical to distill-gsm8k.yaml apart from the data files, output_dir and
 # run_name; a test enforces it. Change both files together. It takes the same
-# number of steps, but GSM8K's solutions are about a quarter the length of the
-# teacher's answers, so it needs about half the time and at most ~9 GB of VRAM.
+# 422 steps. GSM8K's solutions are about a quarter the length of the teacher's
+# answers, so it peaked at only 6.4 GB, but at one row per pass a step takes
+# about as long either way: about 2 hours on an RTX 3090 (measured 2026-10-22:
+# 134 minutes, with a game sharing the GPU after step ~175).
 
 task: lora
 base_model: Qwen/Qwen2.5-1.5B-Instruct
@@ -36,8 +43,8 @@ lora:
 
 optim:
   epochs: 2                # each question is seen twice; more mostly memorizes
-  per_device_batch_size: 4
-  gradient_accumulation_steps: 8    # effective batch = 4 x 8 = 32
+  per_device_batch_size: 1          # rows per forward pass: they set the peak memory
+  gradient_accumulation_steps: 32   # effective batch = 1 x 32 = 32
   learning_rate: 1.0e-4    # the low end for LoRA: the student must keep what it knows
   lr_scheduler: cosine
   warmup_ratio: 0.03
