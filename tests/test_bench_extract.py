@@ -1,13 +1,20 @@
 """Protect answer extraction: a misread answer silently corrupts every benchmark score."""
 
+import random
+import re
+import time
+
 import pytest
 
 from kumaru.eval.benchmarks.extract import (
+    defines_python,
     extract_choice,
     extract_code,
     extract_final_number,
+    fences,
     last_boxed,
     numbers_equal,
+    open_fence,
     parse_number,
 )
 
@@ -154,3 +161,52 @@ class TestExtractCode:
 
     def test_unfenced_reply_is_returned_whole(self) -> None:
         assert extract_code("def f():\n    return 2") == "def f():\n    return 2"
+
+    @pytest.mark.parametrize(
+        ("code", "expected"),
+        [
+            ("def f(x):\n    return x", True),
+            ("class A:\n    def f(self):\n        pass", True),
+            ("\n\n\tasync  def f():\n\t\tpass", True),
+            ("async\ndef f():\n    pass", True),
+            ("def ff(x):\n    return f(x)", False),
+            ("x = f(1)\n# def f(", False),
+        ],
+    )
+    def test_a_definition_is_found_at_any_indent(self, code: str, expected: bool) -> None:
+        assert defines_python(code, "f") is expected
+
+    @pytest.mark.parametrize(
+        ("head", "unit", "count", "tail"),
+        [
+            # Without a closing fence, the regexes this replaced took quadratic
+            # time: each ``` read its line to the end again, and the fence's tag
+            # and the rest of its line overlapped. 10.5 s each.
+            ("", "`", 100_000, ""),
+            ("```", "a", 100_000, ""),
+            ("", "```", 33_333, ""),
+            # ^\s*def read on across all the blank lines from each one: 8 s.
+            ("```python\n", "\n", 20_000, "```"),
+        ],
+        ids=["backquotes", "open fence", "fences", "blank lines"],
+    )
+    def test_a_long_reply_is_read_in_linear_time(self, head: str, unit: str, count: int, tail: str) -> None:
+        text = head + unit * count + tail
+        start = time.process_time()
+        extract_code(text, "f")
+        assert time.process_time() - start < 0.5
+
+
+# The regexes `fences` and `open_fence` replaced: the same answers, in quadratic time.
+OLD_FENCE = re.compile(r"```[ \t]*([\w+-]*)[^\n]*\n(.*?)```", re.DOTALL)
+OLD_OPEN_FENCE = re.compile(r"```[ \t]*[\w+-]*[^\n]*\n(.*)$", re.DOTALL)
+
+
+def test_the_fence_scans_find_what_the_regexes_they_replaced_found() -> None:
+    rng = random.Random(9)
+    pieces = ["`", "```", "\n", " ", "\t", "a", "python", "+", "-", "x y"]
+    for _ in range(3000):
+        text = "".join(rng.choices(pieces, k=rng.randint(0, 14)))
+        assert fences(text) == OLD_FENCE.findall(text), text
+        old = OLD_OPEN_FENCE.search(text)
+        assert open_fence(text) == (old.group(1) if old else None), text

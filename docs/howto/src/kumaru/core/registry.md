@@ -18,10 +18,12 @@ This file defines the generic `Registry` class and three global registries.
 | Registry | Kind (in error text) | Entry-point group | Built-in entries (aliases in parentheses) |
 |---|---|---|---|
 | `BACKENDS` | `backend` | `kumaru.backends` | `echo`, `transformers` (`hf`), `llamacpp` (`gguf`), `openai_compat` (`ollama`, `vllm`, `remote`), `llamacpp_server` (`llama-server`, `llama_server`) — all lazy |
-| `TOOLS` | `tool` | `kumaru.tools` | `current_time`, registered by decorator when `kumaru.agent.tools` is imported |
-| `BENCHMARKS` | `benchmark` | `kumaru.benchmarks` | `gsm8k`, `gsm8k_train` (`gsm8k-train`), `mmlu_pro` (`mmlu-pro`), `ifeval`, `humaneval`, `golden` — all lazy |
+| `TOOLS` | `tool` | `kumaru.tools` | `current_time`, registered by decorator, and the lazy project-folder tools `list_files`, `read_file`, `write_file`, `edit_file` (`kumaru.agent.workspace`) and `run_command` (`kumaru.agent.commands`), all registered when `kumaru.agent.tools` is imported |
+| `BENCHMARKS` | `benchmark` | `kumaru.benchmarks` | `gsm8k`, `gsm8k_train` (`gsm8k-train`), `mmlu_pro` (`mmlu-pro`), `ifeval`, `humaneval`, `multipl_e_<lang>` (`multipl-e-<lang>`) for each of the eight `MULTIPL_E_LANGUAGES`, `golden` — all lazy |
 
 v0.2 adds the `llamacpp_server` backend and the whole `BENCHMARKS` registry, which `kumaru bench` uses.
+
+It also defines **benchmark suites**: names that stand for several benchmarks. `BENCHMARK_SUITES["multipl_e"]` is the eight MultiPL-E languages, and `SUITE_ALIASES` lets `multipl-e` mean the same. A suite is not a registry entry (`"multipl_e" in BENCHMARKS` is False): the bench runner expands it with `suite_members()` before resolving each member, and skips a member whose compiler or runtime is missing ([`runner.md`](../eval/benchmarks/runner.md)).
 
 Callers resolve a component by the name in config or on the command line. `BACKENDS.create(cfg.backend.name, cfg.backend)` appears in `src\kumaru\server\app.py`, `src\kumaru\cli.py`, `src\kumaru\eval\harness.py`, and `src\kumaru\eval\benchmarks\runner.py`.
 
@@ -75,6 +77,10 @@ Three invariants follow:
 | `BACKENDS` | `Registry[Any]` | `Registry("backend", entry_point_group="kumaru.backends")`. |
 | `TOOLS` | `Registry[Any]` | `Registry("tool", entry_point_group="kumaru.tools")`. |
 | `BENCHMARKS` | `Registry[Any]` | `Registry("benchmark", entry_point_group="kumaru.benchmarks")`. |
+| `MULTIPL_E_LANGUAGES` | `dict[str, str]` | MultiPL-E language code to class name in `kumaru.eval.benchmarks.multipl_e`: `py`, `js`, `ts`, `cs`, `java`, `cpp`, `go`, `rs`. Each registers `multipl_e_<code>`, with the alias `multipl-e-<code>`. |
+| `BENCHMARK_SUITES` | `dict[str, tuple[str, ...]]` | Suite name to member benchmarks, in run order: `{"multipl_e": ("multipl_e_py", ..., "multipl_e_rs")}`. `kumaru bench list` shows a row for each. |
+| `SUITE_ALIASES` | `dict[str, str]` | Alternative suite names: `{"multipl-e": "multipl_e"}`. |
+| `suite_members` | `suite_members(name: str) -> tuple[str, ...]` | The members of a suite (aliases accepted), or `()` when `name` is not a suite. |
 
 ## How to use it
 
@@ -102,10 +108,14 @@ print(BACKENDS.names())
 ### List benchmarks without importing them
 
 ```python
-from kumaru.core.registry import BENCHMARKS
+from kumaru.core.registry import BENCHMARKS, suite_members
 
-print(BENCHMARKS.names())              # ['golden', 'gsm8k', 'gsm8k_train', 'humaneval', 'ifeval', 'mmlu_pro']
+print(BENCHMARKS.names())
+# ['golden', 'gsm8k', 'gsm8k_train', 'humaneval', 'ifeval', 'mmlu_pro', 'multipl_e_cpp', 'multipl_e_cs',
+#  'multipl_e_go', 'multipl_e_java', 'multipl_e_js', 'multipl_e_py', 'multipl_e_rs', 'multipl_e_ts']
 print("mmlu-pro" in BENCHMARKS)        # True: alias, no import
+print(suite_members("multipl-e"))
+# ('multipl_e_py', 'multipl_e_js', 'multipl_e_ts', 'multipl_e_cs', 'multipl_e_java', 'multipl_e_cpp', 'multipl_e_go', 'multipl_e_rs')
 ```
 
 `kumaru bench list` goes further: it calls `get()` on each entry to read the class attributes `description`, `source` and `needs_code_execution`. That imports the benchmark modules, but it still downloads no data.
@@ -156,6 +166,8 @@ Keep the module's heavy imports such as torch or llama_cpp inside `load()`, and 
 
 Benchmarks follow the same pattern with `BENCHMARKS.register_lazy(...)`. Subclass `Benchmark` from `src\kumaru\eval\benchmarks\base.py`; `create(name)` instantiates it with no arguments.
 
+A new MultiPL-E language is one entry in `MULTIPL_E_LANGUAGES` plus its class; the loop registers it and the `multipl_e` suite picks it up (the full steps are in [`multipl_e.md`](../eval/benchmarks/multipl_e.md#how-to-extend-it)). A new suite is one `BENCHMARK_SUITES` entry; its members must be registered benchmarks.
+
 ### A third-party plugin (no change to this repository)
 
 ```toml
@@ -185,6 +197,7 @@ Do not give a plugin entry point the name of a built-in.
 | A built-in name returns someone else's class | That class reached `_items` first, either through an entry point with the same name (once a lookup miss triggered the scan) or through a decorator applied before the lazy import. | Rename the plugin or the decorator; `_items` always wins. |
 | `ModuleNotFoundError` from `get()` | A `register_lazy` target names a module that does not exist (typo), or the module imports a missing dependency at top level. | Fix the target string, and move heavy imports into `load()` behind `DependencyMissingError`. |
 | `names()` does not show an alias | By design. | `all_names()`. |
+| `Unknown benchmark: 'multipl_e'.` from your own `BENCHMARKS.get` or `create` | A suite is not a registry entry; only the bench runner expands it. | Loop over `suite_members(name)`, or pass the suite to `kumaru bench run`. |
 | `kumaru --help` or `kumaru bench list` is slow | A heavy module is imported at registration time (decorator-only registration that something imports eagerly), or a module imports torch or `datasets` at top level. | Register lazily, and defer heavy imports into the method that needs them. |
 | `kumaru info` shows `tools: (none)` in custom code | `TOOLS` is filled only when `kumaru.agent.tools` is imported. | Import `kumaru.agent.tools`, as `kumaru info` does. |
 | A plugin silently fails to appear | `ep.load()` raised; it is logged as a warning (`failed to load plugin backend 'x': ...`) and skipped. | Run with `$env:KUMARU_LOG_LEVEL = "DEBUG"` and read the warning. |
@@ -203,7 +216,8 @@ Do not give a plugin entry point the name of a built-in.
 - `src\kumaru\core\errors.py` — `RegistryError`, raised for duplicate and unknown names.
 - `src\kumaru\backends\base.py` — the `Backend` contract that registered backends implement.
 - `src\kumaru\backends\llamacpp_server.py` — the v0.2 backend behind `llamacpp_server`.
-- `src\kumaru\agent\tools.py` — `@TOOLS.register("current_time")`; `ToolBelt` creates enabled tools by name.
-- `src\kumaru\eval\benchmarks\runner.py` — `resolve_benchmark()` (registry name or a `.jsonl` golden-set path) and `list_benchmarks()`.
-- `src\kumaru\cli.py` — `kumaru info` lists all three registries; `chat`, `eval` and `bench` create from them.
+- `src\kumaru\agent\tools.py` — `@TOOLS.register("current_time")` and the `register_lazy()` calls for the project-folder tools; `ToolBelt` creates enabled tools by name.
+- `src\kumaru\eval\benchmarks\runner.py` — `resolve_benchmark()` (registry name or a `.jsonl` golden-set path), `list_benchmarks()` (one row per benchmark and per suite) and the suite expansion in `BenchRunner._resolve`.
+- `src\kumaru\eval\benchmarks\multipl_e.py` — the classes `MULTIPL_E_LANGUAGES` names ([`multipl_e.md`](../eval/benchmarks/multipl_e.md)).
+- `src\kumaru\cli.py` — `kumaru info` lists all three registries and the benchmark suites; `chat`, `eval` and `bench` create from them.
 - `src\kumaru\server\routes_chat.py` — `/v1/info` reports `BACKENDS.names()` and `TOOLS.names()`.

@@ -21,7 +21,7 @@ The distinction that matters most:
 - **Fine-tuning teaches *form*.** How to answer. Format, tone, structure, register.
 - **Retrieval supplies *content*.** What to answer with. Facts, documents, current data.
 
-Fine-tuning facts into weights is expensive, slow to update, and fails silently as the world changes. If your goal is "the model should know our internal docs", build retrieval first.
+Fine-tuning facts into weights is expensive, slow to update, and fails silently as the world changes. If your goal is "the model should know our internal docs", build retrieval first. For a documentation folder that takes one command: `kumaru learn` indexes it, and `agent.knowledge_indexes` adds the passages that match each question ([how-to](howto/src/kumaru/agent/doc_index.md)).
 
 ---
 

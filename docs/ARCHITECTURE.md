@@ -135,7 +135,7 @@ A semaphore in `server/app.py` caps in-flight generations. Requests beyond the c
 
 With `llamacpp_server` there are two queues. Kumaru admits `max_concurrent_requests` (8); the engine runs `llama_server.parallel` of them at once (4 slots) and queues the rest itself. The engine's limit protects VRAM: llama-server reserves its KV cache when it starts, so an extra request waits for a free slot rather than running out of memory. Kumaru's limit protects the API server from an unbounded backlog.
 
-The same reasoning produces the tool-iteration cap in `agent/tools.py`. Tool calling is an unbounded loop driven by a stochastic process; without a cap, one confused model burns your GPU indefinitely. Limits on unbounded loops are safety properties.
+The same reasoning produces the tool-round cap in `agent/chat.py` (`agent.max_tool_iterations`, 10 rounds per message). Tool calling is an unbounded loop driven by a stochastic process; without a cap, one confused model burns your GPU indefinitely. Limits on unbounded loops are safety properties.
 
 ---
 
@@ -172,7 +172,7 @@ mamba = "kumaru_mamba:MambaBackend"
 
 `pip install kumaru-mamba`, and it appears in your UI dropdown. No fork, no patch, no change to this repository. A broken third-party plugin is logged and skipped rather than crashing startup — one bad plugin must never take down the application.
 
-Benchmarks follow the same pattern. The five built-ins are lazy entries (`BENCHMARKS.register_lazy("gsm8k", "kumaru.eval.benchmarks.gsm8k:GSM8K")`), datasets download only when a run needs them, and a separate package can add benchmarks under the `kumaru.benchmarks` group. [GUIDE.md](../GUIDE.md#add-a-benchmark) walks through adding one.
+Benchmarks follow the same pattern. The built-ins are lazy entries (`BENCHMARKS.register_lazy("gsm8k", "kumaru.eval.benchmarks.gsm8k:GSM8K")`), datasets download only when a run needs them, and a separate package can add benchmarks under the `kumaru.benchmarks` group. A suite name stands for several of them: `multipl_e` runs one benchmark per programming language (`BENCHMARK_SUITES`). [GUIDE.md](../GUIDE.md#add-a-benchmark) walks through adding one.
 
 ---
 
@@ -267,14 +267,33 @@ Having both is the point: one file to learn from, one file to work with.
 - **The same questions for every model.** A seeded sample (100 per benchmark by default, seed 1234) means two runs answer identical questions and can be compared question by question. Pairing removes the difference in question difficulty, which is much of the noise.
 - **Paired statistics.** `kumaru bench compare` counts the questions only one model got right and tests them with an exact McNemar test. It puts a paired bootstrap interval on the difference and applies Holm's correction across benchmarks. It says "B better" only when the corrected test agrees (`stats.py`, and `verdict()` in `runner.py`).
 - **Every answer is saved as soon as it is graded.** Each record is appended to `items.jsonl` and flushed. A record holds the output, the thinking, the extracted answer, the verdict, the token count and why generation stopped. A crash or Ctrl+C loses only the questions in flight; re-running with `--out` resumes, and failed questions are retried.
-- **A fingerprint guards each run.** A hash of the model, adapter, decoding settings, seed and prompt mode is stored with the results. Resuming with different settings is refused, so two experiments are never silently mixed. Each record also stores a hash of its question, answer budget and seed, and a resume reuses the saved answer only if that hash still matches. (That hash leaves out the agent's system prompt, which states today's date; otherwise a run resumed the next day would ask every question again.) Neither hash covers grader code, and a resume keeps saved verdicts, so after changing a grader start a new run folder.
+- **A fingerprint guards each run.** A hash of the model, adapter, decoding settings, seed and prompt mode is stored with the results; for the code benchmarks it also covers where programs run, the compiler versions and, on Windows, a memory cap other than the default. Resuming with different settings is refused, so two experiments are never silently mixed. Each record also stores a hash of its question, answer budget and seed, and a resume reuses the saved answer only if that hash still matches. (That hash leaves out the agent's system prompt, which states today's date; otherwise a run resumed the next day would ask every question again.) Neither hash covers grader code, and a resume keeps saved verdicts, so after changing a grader start a new run folder.
 - **One seed per question,** derived from the run seed and the question ID, so sampling does not depend on the order in which concurrent answers finish. Batched GPU arithmetic is still not bit-exact, which is one reason [BENCHMARKS.md](BENCHMARKS.md) compares a run with a repeat of itself.
-- **Graders are tested like code.** `scripts/check_graders.py` grades each dataset's reference answers, phrased the ways models phrase them. Every one must grade correct, and a wrong answer must grade wrong. The IFEval checks are compared with Google's reference implementation.
-- **Model-written code is opt-in.** HumanEval runs code a model wrote, so it needs `--allow-code-exec`. Each program runs in a separate Python process with a 15-second limit, an empty temporary folder and a scrubbed environment, with the destructive parts of `os`, `shutil` and `subprocess` disabled. That stops accidents, not attackers; use a container or a VM for models you do not trust.
+- **Graders are tested like code.** `scripts/check_graders.py` grades each dataset's reference answers, phrased the ways models phrase them. Every one must grade correct, and a wrong answer must grade wrong. The IFEval checks are compared with Google's reference implementation. MultiPL-E's languages have no reference answers, so Kumaru re-grades answers that MultiPL-E's authors graded with their own harness, and must reach the same verdicts, bar a few documented toolchain differences.
+- **Model-written code is opt-in.** HumanEval and MultiPL-E run code a model wrote, so they need `--allow-code-exec`. Each program gets an empty temporary folder, a scrubbed environment and time limits (15 seconds to run), and everything it started is killed when it ends; on Windows its memory is also capped. HumanEval's Python also has the destructive parts of `os`, `shutil` and `subprocess` disabled. That stops accidents, not attackers. `--sandbox docker` runs each program in a container with no network instead, from an image built from `docker/sandbox/Dockerfile`; use it, a VM or another container for models you do not trust.
+- **A missing compiler is not a score.** A MultiPL-E language whose compiler is missing, or which grades a known answer wrongly, is skipped with a note, never scored 0, so a score always means the model's code was run.
 
 **The consequence.** A model swap is a measured decision, not an impression. The rule is in [SCALABILITY.md](SCALABILITY.md#absorbing-the-next-model): switch on "B better", or on "no clear difference" when the new model is faster or smaller.
 
 **What it caught.** The first Qwen3.6 run hit the answer-token limit on up to 16% of one benchmark's answers, which understated its scores. Every summary now counts truncated answers (`n_truncated`), and the default answer budget was raised to 8,192 tokens. [BENCHMARKS.md §6.1](BENCHMARKS.md#61-the-truncation-confound) has the details.
+
+---
+
+## Decision 15 — The agent changes nothing without your yes
+
+**The problem.** To build an app, a website or a game, a model has to write several files, run the build and the tests, read the failures and fix them. Printing code in the chat leaves all of that to you. But a model that can write files and run programs can also do damage, by mistake or because a file it read told it to.
+
+**What we did.** `kumaru chat --workspace DIR` turns on five tools: `list_files`, `read_file`, `write_file` and `edit_file` (`agent/workspace.py`), and `run_command` (`agent/commands.py`). `ChatAgent` runs the loop. The tool declarations go with each request. `llamacpp_server` and `openai_compat` return the model's calls, `echo` scripts calls for tests, and the other backends refuse tools. The agent runs each call and sends the result back, for at most `agent.max_tool_iterations` rounds per message.
+
+- **A call does nothing by itself.** A tool that would change something first returns an `Action`: the path and a unified diff, or the exact command line, its folder and its time limit. `ToolBelt` shows it to an approver and applies it only on yes. Listing and reading need no approval.
+- **No approver, no such tools.** Only the terminal can ask. The server, the web UI, `eval` and `bench` build `ChatAgent` without an approver, so it withholds every tool that changes something or uses the project folder.
+- **One folder.** Every path must be provably inside the folder. `..`, absolute paths, other drives and UNC paths, links and junctions, alternate data streams, device names and `.git` are refused.
+- **No shell.** A command is an argv list for a program named in `agent.workspace.allowed_commands`, and shells and launchers are refused when the config loads. It runs with a reduced environment, so API keys stay out. At its time limit, everything it started is stopped, even programs that detached themselves: on Windows it runs in a Job Object from its first instruction (as in Decision 13), and on Linux its process group is killed and then Kumaru, a child subreaper, kills what is left. If that cannot be set up, the command is not run. macOS and BSD stop only the process group, and the approval prompt says so.
+- **Results are data.** Before the model reads a result, its chat control tokens are escaped (`agent/untrusted.py`): llama-server would otherwise read `<|im_end|>` and `<|im_start|>system` in a file as a real turn. Only what the model reads changes, never the files.
+
+**What it is not.** The folder confines the file tools, not the programs. An approved `python` or `npm` command runs with your permissions and can do anything they can. File contents and command output are untrusted text, so read each request before you answer `y`. For code you do not trust, use a container or a VM.
+
+**Why only the terminal.** Approval over HTTP needs its own protocol, timeouts and UI. Withholding the tools there is the smaller change and the safe default, and an approval round-trip can be added later without touching the tools.
 
 ---
 
@@ -284,11 +303,11 @@ Having both is the point: one file to learn from, one file to work with.
 |---|---|
 | A database | The agent is stateless. Adding persistence would undo the property that makes scaling trivial. |
 | User accounts / multi-tenancy | This is a local-first tool. Bearer-token auth exists for when you bind beyond localhost. |
-| A vector store | RAG is a `MemoryPolicy` plus a tool. Both plug in without core changes. |
-| Active tool calling | The seam exists and is inert. v0.2 is still chat-only, as specified. |
+| A vector store | Documentation retrieval is keyword search (BM25) in one SQLite file per documentation set (`agent/doc_index.py`), so no embedding model competes with the LLM for the GPU. Embeddings can join it in `find_passages`, and retrieval over history is a `MemoryPolicy`; both plug in without core changes. |
+| Tool approval over HTTP | Only `kumaru chat` can ask you before a change or a command, so the server and the web UI never offer those tools (Decision 15). |
 | A JS framework | See Decision 10. |
 | Prometheus / OpenTelemetry | `Metrics` is ~30 lines with the same call sites. Swap it when you need it. |
-| A sandbox for model-written code | HumanEval's guard stops accidents. Real isolation is a container or VM, and Kumaru should not pretend to be one. |
+| A sandbox built into Kumaru | Running model-written code locally stops accidents, not attackers. Real isolation is a container (`--sandbox docker`) or a VM, and Kumaru should not pretend to be one. The project folder confines the file tools; commands you approve run with your permissions. |
 | An LLM judge for grading | Every built-in grader is deterministic and checked against answer keys. A judge model has its own error rate; see [BENCHMARKS.md §10](BENCHMARKS.md#10-where-evaluation-goes-next). |
 
 Each of these is an *addition*, not a *refactor*. That is the test every design decision here had to pass.

@@ -17,7 +17,7 @@ Since v0.2 the package has two layers:
 | Import from | Command | What it measures | Page |
 |---|---|---|---|
 | `kumaru.eval` (implemented in `kumaru.eval.harness`) | `kumaru eval` | Smoke and speed checks of the agent path: substring checks at temperature 0, plus time to first token and tokens/second. | [`harness.md`](harness.md) |
-| `kumaru.eval.benchmarks`, and `kumaru.eval.benchmarks.runner` | `kumaru bench list\|run\|report\|compare` | Accuracy on GSM8K, MMLU-Pro, IFEval, HumanEval and golden-format question sets, with 95% confidence intervals and paired significance tests. | [`benchmarks\__init__.md`](benchmarks/__init__.md) |
+| `kumaru.eval.benchmarks`, and `kumaru.eval.benchmarks.runner` | `kumaru bench list\|run\|report\|compare` | Accuracy on GSM8K, MMLU-Pro, IFEval, HumanEval, MultiPL-E (HumanEval in eight languages) and golden-format question sets, with 95% confidence intervals and paired significance tests. | [`benchmarks\__init__.md`](benchmarks/__init__.md) |
 
 This file re-exports only the first layer. The subpackage has its own `__all__`: `BenchItem`, `Benchmark`, `Grade`, `select_items`. The run machinery is imported from `kumaru.eval.benchmarks.runner`: `BenchRunner`, `BenchSettings`, `run_benchmarks`, `compare_runs`, `load_summaries`, `list_benchmarks` and the `render_*` functions.
 

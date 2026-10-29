@@ -55,6 +55,9 @@ A single accuracy on 100 questions moves by several points by chance. A model sw
 | `runner` | Run, resume, summarize, compare, render | [`runner.md`](runner.md) |
 | `golden` | Your own JSONL regression set, 7 graders | [`golden.md`](golden.md) |
 | `gsm8k`, `mmlu_pro`, `ifeval`, `humaneval` | Public benchmarks | [`gsm8k.md`](gsm8k.md), [`mmlu_pro.md`](mmlu_pro.md), [`ifeval.md`](ifeval.md), [`humaneval.md`](humaneval.md) |
+| `multipl_e` | HumanEval in eight languages, one benchmark per language plus the `multipl_e` suite | [`multipl_e.md`](multipl_e.md) |
+| `codeparse` | Cuts code in brace languages into top-level pieces, for `multipl_e` | [`codeparse.md`](codeparse.md) |
+| `codeexec` | Runs the code benchmarks' programs: limits, process-tree kill, `--sandbox docker` | [`codeexec.md`](codeexec.md) |
 | `ifeval_checks` | IFEval's 25 instruction checkers, strict/loose | [`ifeval_checks.md`](ifeval_checks.md) |
 
 ## Public API
@@ -75,7 +78,7 @@ A single accuracy on 100 questions moves by several points by chance. A model sw
 pip install -e ".[bench]"
 ```
 
-The `bench` extra installs `datasets>=2.20`, `langdetect>=1.0.9`, `nltk>=3.9.1`, `numpy>=1.26` and `regex>=2023.0`. `datasets` downloads the public sets. `langdetect`, `nltk` and `regex` are for IFEval's checkers. numpy makes the bootstrap in `bench compare` about 1000× faster; without it the bootstrap still runs, in pure Python ([`stats.md`](stats.md)). The `all` extra includes `bench`.
+The `bench` extra installs `datasets>=2.20`, `langdetect>=1.0.9`, `nltk>=3.9.1`, `numpy>=1.26` and `regex>=2023.0`. `datasets` downloads the public sets. `langdetect`, `nltk` and `regex` are for IFEval's checkers. numpy makes the bootstrap in `bench compare` about 1000× faster; without it the bootstrap still runs, in pure Python ([`stats.md`](stats.md)). The `all` extra includes `bench`. MultiPL-E's languages also need their compilers, which no extra installs ([`multipl_e.md`](multipl_e.md#install-the-toolchains)).
 
 The golden set needs none of these packages. A missing one surfaces as `Optional dependency '<pkg>' is not installed.` with the hint `Install it with: pip install -e ".[bench]" in the Kumaru folder` (the same on Windows: `setup.ps1` has no switch for this extra).
 
@@ -86,16 +89,19 @@ kumaru bench list
 ```
 
 ```
-│ name      │ what it measures                             │ source                                       │ runs code │
-│ golden    │ Your own regression set: JSONL questions     │ data/bench/golden.jsonl (yours to extend)    │           │
-│ gsm8k     │ Grade-school math word problems: multi-step  │ openai/gsm8k (main/test, 1,319 problems) -   │           │
-│ humaneval │ Python function synthesis graded by hidden   │ openai/openai_humaneval (164 problems) -     │    yes    │
-│ ifeval    │ Verifiable instruction following: 25         │ google/IFEval (541 prompts) - Zhou et al.    │           │
-│ mmlu_pro  │ Hard 10-option multiple choice, 14 subjects: │ TIGER-Lab/MMLU-Pro (test, 12,032 questions)  │           │
+│ name           │ what it measures                                               │ source                                                        │ runs code │
+│ golden         │ Your own regression set: JSONL questions with deterministic    │ data/bench/golden.jsonl (yours to extend)                     │           │
+│ gsm8k          │ Grade-school math word problems: multi-step arithmetic         │ openai/gsm8k (main/test, 1,319 problems) - Cobbe et al. 2021  │           │
+│ humaneval      │ Python function synthesis graded by hidden unit tests          │ openai/openai_humaneval (164 problems) - Chen et al. 2021     │    yes    │
+│ ifeval         │ Verifiable instruction following: 25 instruction types, 541    │ google/IFEval (541 prompts) - Zhou et al. 2023                │           │
+│ mmlu_pro       │ Hard 10-option multiple choice, 14 subjects: knowledge plus    │ TIGER-Lab/MMLU-Pro (test, 12,032 questions) - Wang et al.     │           │
+│ multipl_e_cpp  │ HumanEval in C++17 (MultiPL-E), compiled with g++ or clang++.  │ nuprl/MultiPL-E humaneval-cpp (152 problems) - Cassano et al. │    yes    │
+│ multipl_e_rs   │ HumanEval in Rust (MultiPL-E), compiled with rustc (edition    │ nuprl/MultiPL-E humaneval-rs (152 problems) - Cassano et al.  │    yes    │
+│ multipl_e      │ Runs multipl_e_py, multipl_e_js, multipl_e_ts, multipl_e_cs,   │ suite                                                         │    yes    │
 Any .jsonl file in the golden-set format also works as a benchmark (see data/bench/golden.jsonl).
 ```
 
-(Trimmed. `mmlu-pro` is a hidden alias of `mmlu_pro`.)
+(Trimmed: wrapped lines, `gsm8k_train` and six of the eight `multipl_e_*` languages are cut. `mmlu-pro` and `multipl-e` are hidden aliases of `mmlu_pro` and `multipl_e`.)
 
 ### Check the plumbing offline (no model, no downloads)
 
@@ -183,7 +189,8 @@ print(out_dir, summaries[0].accuracy, summaries[0].ci95)
 | `Optional dependency 'datasets' is not installed.` | The `bench` extra is not installed. | `pip install -e ".[bench]"`. |
 | `Could not load dataset '<id>' (split '<split>'): ...` | First use without internet, or a Hugging Face Hub problem. | Connect once. Later runs are served from the HF cache (`HF_HOME`, default `~/.cache/huggingface`). |
 | `Unknown benchmark: 'x'.` | Typo, or a plugin is not installed. | The hint lists the available names. A path ending in `.jsonl` is always treated as a golden set. |
-| `'humaneval' grades answers by running model-written code on this machine.` | Code execution needs consent. | Read [`humaneval.md`](humaneval.md), then add `--allow-code-exec`, or drop it from the list. |
+| `'humaneval' grades answers by running model-written code on this machine.` (or `'multipl_e' ...`) | Code execution needs consent. | Read [`humaneval.md`](humaneval.md) or [`multipl_e.md`](multipl_e.md), then add `--allow-code-exec`, or drop it from the list. |
+| `skipped multipl_e_go: Go needs the go command, which is not on PATH. ...` | That language's compiler is missing, so the suite leaves it out instead of scoring it 0. | Install it ([`multipl_e.md`](multipl_e.md#install-the-toolchains)) and resume with `-o <run dir>`, or ignore it. |
 | A plugin benchmark runs but is missing from `kumaru bench list` | `names()` ignores entry points. | Run it by name. This is a known limitation. |
 | `ImportError` for `run_benchmarks` from `kumaru.eval.benchmarks` | Only the four `base` names are re-exported. | Import from `kumaru.eval.benchmarks.runner`. |
 
@@ -194,6 +201,6 @@ print(out_dir, summaries[0].accuracy, summaries[0].ci95)
 - `src\kumaru\core\registry.py` — `BENCHMARKS` and its lazy registrations.
 - `src\kumaru\cli.py` — `kumaru bench list|run|report|compare`.
 - `data\bench\golden.jsonl` — the shipped golden set ([`golden.jsonl.md`](../../../../data/bench/golden.jsonl.md)).
-- `tests\test_bench_graders.py`, `test_bench_extract.py`, `test_bench_ifeval.py`, `test_bench_runner.py`, `test_bench_stats.py` — pin grader, extraction, statistics and runner behaviour.
+- `tests\test_bench_graders.py`, `test_bench_extract.py`, `test_bench_ifeval.py`, `test_bench_runner.py`, `test_bench_stats.py` — pin grader, extraction, statistics and runner behaviour; `test_bench_multipl_e.py`, `test_bench_codeparse.py` and `test_bench_codeexec.py` pin MultiPL-E's assembly and the code runner.
 - [`docs\BENCHMARKS.md`](../../../../../BENCHMARKS.md) — results and grader validation.
 - [`..\harness.md`](../harness.md) — the v0.1 `kumaru eval` harness, and when to use which.

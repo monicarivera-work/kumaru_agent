@@ -17,10 +17,16 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
+from kumaru.agent.untrusted import MAX_CONTROL_TOKEN_CHARS, neutralize_control_tokens
 from kumaru.core.errors import ConfigError
 
 MAX_FILE_BYTES = 128_000
 MAX_REPORTED_ERRORS = 5
+
+# Labels that cite a reference: shared by knowledge packs and documentation indexes.
+Topic = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+Version = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+Source = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
 
 EXPERTISE = {
     "coding": (
@@ -68,9 +74,9 @@ class KnowledgePack(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
-    topic: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
-    version: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
-    source: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    topic: Topic
+    version: Version
+    source: Source
     content: str = Field(min_length=1, max_length=100_000)
 
     @field_validator("content")
@@ -149,13 +155,17 @@ def reference_context(packs: Sequence[KnowledgePack], limit: int) -> str:
 
     Runs on every request, so it stops as soon as `limit` characters are taken:
     the work is bounded by the budget, not by the size or number of packs.
+    Control tokens are escaped (`neutralize_control_tokens`), looking just far
+    enough past the cut to escape a token it splits: the result is always a
+    prefix of the whole context. No token spans two parts, as each label and
+    separator ends with a line break.
     """
     if not packs or limit <= 0:
         return ""
     taken: list[str] = []
     room = limit
     for part in _reference_parts(packs):
-        taken.append(part[:room])
+        taken.append(neutralize_control_tokens(part[: room + MAX_CONTROL_TOKEN_CHARS])[:room])
         room -= len(taken[-1])
         if not room:
             break

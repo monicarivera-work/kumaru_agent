@@ -34,7 +34,7 @@ Precedence bugs in configuration are miserable to debug during serving and train
 Precedence, from lowest to highest (later wins). Verified with `load_config` and `kumaru config`.
 
 1. **Field defaults** in this file. Always valid, so Kumaru runs with zero setup.
-2. **YAML** — a file path, or a bare profile name resolved to `configs\<name>.yaml`. This is the reproducible, commit-to-git layer.
+2. **YAML** — a bare profile name, always resolved to `configs\<name>.yaml`, or a file path: a value with a folder in it or a `.yaml`/`.yml` suffix (`config_file`). A bare name never reads a file in the current folder, which may be a cloned project you run `kumaru chat --workspace` in. This is the reproducible, commit-to-git layer.
 3. **Environment** — `KUMARU_<SECTION>__<FIELD>[__<SUBFIELD>...]`. The deployment layer.
 4. **Explicit overrides** — a nested dict, normally built from CLI flags. The "just this once" layer.
 
@@ -80,14 +80,17 @@ With `generation.thinking: null` (the model's default) the preset is **not** app
 | `LlamaServerOptions` | `LlamaServerOptions(binary: str \| None = None, host: str = "127.0.0.1", port: int \| None = None, parallel: int = 4, kv_unified: bool = True, flash_attn: Literal["on", "off", "auto"] = "on", cache_type_k: str \| None = None, cache_type_v: str \| None = None, n_cpu_moe: int \| None = None, batch_size: int \| None = None, ubatch_size: int \| None = None, reasoning_budget_message: str = "\n\nI have used my thinking budget, so I will now give my best final answer.\n", startup_timeout_s: float = 900.0, log_file: str \| None = None, extra_args: list[str] = [])` | Knobs for the managed `llama-server` child (`backend.llama_server`). Bounds: `parallel` 1–64, `n_cpu_moe` ≥ 0, `batch_size`/`ubatch_size` ≥ 1, `startup_timeout_s` > 0. |
 | `BackendConfig` | `BackendConfig(name: str = "transformers", model: str = "Qwen/Qwen2.5-7B-Instruct", device: str = "auto", dtype: str = "auto", load_in_4bit: bool = False, load_in_8bit: bool = False, attn_implementation: str \| None = None, max_context_length: int = 8192, trust_remote_code: bool = False, max_batch_size: int = 1, adapter_path: str \| None = None, base_url: str \| None = None, api_key: str \| None = None, timeout_s: float = 300.0, model_path: str \| None = None, n_gpu_layers: int = -1, n_threads: int \| None = None, models_dir: str = default_models_dir(), llama_server: LlamaServerOptions = LlamaServerOptions(), extra: dict[str, Any] = {})` | Which inference engine to load, and how. Fields are shared by all backends, and each backend reads only its own. For example, `adapter_path` (a LoRA from `kumaru train`) is used by the `transformers` backend only; every other backend refuses to load while it is set. |
 | `ThinkingModeConfig` | `ThinkingModeConfig(max_tokens: int \| None = None, temperature: float \| None = None, top_p: float \| None = None, top_k: int \| None = None, min_p: float \| None = None, presence_penalty: float \| None = None, repetition_penalty: float \| None = None, thinking_budget: int \| None = None)` | Sampling preset used only when thinking is on. Same bounds as `GenerationParams`: `max_tokens` 1–131072, `temperature` 0–2, `top_p` 0–1, `top_k` ≥ 0, `min_p` 0–1, `presence_penalty` −2–2, `repetition_penalty` 0.5–2, `thinking_budget` ≥ 0. |
-| `AgentConfig` | `AgentConfig(system_prompt: str = "You are Kumaru, a precise and helpful assistant. …", max_history_tokens: int = 6144, memory_policy: str = "sliding_window", enabled_tools: list[str] = [], max_tool_iterations: int = 4)` | System prompt, history budget, memory policy, tools. |
+| `WorkspaceConfig` | `WorkspaceConfig(root: str \| None = None, allowed_commands: list[str] = ["python", "node", "npm", "npx", "dotnet"], command_timeout_s: int = 300, max_output_chars: int = 16000, max_file_bytes: int = 262144, max_list_entries: int = 500)` | The project folder the agent may work in (`agent.workspace`), and what it may run there. Bounds: `command_timeout_s` 1–3600, `max_output_chars` 1000–200000, `max_file_bytes` 1024–8388608, `max_list_entries` 10–10000. |
+| `program_name` | `program_name(raw: str) -> str` | Lower-cases a program name and strips one `.exe`, `.com`, `.cmd` or `.bat`, for allowlist checks: `"Python.EXE"` → `"python"`. |
+| `AgentConfig` | `AgentConfig(system_prompt: str = "You are Kumaru, a precise and helpful assistant. …", max_history_tokens: int = 6144, memory_policy: str = "sliding_window", enabled_tools: list[str] = [], max_tool_iterations: int = 10, workspace: WorkspaceConfig = WorkspaceConfig(), expertise: list[Literal["coding", "playwright", "windows", "apis"]] = [], knowledge_files: list[str] = [], max_knowledge_chars: int = 6000, knowledge_indexes: list[str] = [], max_retrieved_chars: int = 6000)` | System prompt, history budget, memory policy, tools and their project folder, engineering guidance, knowledge packs and documentation indexes. Bounds: `max_tool_iterations` 1–100; `max_knowledge_chars` and `max_retrieved_chars` 0–24,000. |
 | `ServerConfig` | `ServerConfig(host: str = "127.0.0.1", port: int = 8080, cors_origins: list[str] = ["*"], max_concurrent_requests: int = 8, request_timeout_s: float = 600.0, serve_ui: bool = True, api_key: str \| None = None)` | HTTP surface. |
 | `TelemetryConfig` | `TelemetryConfig(log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO", log_format: str = "console", metrics_enabled: bool = True, trace_file: str \| None = None)` | Logging and observability. A `mode="before"` validator, `_normalize_log_level`, strips and upper-cases a string level and maps `WARN` to `WARNING` and `FATAL` to `CRITICAL`. Any other name fails at load, not later inside uvicorn. |
 | `KumaruConfig` | `KumaruConfig(backend: BackendConfig = ..., generation: GenerationParams = ..., thinking_mode: ThinkingModeConfig = ..., agent: AgentConfig = ..., server: ServerConfig = ..., telemetry: TelemetryConfig = ...)` | The single object every subsystem reads; every section defaults to its own defaults. |
 | `KumaruConfig.dump_yaml` | `dump_yaml(self) -> str` | The fully resolved config as YAML (`sort_keys=False`), for bug reports and run records. It does not redact anything: `backend.api_key` and `server.api_key` appear in plain text. |
 | `deep_merge` | `deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]` | New dict; nested dicts merge, everything else (lists included) is replaced. |
 | `env_overrides` | `env_overrides(environ: dict[str, str] \| None = None) -> dict[str, Any]` | `KUMARU_*` variables as a nested dict (`os.environ` when `environ` is `None`). |
-| `load_config` | `load_config(path: str \| Path \| None = None, *, overrides: dict[str, Any] \| None = None, use_env: bool = True) -> KumaruConfig` | Build and validate the final config; raises `ConfigError`. |
+| `load_config` | `load_config(path: str \| Path \| None = None, *, overrides: dict[str, Any] \| None = None, use_env: bool = True) -> KumaruConfig` | Build and validate the final config; raises `ConfigError`. `path` is read through `config_file`. |
+| `config_file` | `config_file(path: str \| Path) -> Path` | The file `load_config` reads for `path`. A bare name, with no folder and no `.yaml`/`.yml` suffix, is always `CONFIG_DIR / "<name>.yaml"`, even when the current folder holds a file of that name: such a file, in a cloned project, could otherwise point `base_url` at another server or set the `llama_server.binary` that starts before anything asks you. Anything else is a path: `./qwen36`, `my.yaml`, `C:\cfg\x.yaml`. |
 | `list_profiles` | `list_profiles() -> list[str]` | Sorted stems of `configs\*.yaml`: `cpu-only`, `default`, `local-gpu`, `low-vram`, `qwen25-7b-gguf`, `qwen36`, `test`, `vllm`. |
 
 ### Field notes that are not obvious from the types
@@ -120,9 +123,15 @@ The flag mapping is in `docs\howto\src\kumaru\backends\llamacpp_server.md`.
 
 `thinking_mode.max_tokens` also sets how much context the agent reserves for the reply when thinking (see `src\kumaru\agent\chat.py`). Thinking needs a much larger cap, which is why `qwen36` sets 32768.
 
+**`agent.enabled_tools`, `agent.max_tool_iterations` and `agent.workspace`**
+
+- `kumaru chat --workspace DIR` sets `workspace.root` and adds the five project-folder tools to `enabled_tools`. Only `kumaru chat` can ask before a change, so every other interface withholds the tools that change things and the project-folder tools (`agent\tools.md`).
+- `max_tool_iterations` counts the rounds of tool calls one message may run before the agent stops and asks to continue (`agent\chat.md`, "The tool loop").
+- `allowed_commands` takes bare names, normalized by `program_name()`. A path, a space, or a shell or launcher (`cmd`, `powershell`, `pwsh`, `bash`, `sh`, `wsl`, `env`, `start`, and programs that run a command given to them, such as `xargs`, `nohup`, `timeout`, `su`, `schtasks`, `wmic` or `wt`) fails validation at load, because one approved argv could then run anything. That list (`_SHELLS`) is best-effort: no list knows every program that starts others, so approval, not the list, decides what runs. What an allowed program may still do is in `agent\commands.md`.
+
 **Reserved fields, declared but not read by v0.2 code**
 
-`server.request_timeout_s`, `telemetry.metrics_enabled`, `telemetry.trace_file`, and `agent.max_tool_iterations`. Setting them validates but changes nothing.
+`server.request_timeout_s`, `telemetry.metrics_enabled` and `telemetry.trace_file`. Setting them validates but changes nothing.
 
 ## How to use it
 
@@ -224,6 +233,7 @@ A new generation knob belongs on `GenerationParams`; see `docs\howto\src\kumaru\
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `Config file not found: <name>` with `hint: Available profiles: ...` | No such path, and no `configs\<name>.yaml`. | Use a listed profile or a real path; `kumaru info` lists profiles too. |
+| `Config file not found: my-profile`, though the current folder holds `my-profile` | A bare name is always a profile in `configs\`, never a file in the current folder (`config_file`). | Write a path: `-c .\my-profile`, or name the file `my-profile.yaml`. |
 | `hint: Available profiles: (none)` | `CONFIG_DIR` is `REPO_ROOT\configs`, which exists only in a source checkout or editable install. | Pass a file path, or install with `pip install -e .`. |
 | An API key shows up in a pasted `kumaru config` dump | `dump_yaml` serialises every field verbatim, including `backend.api_key` and `server.api_key`. (Bench run records are different: the runner redacts credential-like keys before saving the config.) | Redact `api_key:` lines before sharing a dump. |
 | `must contain a YAML mapping at the top level` | The YAML's top level is a list or scalar. | Make it a mapping (`backend: ...`). An empty file is fine. |
@@ -239,7 +249,7 @@ A new generation knob belongs on `GenerationParams`; see `docs\howto\src\kumaru\
 
 ## Known limitations
 
-- **Four fields are reserved and read by nothing** (see "Reserved fields" above): `server.request_timeout_s`, `telemetry.metrics_enabled`, `telemetry.trace_file` and `agent.max_tool_iterations`. `/metrics` is always served, and a request waits at most 600 s for a loading backend, whatever they say.
+- **Three fields are reserved and read by nothing** (see "Reserved fields" above): `server.request_timeout_s`, `telemetry.metrics_enabled` and `telemetry.trace_file`. `/metrics` is always served, and a request waits at most 600 s for a loading backend, whatever they say.
 - **`cors_origins: ["*"]` is paired with `allow_credentials=True`** (`src\kumaru\server\app.py`). Starlette then reflects every `Origin`, so CORS lets any web page open in your browser call the local API and read the answers, `POST /v1/backend` included. Workaround: `cors_origins: []` (the bundled UI is same-origin and needs no entry) or your own origins. `server.api_key` also stops such pages, but the bundled UI sends no key.
 - **`kumaru config` prints API keys.** `dump_yaml` redacts nothing. Workaround: delete the `api_key:` lines before sharing.
 - **An all-digit API key from an environment variable becomes an int**, and validation then fails with `Input should be a valid string`. Workaround: quote it inside the value, `$env:KUMARU_SERVER__API_KEY = '"12345"'`.

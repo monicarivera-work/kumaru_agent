@@ -40,7 +40,12 @@ One page per file. Each page answers the same seven questions: what it does, why
 | `agent/prompt.py` | [page](src/kumaru/agent/prompt.md) | Tuning answer quality, or injecting context |
 | `agent/memory.py` | [page](src/kumaru/agent/memory.md) | Conversations get truncated; adding summarization or RAG |
 | `agent/knowledge.py` | [page](src/kumaru/agent/knowledge.md) | Coding guidance; importing reference packs with `kumaru learn` |
+| `agent/doc_index.py` | [page](src/kumaru/agent/doc_index.md) | **Indexing a documentation folder** with `kumaru learn`; which passages reach each answer |
+| `agent/doc_chunks.py` | [page](src/kumaru/agent/doc_chunks.md) | A documentation format converts badly; adding a format |
 | `agent/tools.py` | [page](src/kumaru/agent/tools.md) | **Adding a capability the model can call** |
+| `agent/workspace.py` | [page](src/kumaru/agent/workspace.md) | The project folder: what the agent may list, read, create and edit |
+| `agent/commands.py` | [page](src/kumaru/agent/commands.md) | Which programs the agent may run, and how they are contained |
+| `agent/untrusted.py` | [page](src/kumaru/agent/untrusted.md) | Tool results, references or excerpts show `&lt;\|im_end\|&gt;`; escaping chat control tokens in untrusted text |
 
 ## Server — the HTTP surface
 
@@ -87,9 +92,12 @@ Results and method: [docs/BENCHMARKS.md](../BENCHMARKS.md).
 | `eval/benchmarks/ifeval.py` | [page](src/kumaru/eval/benchmarks/ifeval.md) | Instruction following and its four scores |
 | `eval/benchmarks/ifeval_checks.py` | [page](src/kumaru/eval/benchmarks/ifeval_checks.md) | One IFEval instruction type behaves oddly |
 | `eval/benchmarks/humaneval.py` | [page](src/kumaru/eval/benchmarks/humaneval.md) | Code generation; what the code-execution guard does and does not stop |
+| `eval/benchmarks/multipl_e.py` | [page](src/kumaru/eval/benchmarks/multipl_e.md) | **Which programming languages the model is weak in**: HumanEval in JavaScript, TypeScript, C#, Java, C++, Go, Rust and Python; the toolchains each needs |
+| `eval/benchmarks/codeexec.py` | [page](src/kumaru/eval/benchmarks/codeexec.md) | How model-written programs run: limits, process-tree kill, `--sandbox docker` |
+| `eval/benchmarks/codeparse.py` | [page](src/kumaru/eval/benchmarks/codeparse.md) | A MultiPL-E answer was cut or assembled wrongly |
 | `eval/benchmarks/golden.py` | [page](src/kumaru/eval/benchmarks/golden.md) | **Writing your own questions**: the format and the graders |
 | `data/bench/golden.jsonl` | [page](data/bench/golden.jsonl.md) | Your golden set: what each question tests |
-| `scripts/check_graders.py` | [page](scripts/check_graders.py.md) | Proving the graders right against the datasets' answer keys |
+| `scripts/check_graders.py` | [page](scripts/check_graders.py.md) | Proving the graders right against the datasets' answer keys, and MultiPL-E's against its own verdicts |
 
 ## UI
 
@@ -140,4 +148,5 @@ Results and method: [docs/BENCHMARKS.md](../BENCHMARKS.md).
 | `scripts/setup.ps1` | [page](scripts/setup.ps1.md) | One-shot install |
 | `scripts/get-llama-server.ps1` | [page](scripts/get-llama-server.ps1.md) | Installing or upgrading the llama.cpp server |
 | `scripts/verify.ps1` | [page](scripts/verify.ps1.md) | Full self-check, layer by layer |
+| `docker/sandbox/Dockerfile` | [page](docker/sandbox/Dockerfile.md) | The `--sandbox docker` image for code benchmarks (built and checked on 2026-10-23) |
 | `tests/` | [page](tests/README.md) | What the suite protects, and how to add to it |

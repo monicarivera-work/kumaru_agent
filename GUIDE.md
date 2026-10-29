@@ -190,6 +190,17 @@ kumaru chat -q "Write a PowerShell one-liner that finds files over 100MB" 2>$nul
 
 `2>$null` discards the log lines on stderr, leaving only the answer on stdout.
 
+### Let it build in a project folder
+
+```powershell
+mkdir C:\projects\snake
+kumaru chat -c qwen36 --workspace C:\projects\snake
+```
+
+Then ask for what you want: "Make a snake game as one HTML file, with a Node test for the game logic, and run the test." In that folder the model can list, read, create and edit files, and run `python`, `node`, `npm`, `npx` and `dotnet`, never a shell. Before each change it shows you the diff, and before each command the exact command line. Nothing happens until you answer `y`; listing and reading need no answer.
+
+Paths outside the folder are refused. Commands you approve run with your permissions, so read each one before you say yes. The server and the web UI never offer these tools, because they cannot ask. Details: [`docs/howto/src/kumaru/cli.md`](docs/howto/src/kumaru/cli.md#let-it-work-in-a-project-folder-kumaru-chat---workspace).
+
 ### Point another tool at it
 
 Anything that accepts an OpenAI base URL works: Continue.dev, Cursor, Aider, LangChain, LlamaIndex, Open WebUI. Set:
@@ -270,29 +281,31 @@ Two steps. Nothing existing changes.
 from kumaru.agent.tools import Tool
 from kumaru.core.registry import TOOLS
 
-@TOOLS.register("read_file")
-class ReadFileTool(Tool):
-    name = "read_file"
-    description = "Read a UTF-8 text file from disk. Use when the user refers to a file by path."
+@TOOLS.register("word_count")
+class WordCountTool(Tool):
+    name = "word_count"
+    description = "Count the words, lines and characters of a text exactly. Use when the user asks how long a text is."
     parameters = {
         "type": "object",
-        "properties": {"path": {"type": "string", "description": "Absolute path."}},
-        "required": ["path"],
+        "properties": {"text": {"type": "string", "description": "The text to measure."}},
+        "required": ["text"],
     }
     timeout_s = 5.0
     read_only = True
 
     async def run(self, **kwargs) -> str:
-        from pathlib import Path
-        return Path(kwargs["path"]).read_text(encoding="utf-8")[:8000]
+        text = kwargs["text"]
+        return f"{len(text.split())} words, {len(text.splitlines())} lines, {len(text)} characters"
 ```
 
 ```yaml
 agent:
-  enabled_tools: [read_file]
+  enabled_tools: [word_count]
 ```
 
 The `description` field is the API documentation the *model* reads. Write it for that audience.
+
+The model calls tools only on a backend that supports them: `qwen36` (`llamacpp_server`) or `openai_compat`. A read-only tool runs as soon as the model asks, in every interface, the HTTP server included, so it must be harmless whoever is asking. A tool that changes anything sets `read_only = False` and implements `prepare()`. It then runs only in `kumaru chat`, after you approve what it will do. For files, build on the project-folder tools, which never leave their folder. Both patterns are in [`docs/howto/src/kumaru/agent/tools.md`](docs/howto/src/kumaru/agent/tools.md#how-to-extend-it).
 
 ### Add a backend
 
@@ -397,6 +410,7 @@ Then `kumaru bench run arc -c qwen36`. A separate package registers through the 
 | How is a model scored? | `src/kumaru/eval/benchmarks/`, and [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) |
 | How is the prompt assembled? | `src/kumaru/agent/prompt.py` |
 | What gets dropped when context fills? | `src/kumaru/agent/memory.py` |
+| What may the agent change or run, and who approves it? | `src/kumaru/agent/tools.py`, `workspace.py` and `commands.py` |
 | What are the HTTP endpoints? | `src/kumaru/server/routes_chat.py` |
 | How does loss masking work? | `src/kumaru/train/data.py` |
 | What is a transformer, exactly? | `src/kumaru/train/model_nano.py` |

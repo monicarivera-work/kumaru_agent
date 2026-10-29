@@ -40,6 +40,8 @@ Reasoning is a separate field, not text mixed into `content`, because the two ha
   - `thinking` is tri-state: `None` uses the model's default, `True`/`False` forces thinking on/off.
   - The agent resolves the final params by layering config defaults, the `thinking_mode` preset, and per-request overrides through `merged()`; see `src\kumaru\agent\chat.py`.
 - **`StreamChunk`** carries increments on two independent channels, `delta` (answer) and `reasoning` (thinking). A chunk may carry either, both, or neither. Consumers append each channel to its own buffer. The final chunk carries `finish_reason` and, when the backend knows it, `usage`.
+  - With tools on, two more kinds of chunk report the agent's actions: `tool_calls` (the calls the model asked for, in the OpenAI shape) and `tool_result` (one call's result, a `Role.TOOL` message). Consumers that only render text can ignore both; the server's SSE stream does.
+  - A backend reports the model's calls on its final chunk, with `finish_reason="tool_calls"`. `ChatAgent` then runs them and yields `tool_calls` and `tool_result` chunks between the rounds' text (`agent\chat.md`, "The tool loop").
 - **`ChatResult`** is a completed generation. `Backend.generate()` builds it from the stream: it joins the reasoning into `message.reasoning` (`None` if empty) and records latency and time to first token. Time to first token counts the first reasoning token, not the first answer token.
 
 Invariants:
@@ -53,9 +55,9 @@ Invariants:
 
 | Name | Signature | What it's for |
 |---|---|---|
-| `FinishReason` | `Literal["stop", "length", "error", "cancelled"]` | Allowed generation termination reasons. |
+| `FinishReason` | `Literal["stop", "length", "tool_calls", "error", "cancelled"]` | Allowed generation termination reasons. `"tool_calls"`: the model stopped to call tools, or, from `ChatAgent`, `agent.max_tool_iterations` stopped the loop. |
 | `Role` | `class Role(str, Enum)` — `SYSTEM = "system"`, `USER = "user"`, `ASSISTANT = "assistant"`, `TOOL = "tool"` | Who produced a message; mirrors the OpenAI chat schema. |
-| `Message` | `Message(role: Role, content: str = "", name: str \| None = None, tool_call_id: str \| None = None, tool_calls: list[dict[str, Any]] \| None = None, reasoning: str \| None = None)` | One conversation turn. `content=None` becomes `""`. `reasoning` has `validation_alias=AliasChoices("reasoning", "reasoning_content")`. |
+| `Message` | `Message(role: Role, content: str = "", name: str \| None = None, tool_call_id: str \| None = None, tool_calls: list[dict[str, Any]] \| None = None, reasoning: str \| None = None)` | One conversation turn. `content=None` becomes `""`. `reasoning` has `validation_alias=AliasChoices("reasoning", "reasoning_content")`. An assistant message that calls tools has `tool_calls` (`[{"id", "type": "function", "function": {"name", "arguments": <JSON string>}}]`); a `Role.TOOL` message answers one call, with its `tool_call_id` and the tool's `name`. |
 | `Message.to_openai` | `to_openai(self, *, include_reasoning: bool = False) -> dict[str, Any]` | Wire format: always `role` and `content`; `name`/`tool_call_id`/`tool_calls` when truthy; `reasoning_content` only when `include_reasoning` is set and `reasoning` is non-empty. |
 | `Message.system` | `@classmethod system(cls, content: str) -> Message` | Build a system message. |
 | `Message.user` | `@classmethod user(cls, content: str) -> Message` | Build a user message. |
@@ -64,7 +66,7 @@ Invariants:
 | `GenerationParams.merged` | `merged(self, **overrides: Any) -> GenerationParams` | Copy with the non-`None` overrides applied (`model_copy(update=...)`, so not re-validated). |
 | `Usage` | `Usage(prompt_tokens: int = 0, completion_tokens: int = 0)` | Token accounting. |
 | `Usage.total_tokens` | `property -> int` | `prompt_tokens + completion_tokens`. |
-| `StreamChunk` | `StreamChunk(delta: str = "", reasoning: str = "", finish_reason: FinishReason \| None = None, usage: Usage \| None = None)` | One incremental piece of a streaming response; `delta` is answer text, `reasoning` is thinking text. |
+| `StreamChunk` | `StreamChunk(delta: str = "", reasoning: str = "", finish_reason: FinishReason \| None = None, usage: Usage \| None = None, tool_calls: list[dict[str, Any]] \| None = None, tool_result: Message \| None = None)` | One incremental piece of a streaming response; `delta` is answer text, `reasoning` is thinking text, `tool_calls` and `tool_result` report tool use. |
 | `ChatResult` | `ChatResult(id: str = "chatcmpl-<24 hex>", created: int = <epoch seconds>, model: str = "kumaru", message: Message, finish_reason: FinishReason = "stop", usage: Usage = Usage(), latency_ms: float = 0.0, time_to_first_token_ms: float \| None = None)` | Completed non-streaming generation; `message.reasoning` holds the joined thinking. |
 | `ChatResult.tokens_per_second` | `property -> float` | `completion_tokens / (latency_ms / 1000)`; `0.0` when `latency_ms <= 0`. Completion tokens include thinking tokens. |
 | `BackendInfo` | `BackendInfo(name: str, model_id: str, device: str = "unknown", dtype: str = "unknown", context_length: int = 0, supports_streaming: bool = True, quantization: str \| None = None, extra: dict[str, Any] = {})` | Loaded-backend metadata shown by the API and UI. |
@@ -91,7 +93,7 @@ reply.to_openai()                        # {'role': 'assistant', 'content': '42'
 reply.to_openai(include_reasoning=True)  # {'role': 'assistant', 'content': '42', 'reasoning_content': '6 * 7 = 42'}
 ```
 
-Use `include_reasoning=True` only when the model expects its earlier thinking back. The usual case is agentic interleaved thinking across tool calls inside one turn. Kumaru's own chat paths never set it.
+Use `include_reasoning=True` only when the model expects its earlier thinking back. The usual case is agentic interleaved thinking across tool calls inside one turn. Kumaru's own chat paths never set it, the tool loop included: its follow-up requests hold the earlier rounds' calls and results, not their thoughts.
 
 ### Parse ecosystem payloads that use `reasoning_content`
 
@@ -152,7 +154,7 @@ Add fields only when the shape is a contract shared across layers. Prefer option
 
 **Accept an ecosystem field name without renaming yours.** Use `validation_alias=AliasChoices("yours", "theirs")`, as `reasoning` does. Inputs accept both names; dumps keep yours.
 
-**Expose a backend capability in metadata.** Add a defaulted field to `BackendInfo`, for example `supports_tools: bool = False`. Then set it in every backend's `info()` that supports the capability. Do not put backend-specific knobs on `Message`. Use backend config or `BackendInfo.extra` instead.
+**Expose a backend capability in metadata.** Add a defaulted field to `BackendInfo`, for example `supports_vision: bool = False`. Then set it in every backend's `info()` that supports the capability. Do not put backend-specific knobs on `Message`. Use backend config or `BackendInfo.extra` instead. (Tool calling is a class attribute instead, `Backend.supports_tools`, because `ChatAgent` checks it before the model loads; see `backends\base.md`.)
 
 ## Failure modes
 
