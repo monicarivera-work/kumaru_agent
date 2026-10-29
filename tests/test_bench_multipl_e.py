@@ -1037,6 +1037,37 @@ def test_only_documented_differences_from_multipl_e_are_excused(check_graders) -
     assert "Kumaru drops" in excuse(ts, call, passed, item)
 
 
+def test_cpp_is_excused_only_where_windows_32_bit_long_cuts_a_test_number(
+    check_graders, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replay, excuse = check_graders.Replay, check_graders.expected_difference
+    passed_114 = replay("HumanEval_114_minSubArraySum", 0, "OK", "", "")
+    passed_139 = replay("HumanEval_139_special_factorial", 0, "OK", "", "")
+    cut_114 = "Assertion failed: candidate((std::vector<long>({(long)-9999999999999999}))) == (-9999999999999999)"
+    cut_139 = "Assertion failed: candidate((7)) == (125411328000)"
+
+    def failed(stderr: str, status: str = "failed") -> Grade:
+        return Grade(correct=False, extracted=status, detail={"stderr": stderr})
+
+    monkeypatch.setattr(check_graders, "NATIVE_LONG_BITS", 32)  # Windows
+    cpp = multipl_e.MultiPLECpp()
+    assert "C++'s long is 32 bits on Windows" in excuse(cpp, passed_114, failed(cut_114))
+    assert "C++'s long is 32 bits on Windows" in excuse(cpp, passed_139, failed(cut_139))
+    # Failing in any other way, or another problem or language, is not that.
+    assert excuse(cpp, passed_139, failed("Assertion failed: candidate((4)) == (288)")) == ""
+    assert excuse(cpp, passed_139, failed(cut_139, "compile_error")) == ""
+    assert excuse(cpp, passed_139, failed(cut_139, "timeout")) == ""
+    assert excuse(cpp, replay("HumanEval_0_f", 0, "OK", "", ""), failed(cut_139)) == ""
+    assert excuse(multipl_e.MultiPLEJava(), passed_139, failed(cut_139)) == ""
+    failed_there = replay("HumanEval_139_special_factorial", 0, "Exception", "", "")
+    assert excuse(cpp, failed_there, Grade(correct=True, extracted="passed")) == ""
+    # In the Docker sandbox, or natively on Linux, `long` is 64 bits.
+    cpp.configure(sandbox="docker")
+    assert excuse(cpp, passed_139, failed(cut_139)) == ""
+    monkeypatch.setattr(check_graders, "NATIVE_LONG_BITS", 64)
+    assert excuse(multipl_e.MultiPLECpp(), passed_139, failed(cut_139)) == ""
+
+
 def test_the_self_check_grades_in_the_sandbox_it_is_given(
     check_graders, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

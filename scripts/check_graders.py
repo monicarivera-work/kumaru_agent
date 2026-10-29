@@ -236,6 +236,13 @@ MULTIPL_E_LIMITS = {
     "go": "30 s to build and run",
     "rs": "15 s to compile, 5 s to run",
 }
+# C++ problems whose tests hold numbers beyond 32 bits in a `long`: 64 bits on
+# Linux, where MultiPL-E grades (and in the Docker sandbox), but 32 bits on
+# Windows, so answers MultiPL-E passed fail there (multipl_e.md, "Problems no
+# answer can pass").
+CPP_NEEDS_64_BIT_LONG = frozenset({114, 139})
+# How wide C++'s `long` is for programs run natively on this machine.
+NATIVE_LONG_BITS = 32 if sys.platform == "win32" else 64
 
 
 @dataclass(frozen=True)
@@ -363,6 +370,13 @@ def expected_difference(
     newer_go = re.search(r"undefined: (?:min|max|clear)\b", replay.stderr)
     if bench.lang == "go" and replay.status == "SyntaxError" and grade.correct and newer_go:
         return "uses min, max or clear, built into Go since 1.21 (MultiPL-E's Go is older)"
+    long_is_32_bits = bench.lang == "cpp" and bench.sandbox == "none" and NATIVE_LONG_BITS == 32
+    if long_is_32_bits and replay.status == "OK" and grade.extracted == "failed":
+        # Only a failure at the assertion that holds such a number.
+        failed = re.search(r"^Assertion failed: (.*)$", str(grade.detail.get("stderr", "")), re.M)
+        too_big = failed is not None and any(int(n) >= 2**31 for n in re.findall(r"\d+", failed[1]))
+        if too_big and int(replay.problem.split("_")[1]) in CPP_NEEDS_64_BIT_LONG:
+            return "its test needs a 64-bit long; C++'s long is 32 bits on Windows"
     return ""
 
 
