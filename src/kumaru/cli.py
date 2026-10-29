@@ -29,7 +29,7 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import typer
 from rich.console import Console
@@ -389,7 +389,7 @@ def info() -> None:
     """Show versions, hardware, and which optional components are installed."""
     import kumaru.agent.tools  # noqa: F401 - registers the built-in tools
     from kumaru.core.config import list_profiles
-    from kumaru.core.registry import BACKENDS, BENCHMARKS, TOOLS
+    from kumaru.core.registry import BACKENDS, BENCHMARK_SUITES, BENCHMARKS, TOOLS
 
     table = Table(title=f"Kumaru v{__version__}", show_header=False, border_style="dim")
     table.add_column(style="cyan", no_wrap=True)
@@ -399,6 +399,7 @@ def info() -> None:
     table.add_row("backends", ", ".join(BACKENDS.names()))
     table.add_row("tools", ", ".join(TOOLS.names()) or "(none)")
     table.add_row("benchmarks", ", ".join(BENCHMARKS.names()))
+    table.add_row("benchmark suites", ", ".join(BENCHMARK_SUITES))
     table.add_row("profiles", ", ".join(list_profiles()) or "(none)")
 
     def probe(module: str) -> str:
@@ -598,14 +599,19 @@ def bench_run(
     concurrency: int = typer.Option(None, "--concurrency", "-j", min=1, help="Questions in flight (default: what the backend can batch)."),
     label: str = typer.Option(None, "--label", help="Run name (default: <profile or model>-<thinking mode>, e.g. qwen36-think4096)."),
     out: str = typer.Option(None, "--out", "-o", help="This run's own folder (default runs/bench/<timestamp>-<label>). Point at an earlier run to resume it."),
-    allow_code_exec: bool = typer.Option(False, "--allow-code-exec", help="Allow benchmarks that execute model-written code (humaneval)."),
+    allow_code_exec: bool = typer.Option(False, "--allow-code-exec", help="Allow benchmarks that execute model-written code (humaneval, multipl_e)."),
+    sandbox: str = typer.Option("none", "--sandbox", help="Where code benchmarks run model-written programs: none (this machine: a temp folder, time and memory limits) or docker (a throwaway container with no network; build its image first, see docs/BENCHMARKS.md)."),
     use_agent_prompt: bool = typer.Option(False, "--use-agent-prompt", help="Prepend Kumaru's system prompt, as chat does."),
 ) -> None:
     """Run benchmarks; every answer is saved under runs/bench/."""
     import asyncio
 
-    from kumaru.eval.benchmarks.runner import BenchSettings, render_summaries, run_benchmarks
+    from kumaru.core.errors import ConfigError
+    from kumaru.eval.benchmarks.codeexec import SANDBOXES
+    from kumaru.eval.benchmarks.runner import BenchRunner, BenchSettings, render_summaries
 
+    if sandbox not in SANDBOXES:
+        raise ConfigError(f"Unknown sandbox '{sandbox}'.", hint=f"Use one of: {', '.join(SANDBOXES)}.")
     cfg = _load(config, backend=backend, model=model, adapter=adapter, context=context)
     settings = BenchSettings(
         limit=None if full else limit,
@@ -617,14 +623,17 @@ def bench_run(
         temperature=temperature,
         use_agent_prompt=use_agent_prompt,
         allow_code_exec=allow_code_exec,
+        sandbox=cast(Literal["none", "docker"], sandbox),  # one of SANDBOXES, checked above
         label=label,
         out_dir=Path(out) if out else None,
     )
-    out_dir, summaries = asyncio.run(
-        run_benchmarks(cfg, benchmarks, settings, profile=config, console=console)
-    )
+    runner = BenchRunner(cfg, settings, profile=config, console=console)
+    summaries = asyncio.run(runner.run(benchmarks))
+    out_dir = runner.out_dir
     console.print()
     render_summaries(console, summaries)
+    for name, why in runner.skipped.items():
+        console.print(f"[yellow]not run:[/] {escape(name)}: [dim]{escape(why)}[/]")
     console.print(f"\n[dim]saved to[/] {out_dir}")
     console.print(f"[dim]details:[/] kumaru bench report {out_dir}")
     console.print(f"[dim]compare:[/] kumaru bench compare <baseline-run> {out_dir}")

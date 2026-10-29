@@ -4,7 +4,10 @@ What a run does
 ---------------
 1. Resolve the benchmarks, run their preflight checks, then load and sample the
    questions — all *before* the model loads, so a typo or a missing package
-   fails in seconds instead of after a two-minute model load.
+   fails in seconds instead of after a two-minute model load. A suite name
+   (`multipl_e`) stands for its members; a member whose compiler or runtime
+   is missing is skipped with a note, recorded in run.json, rather than
+   scored 0.
 2. Load the backend once and reuse it for every benchmark.
 3. Ask each question with the same decoding settings `kumaru chat` uses
    (`ChatAgent.resolve_params`) plus a per-question seed, `concurrency` at a
@@ -46,7 +49,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from rich.console import Console
@@ -79,7 +82,7 @@ DEFAULT_OUT = REPO_ROOT / "runs" / "bench"
 # the results with errors.
 MAX_CONSECUTIVE_ERRORS = 5
 # Outcomes a code benchmark records instead of how it found the answer.
-TEST_OUTCOMES = frozenset({"passed", "failed", "timeout"})
+TEST_OUTCOMES = frozenset({"passed", "failed", "timeout", "compile_error"})
 # Head-room added to the estimated prompt size when sizing concurrency.
 PROMPT_MARGIN_TOKENS = 256
 MAX_OUTPUT_TOKENS = 131_072
@@ -108,6 +111,9 @@ class BenchSettings(BaseModel):
     # public numbers are measured on the raw benchmark prompt.
     use_agent_prompt: bool = False
     allow_code_exec: bool = False
+    # Where code benchmarks run model-written programs: on this machine, or in a
+    # throwaway container (docker/sandbox/Dockerfile).
+    sandbox: Literal["none", "docker"] = "none"
     label: str | None = None
     out_dir: Path | None = None
 
@@ -156,8 +162,9 @@ class BenchSummary(BaseModel):
     metrics: dict[str, float] = Field(default_factory=dict)
     by_group: dict[str, dict[str, float]] = Field(default_factory=dict)
     # How answers were found ("answer_tag", "last_number", "error", ...); a code
-    # benchmark records its test outcomes instead ("passed", "failed", "timeout").
-    # Graders that judge the whole reply (contains, regex, IFEval) add nothing.
+    # benchmark records its test outcomes instead ("passed", "failed", "timeout",
+    # "compile_error"). Graders that judge the whole reply (contains, regex,
+    # IFEval) add nothing.
     extraction: dict[str, int] = Field(default_factory=dict)
     n_errors: int = 0
     # Stopped by the token limit (finish_reason "length"): raise the budget.
@@ -478,7 +485,7 @@ def resolve_benchmark(spec: str) -> Benchmark:
 
 
 def list_benchmarks() -> list[dict[str, Any]]:
-    from kumaru.core.registry import BENCHMARKS
+    from kumaru.core.registry import BENCHMARK_SUITES, BENCHMARKS
 
     rows = []
     for name in BENCHMARKS.names():
@@ -488,6 +495,13 @@ def list_benchmarks() -> list[dict[str, Any]]:
             "description": cls.description,
             "source": cls.source,
             "code_exec": cls.needs_code_execution,
+        })  # fmt: skip
+    for name, members in BENCHMARK_SUITES.items():
+        rows.append({
+            "name": name,
+            "description": f"Runs {', '.join(members)}; skips any whose compiler or runtime is missing.",
+            "source": "suite",
+            "code_exec": any(BENCHMARKS.get(member).needs_code_execution for member in members),
         })  # fmt: skip
     return rows
 
@@ -565,6 +579,8 @@ class BenchRunner:
         self.console = console or Console()
         self.show_progress = show_progress
         self.out_dir: Path | None = None
+        # Suite members left out because their toolchain is missing: name -> why.
+        self.skipped: dict[str, str] = {}
         self._index_digests: dict[str, str] = {}
 
     async def run(self, specs: Sequence[str]) -> list[BenchSummary]:
@@ -616,29 +632,48 @@ class BenchRunner:
     # -- internals ------------------------------------------------------------
 
     def _resolve(self, specs: Sequence[str]) -> list[Benchmark]:
+        from kumaru.core.registry import suite_members
+        from kumaru.eval.benchmarks.codeexec import ToolchainMissing
+
         benches: list[Benchmark] = []
         seen: dict[str, tuple[type, str | None]] = {}
+        missing: list[ToolchainMissing] = []
         for spec in specs:
-            bench = resolve_benchmark(spec)
-            path = getattr(bench, "path", None)
-            identity = (type(bench), str(Path(path).resolve()) if path else None)
-            if bench.name in seen:
-                if seen[bench.name] != identity:
+            members = suite_members(spec)
+            for name in members or (spec,):
+                bench = resolve_benchmark(name)
+                path = getattr(bench, "path", None)
+                identity = (type(bench), str(Path(path).resolve()) if path else None)
+                if bench.name in seen or (members and bench.name in self.skipped):
+                    if bench.name in seen and seen[bench.name] != identity:
+                        raise ConfigError(
+                            f"Two benchmarks share the name '{bench.name}' (the second is {spec}), "
+                            "so their results would share one folder.",
+                            hint="Rename one of the files: a golden set is named after its file.",
+                        )
+                    continue  # the same benchmark twice: run it once
+                if bench.needs_code_execution and not self.settings.allow_code_exec:
+                    where = " on this machine" if self.settings.sandbox == "none" else ""
                     raise ConfigError(
-                        f"Two benchmarks share the name '{bench.name}' (the second is {spec}), "
-                        "so their results would share one folder.",
-                        hint="Rename one of the files: a golden set is named after its file.",
+                        f"'{spec if members else bench.name}' grades answers by running "
+                        f"model-written code{where}.",
+                        hint="Add --allow-code-exec to accept that (docs/BENCHMARKS.md explains the "
+                        "safeguards and their limits), or leave it out of the list.",
                     )
-                continue  # the same benchmark twice: run it once
-            seen[bench.name] = identity
-            if bench.needs_code_execution and not self.settings.allow_code_exec:
-                raise ConfigError(
-                    f"'{bench.name}' grades answers by running model-written code on this machine.",
-                    hint="Add --allow-code-exec to accept that (docs/BENCHMARKS.md explains the "
-                    "safeguards and their limits), or leave it out of the list.",
-                )
-            bench.preflight()
-            benches.append(bench)
+                bench.configure(sandbox=self.settings.sandbox)
+                try:
+                    bench.preflight()
+                except ToolchainMissing as exc:
+                    if not members:
+                        raise  # asked for by name: say why it cannot run
+                    missing.append(exc)
+                    self.skipped[bench.name] = exc.why
+                    self.console.print(f"[yellow]skipped {escape(bench.name)}:[/] {escape(exc.why)}")
+                    continue
+                seen[bench.name] = identity
+                benches.append(bench)
+        if not benches and missing:
+            raise missing[0]  # nothing left to run
         if not benches:
             raise ConfigError("No benchmarks given.", hint="See `kumaru bench list`.")
         return benches
@@ -656,7 +691,8 @@ class BenchRunner:
         if previous is not None and previous.fingerprint != fingerprint:
             raise ConfigError(
                 f"{bench_dir} holds results from different settings "
-                "(model, decoding parameters, seed, prompt mode or documentation indexes).",
+                "(model, decoding parameters, seed, prompt mode, documentation indexes, "
+                "sandbox, compiler version or memory cap).",
                 hint="Omit --out (or choose a new directory) to start a fresh run.",
             )
         return _Job(bench, items, params, fingerprint, previous)
@@ -715,6 +751,9 @@ class BenchRunner:
             "seed": self.settings.seed,
             "agent_prompt": agent_prompt,
         }
+        # Only when there is any, so runs from before this field still resume.
+        if extra := bench.fingerprint_extra():
+            payload["extra"] = extra
         return _sha(json.dumps(payload, sort_keys=True))[:16]
 
     def _index_digest(self, path: str) -> str:
@@ -747,6 +786,7 @@ class BenchRunner:
             "command": sys.argv,
             "settings": self.settings.model_dump(mode="json"),
             "params": base.model_dump(mode="json"),
+            "skipped": self.skipped,
             "backend": info,
             "environment": environment(),
             "config": _redact(self.cfg.model_dump(mode="json")),

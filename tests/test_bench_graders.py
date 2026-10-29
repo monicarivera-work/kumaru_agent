@@ -9,8 +9,9 @@ import pytest
 from kumaru.core.errors import ConfigError
 from kumaru.core.registry import BENCHMARKS
 from kumaru.core.types import Role
-from kumaru.eval.benchmarks import gsm8k
+from kumaru.eval.benchmarks import codeexec, gsm8k
 from kumaru.eval.benchmarks.base import BenchItem, select_items
+from kumaru.eval.benchmarks.codeexec import Outcome
 from kumaru.eval.benchmarks.golden import DEFAULT_PATH, GRADERS, GoldenSet, grade_answer
 from kumaru.eval.benchmarks.gsm8k import GSM8K, gold_answer
 from kumaru.eval.benchmarks.humaneval import GUARD, HumanEval, assemble_program, run_program
@@ -318,6 +319,23 @@ class TestHumanEval:
         status, detail = run_program(program, timeout_s=30)
         assert status == "failed"
         assert "before the tests finished" in detail
+
+    def test_in_the_sandbox_it_runs_the_images_python_and_says_what_stopped_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = []
+
+        def killed(program, *, sandbox="none"):
+            seen.append((program.steps[0].argv[0], sandbox))
+            return Outcome("failed", "run", 137, "", "", 1.0, "killed: out of memory?")
+
+        monkeypatch.setattr(codeexec, "run", killed)
+        # Not mistaken for an early exit, the other outcome with a note.
+        assert run_program("x = [0] * 10**10\n", timeout_s=30, sandbox="docker") == (
+            "failed",
+            "killed: out of memory?",
+        )
+        assert seen == [("python3", "docker")]
 
     def test_guard_disables_destructive_calls(self) -> None:
         status, stderr = run_program(GUARD + "import os\nos.remove('anything')\n", timeout_s=30)

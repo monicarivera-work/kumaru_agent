@@ -48,8 +48,8 @@ Both tools load backends from the same config. `kumaru bench` also resolves deco
 | Question | Is this setup working, and how fast is it? | How accurate is it, and did a change really help? |
 | Prompt | The agent's system prompt (persona, quality directives, today's date), then the case prompt. Enabled read-only tools go with it as tool declarations. | Only the benchmark's messages: the question, plus a golden row's `system` if it has one. `--use-agent-prompt` passes them through the same `ChatAgent.prepare`, still without tools. |
 | Decoding | Temperature forced to 0. Per-case `max_tokens`: 24–96 (`smoke`), 8–512 (`speed`). Thinking from the profile, or `KUMARU_GENERATION__THINKING`. | The profile's preset (`-t` overrides), with a fixed seed per question. 8,192 answer tokens, plus the thinking budget. `--think/--no-think`, `--thinking-budget`. |
-| Scoring | Case-insensitive substrings: every `must_include` present, no `must_not_include`. | Per-benchmark graders: number and letter extraction, IFEval's instruction checkers, HumanEval's unit tests, seven golden graders. |
-| Data | `smoke` (6 cases), `speed` (3), or a JSONL file of `Case` rows. | `golden` (27), GSM8K, MMLU-Pro, IFEval, HumanEval, and any golden-format JSONL. |
+| Scoring | Case-insensitive substrings: every `must_include` present, no `must_not_include`. | Per-benchmark graders: number and letter extraction, IFEval's instruction checkers, HumanEval's and MultiPL-E's unit tests, seven golden graders. |
+| Data | `smoke` (6 cases), `speed` (3), or a JSONL file of `Case` rows. | `golden` (27), GSM8K, MMLU-Pro, IFEval, HumanEval, MultiPL-E, and any golden-format JSONL. |
 | Output | A table, plus one JSON file with `--output`. | A run directory: `run.json`, then `items.jsonl` and `summary.json` per benchmark. Resumable with `-o`. |
 | Errors | The first backend error aborts the run, and nothing is saved. | Recorded per question and retried on resume. Five failures in a row stop the run; finished answers are kept. |
 | Statistics | A pass rate. | A Wilson 95% CI on every accuracy. `compare` adds a paired bootstrap CI and an exact McNemar p-value, Holm-adjusted. |

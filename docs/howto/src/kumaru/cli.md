@@ -98,7 +98,7 @@ The signatures show the CLI defaults. In Python, the real defaults are `typer.Op
 | `train` | `train(config: str, resume: str = None, dry_run: bool = False) -> None` | `kumaru train CONFIG`: calls `run_training(Path(config), resume=resume, dry_run=dry_run)`. |
 | `evaluate` | `evaluate(config: str = None, backend: str = None, model: str = None, adapter: str = None, suite: str = "smoke", output: str = None) -> None` | `kumaru eval`: `asyncio.run(run_eval(cfg, suite=suite, output=output))`. |
 | `bench_list` | `bench_list() -> None` | `kumaru bench list`. |
-| `bench_run` | `bench_run(benchmarks: list[str], config: str = None, backend: str = None, model: str = None, adapter: str = None, context: int = None, limit: int = 100, full: bool = False, seed: int = 1234, think: bool = None, thinking_budget: int = None, max_tokens: int = None, temperature: float = None, concurrency: int = None, label: str = None, out: str = None, allow_code_exec: bool = False, use_agent_prompt: bool = False) -> None` | `kumaru bench run`: builds `BenchSettings` (`limit=None` when `--full` is given), then calls `run_benchmarks(cfg, benchmarks, settings, profile=config, console=console)`. |
+| `bench_run` | `bench_run(benchmarks: list[str], config: str = None, backend: str = None, model: str = None, adapter: str = None, context: int = None, limit: int = 100, full: bool = False, seed: int = 1234, think: bool = None, thinking_budget: int = None, max_tokens: int = None, temperature: float = None, concurrency: int = None, label: str = None, out: str = None, allow_code_exec: bool = False, sandbox: str = "none", use_agent_prompt: bool = False) -> None` | `kumaru bench run`: refuses a `--sandbox` outside `codeexec.SANDBOXES` before loading the profile, builds `BenchSettings` (`limit=None` when `--full` is given), then runs `BenchRunner(cfg, settings, profile=config, console=console).run(benchmarks)`. After the summaries it prints `not run: <name>: <why>` for each suite member the runner skipped. |
 | `bench_compare` | `bench_compare(baseline: str, candidate: str, examples: int = 0) -> None` | `kumaru bench compare A B`: `render_comparisons(...)`, plus `render_flips(...)` when `-e` is above 0. |
 | `bench_report` | `bench_report(run: str) -> None` | `kumaru bench report RUN`: `render_summaries(console, load_summaries(Path(run)), details=True)`. |
 | `distill_build` | `distill_build(runs: list[str], out: str, max_tokens: int = 1024, per_question: int = 4, val_fraction: float = 0.05, seed: int = 42, check_arithmetic: bool = True, eval_set: list[str] = ["gsm8k"], decontaminate: bool = True, allow_thinking: bool = False, force: bool = False) -> None` | `kumaru distill build RUNS... -o DIR`: `render(console, build_from_runs(runs, out, DistillSettings(...), force=force), Path(out))`. |
@@ -363,7 +363,7 @@ Model loads in the background; the UI shows progress.
 
 One table:
 - `python`;
-- the registered `backends`, `tools` and `benchmarks`;
+- the registered `backends`, `tools` and `benchmarks`, and the `benchmark suites` (`multipl_e`);
 - the `profiles`;
 - the version of each optional package (`torch`, `transformers`, `peft`, `trl`, `datasets`, `bitsandbytes`, `llama_cpp`, `langdetect`, `nltk`), or `not installed`;
 - the CUDA state, as one of:
@@ -401,7 +401,7 @@ kumaru eval -c qwen36 -s my_cases.jsonl
 ### Benchmarks: `kumaru bench`
 
 - **Subcommands:**
-  - `bench list` prints the benchmarks: `golden`, `gsm8k`, `gsm8k_train`, `humaneval`, `ifeval` and `mmlu_pro`. Any golden-set `.jsonl` file also works as a benchmark. `gsm8k_train` is GSM8K's training split: teacher data for `kumaru distill`, not a score.
+  - `bench list` prints the benchmarks: `golden`, `gsm8k`, `gsm8k_train`, `humaneval`, `ifeval`, `mmlu_pro` and the eight `multipl_e_<lang>`, plus the `multipl_e` suite, which runs all eight. Any golden-set `.jsonl` file also works as a benchmark. `gsm8k_train` is GSM8K's training split: teacher data for `kumaru distill`, not a score.
   - `bench report RUN` shows one run in detail.
   - `bench compare BASELINE CANDIDATE [-e N]` answers "did B really beat A?" with paired differences, confidence intervals and p-values.
 - **Records.** `bench run` saves every answer.
@@ -409,7 +409,7 @@ kumaru eval -c qwen36 -s my_cases.jsonl
   - methodology and results: `docs\BENCHMARKS.md`;
   - sampling, fingerprints, concurrency and the record format: `docs\howto\src\kumaru\eval\benchmarks\runner.md`.
 
-`bench run BENCHMARKS...`. The argument help reads "Names from `kumaru bench list`, or golden-set .jsonl paths."
+`bench run BENCHMARKS...`. The argument help reads "Names from `kumaru bench list`, or golden-set .jsonl paths." A suite name (`multipl_e`) stands for its members.
 
 | Option | Default | Help text and notes |
 |---|---|---|
@@ -424,7 +424,8 @@ kumaru eval -c qwen36 -s my_cases.jsonl
 | `-j, --concurrency` | backend (`x>=1`) | "Questions in flight (default: what the backend can batch)." That is 1, except on `llamacpp_server` (its slots) and on `transformers` at temperature 0 (`backend.max_batch_size`). |
 | `--label` | `<profile or model>-<thinking mode>` | "Run name (default: <profile or model>-<thinking mode>, e.g. qwen36-think4096)." The mode is `think`, `think<budget>`, `nothink` or `default`. Without a profile, the model's file or repo name is used: `-m D:\kumaru\models\Qwen3-8B-Q4_K_M.gguf --no-think` gives `Qwen3-8B-Q4_K_M-nothink`. |
 | `-o, --out` | `runs\bench\<YYYYMMDD-HHMMSS>-<label>` | "This run's own folder (default runs/bench/<timestamp>-<label>). Point at an earlier run to resume it." |
-| `--allow-code-exec` | off | "Allow benchmarks that execute model-written code (humaneval)." |
+| `--allow-code-exec` | off | "Allow benchmarks that execute model-written code (humaneval, multipl_e)." |
+| `--sandbox` | `none` | "Where code benchmarks run model-written programs: none (this machine: a temp folder, time and memory limits) or docker (a throwaway container with no network; build its image first, see docs/BENCHMARKS.md)." Any other value: `error: Unknown sandbox '<value>'.` with `hint: Use one of: none, docker.`, before the profile loads. |
 | `--use-agent-prompt` | off | "Prepend Kumaru's system prompt, as chat does." |
 
 **Recipes:**
@@ -440,13 +441,16 @@ kumaru bench compare runs\bench\<stamp>-qwen36-nothink runs\bench\<stamp>-qwen36
 # Inspect one run; resume an interrupted run (same settings, same folder)
 kumaru bench report runs\bench\<stamp>-qwen36-think4096
 kumaru bench run gsm8k ifeval -c qwen36 --think --thinking-budget 4096 -n 50 -o runs\bench\<stamp>-qwen36-think4096
+
+# HumanEval in eight languages; languages without a compiler here are skipped, not scored 0
+kumaru bench run multipl_e -c qwen36 --no-think --allow-code-exec
 ```
 
 - **Resuming.**
   - A rerun with the same `--out` reuses the finished answers.
-  - A run whose fingerprint differs (model, decoding parameters, seed, prompt mode or documentation indexes) is refused before anything is written.
+  - A run whose fingerprint differs (model, decoding parameters, seed, prompt mode, documentation indexes, sandbox, compiler version or memory cap) is refused before anything is written.
   - On Ctrl+C the runner prints `Stopped. Finished answers are saved; resume with --out <dir>`.
-- **`humaneval`** refuses to run without `--allow-code-exec`.
+- **`humaneval` and `multipl_e*`** refuse to run without `--allow-code-exec`. Read `docs\howto\src\kumaru\eval\benchmarks\multipl_e.md` for the toolchains each language needs.
 
 ### Distillation data: `kumaru distill`
 
@@ -546,8 +550,9 @@ def serve(
 | A reply ends with `[Stopped after 10 tool rounds (agent.max_tool_iterations). ...]`. | The model used every round it had for this message. | Reply `continue`, or raise `agent.max_tool_iterations` (up to 100). |
 | `Missing argument 'config'.` from `kumaru train`, exit 2. | `train` takes a positional path, not `-c`. | `kumaru train configs\train\lora-small.yaml`. |
 | `error: Training config not found: <path>`. | A wrong path. | Start from a file in `configs\train\`. |
-| `error: 'humaneval' grades answers by running model-written code on this machine.` | Benchmarks that execute code are opt-in. | Add `--allow-code-exec` after reading the safeguards in `docs\BENCHMARKS.md`, or drop `humaneval`. |
-| `error: <dir> holds results from different settings (model, decoding parameters, seed, prompt mode or documentation indexes).` | `--out` points at a run made with other settings, and resuming would mix them. | Omit `--out`, or choose a new directory. |
+| `error: 'humaneval' grades answers by running model-written code on this machine.` (or `'multipl_e' ...`) | Benchmarks that execute code are opt-in. | Add `--allow-code-exec` after reading the safeguards in `docs\BENCHMARKS.md`, or drop the benchmark. |
+| `not run: multipl_e_go: Go needs the go command, which is not on PATH. ...` after a suite run | That language's compiler or runtime is missing, so the suite skipped it instead of scoring it 0. | Install it and resume with `-o <run dir>`, or ignore it. |
+| `error: <dir> holds results from different settings (model, decoding parameters, seed, prompt mode, documentation indexes, sandbox, compiler version or memory cap).` | `--out` points at a run made with other settings, and resuming would mix them. | Omit `--out`, or choose a new directory. |
 | A bench run is not in `runs\bench\<label>`. | The default folder is `runs\bench\<YYYYMMDD-HHMMSS>-<label>`. | Use the `results:` or `saved to` path that the run prints. |
 | `error: No benchmark results in <dir>`. | `bench report` was pointed at a folder that `bench run` didn't create. | Point it at a run folder under `runs\bench\`. |
 | `error: <dir> holds answers to gsm8k, an evaluation set: training on them would inflate the score it measures.` | `distill build` was given a run of a test split or a golden set. | Run the teacher on `gsm8k_train` and pass that run. See `docs\howto\src\kumaru\train\distill.md`. |
@@ -576,5 +581,6 @@ def serve(
 - `src\kumaru\train\runner.py`: `run_training`, called by `train` (`docs\TRAINING.md`).
 - `src\kumaru\eval\harness.py`: `run_eval`, called by `eval` (`docs\howto\src\kumaru\eval\harness.md`).
 - `src\kumaru\eval\benchmarks\runner.py`: everything behind `bench` (`docs\howto\src\kumaru\eval\benchmarks\runner.md`, `docs\BENCHMARKS.md`).
+- `src\kumaru\eval\benchmarks\codeexec.py`: `SANDBOXES`, the values `--sandbox` accepts (`docs\howto\src\kumaru\eval\benchmarks\codeexec.md`).
 - `src\kumaru\train\distill.py`: everything behind `distill` (`docs\howto\src\kumaru\train\distill.md`).
 - `tests\test_cli.py`: CliRunner tests and the `main()` error-format test.

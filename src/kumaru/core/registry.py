@@ -195,4 +195,27 @@ BENCHMARKS.register_lazy(
 BENCHMARKS.register_lazy("mmlu_pro", "kumaru.eval.benchmarks.mmlu_pro:MMLUPro", aliases=("mmlu-pro",))
 BENCHMARKS.register_lazy("ifeval", "kumaru.eval.benchmarks.ifeval:IFEval")
 BENCHMARKS.register_lazy("humaneval", "kumaru.eval.benchmarks.humaneval:HumanEval")
+# HumanEval in eight languages (MultiPL-E). One benchmark per language, so each
+# gets its own score, confidence interval and paired comparison.
+MULTIPL_E_LANGUAGES = {
+    "py": "MultiPLEPython", "js": "MultiPLEJavaScript", "ts": "MultiPLETypeScript",
+    "cs": "MultiPLECSharp", "java": "MultiPLEJava", "cpp": "MultiPLECpp", "go": "MultiPLEGo",
+    "rs": "MultiPLERust",
+}  # fmt: skip
+for _lang, _cls in MULTIPL_E_LANGUAGES.items():
+    BENCHMARKS.register_lazy(
+        f"multipl_e_{_lang}", f"kumaru.eval.benchmarks.multipl_e:{_cls}", aliases=(f"multipl-e-{_lang}",)
+    )
 BENCHMARKS.register_lazy("golden", "kumaru.eval.benchmarks.golden:GoldenSet")
+
+# Names that stand for several benchmarks. A suite skips members whose compiler
+# or runtime is missing, and says so; naming a member directly fails instead.
+BENCHMARK_SUITES: dict[str, tuple[str, ...]] = {
+    "multipl_e": tuple(f"multipl_e_{lang}" for lang in MULTIPL_E_LANGUAGES),
+}
+SUITE_ALIASES: dict[str, str] = {"multipl-e": "multipl_e"}
+
+
+def suite_members(name: str) -> tuple[str, ...]:
+    """The benchmarks a suite name stands for, or () if `name` is not a suite."""
+    return BENCHMARK_SUITES.get(SUITE_ALIASES.get(name, name), ())

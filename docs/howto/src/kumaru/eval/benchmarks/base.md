@@ -10,8 +10,8 @@
 
 - **`BenchItem`** — one question: a stable `id`, the user `prompt`, the gold `answer` (any shape the grader expects), an optional `group` (subject/tag), an optional `system` message, an optional per-item `max_tokens` and free-form `meta`.
 - **`Grade`** — one verdict: `correct`, optional partial-credit `score`, the `extracted` answer and grader `detail` such as the extraction method.
-- **`Benchmark`** — abstract base class. Subclasses implement `load()` and `grade()`, set three descriptive class attributes and optionally override five hooks or switches.
-- **`load_hf_rows(path, name, split)`** — loads a Hugging Face dataset split as plain dicts, importing `datasets` lazily and turning failures into Kumaru errors with a hint.
+- **`Benchmark`** — abstract base class. Subclasses implement `load()` and `grade()` and set three descriptive class attributes. They may override six hook methods (`preflight`, `configure`, `fingerprint_extra`, `messages`, `generation_overrides`, `aggregate`) and four class switches (`answer_tokens`, `needs_code_execution`, `blocking_grader`, `training_data`).
+- **`load_hf_rows(path, name, split, revision=None)`** — loads a Hugging Face dataset split as plain dicts, importing `datasets` lazily and turning failures into Kumaru errors with a hint. `revision` pins a dataset commit.
 - **`select_items(items, limit, seed)`** — the sampler behind `-n/--limit` and `--seed`. It is deterministic, stratified by `group`, and returns items in dataset order.
 
 ## Why it exists
@@ -28,9 +28,9 @@ Everything else, from sampling, seeds, decoding and concurrency to persistence, 
 
 The runner ([`runner.md`](runner.md)) drives each benchmark in this order:
 
-1. `preflight()` runs before the model loads (IFEval uses it to fetch NLTK data). Failing here costs nothing.
+1. `configure(sandbox=...)` passes on the run's `--sandbox`. Then `preflight()` runs before the model loads: IFEval uses it to fetch NLTK data, and the code benchmarks check for Docker or a compiler. Failing here costs nothing. A suite member whose preflight raises `ToolchainMissing` is skipped instead of stopping the run.
 2. `load()` returns every item in a stable order. `select_items(items, settings.limit, settings.seed)` then picks the sample, also before the model loads.
-3. The decoding parameters are the profile's resolved parameters `.merged(**generation_overrides())`. `merged` drops `None` values, so an override can change a parameter but cannot unset one.
+3. The decoding parameters are the profile's resolved parameters `.merged(**generation_overrides())`. `merged` drops `None` values, so an override can change a parameter but cannot unset one. The settings fingerprint, which decides whether a saved run may be resumed, includes `fingerprint_extra()` when that returns anything.
 4. `messages(item)` builds the conversation: `[system?, user]` by default.
 5. The model answers. The **answer budget** is `item.max_tokens or answer_tokens` (see below).
 6. `grade(item, content)` sees only the final answer text, never the reasoning (thinking) stream. If `blocking_grader` is true it runs in a worker thread. An exception is recorded as `grader failed: ...` against that question.
@@ -59,13 +59,15 @@ A long budget costs nothing on questions the model answers briefly; generation s
 | `Benchmark.needs_code_execution` | `ClassVar[bool] = False` | True: the runner refuses the benchmark without `--allow-code-exec`. |
 | `Benchmark.blocking_grader` | `ClassVar[bool] = False` | True: `grade` runs via `asyncio.to_thread`, so subprocess graders don't stall the event loop. |
 | `Benchmark.training_data` | `ClassVar[bool] = False` | True only for questions from a dataset's *training* split (`gsm8k_train`), whose graded answers may become training data. `kumaru distill build` refuses runs of every other benchmark: training on an evaluation set inflates the score it measures. A split's *name* does not decide it; IFEval's only split is called `train`, yet IFEval is an evaluation set. |
-| `Benchmark.preflight` | `preflight(self) -> None` | Raise early if a dependency or data file is missing. The default does nothing. |
+| `Benchmark.preflight` | `preflight(self) -> None` | Raise early if a dependency or data file is missing. The default does nothing. Raise `codeexec.ToolchainMissing` for a missing compiler or runtime, so that a suite can skip this benchmark. |
+| `Benchmark.configure` | `configure(self, *, sandbox: str = "none") -> None` | Run options, applied before `preflight`. `sandbox` is `--sandbox` (`codeexec.SANDBOXES`). The default ignores it; the code benchmarks raise `KumaruError("Unknown sandbox '...'")` for a value they don't know. |
+| `Benchmark.fingerprint_extra` | `fingerprint_extra(self) -> dict[str, Any]` | Settings outside the run's own that change verdicts, such as the sandbox image or the compiler version. They join the settings fingerprint, so a resumed run with different ones is refused. The default `{}` adds nothing, which leaves the fingerprint as it was before the hook existed. |
 | `Benchmark.load` | `load(self) -> list[BenchItem]` (abstract) | Every item of the evaluation split, in a stable order. |
 | `Benchmark.messages` | `messages(self, item: BenchItem) -> list[Message]` | The conversation for one item. Override for few-shot or multi-turn formats. |
 | `Benchmark.grade` | `grade(self, item: BenchItem, output: str) -> Grade` (abstract) | Score one answer. Must be deterministic. |
 | `Benchmark.generation_overrides` | `generation_overrides(self) -> dict[str, Any]` | Decoding settings the task needs regardless of model. HumanEval sets `presence_penalty=0.0` and `repetition_penalty=1.0`, because repetition is correct in code. |
 | `Benchmark.aggregate` | `aggregate(self, records: list[ItemRecord], items: dict[str, BenchItem]) -> dict[str, float]` | Extra metrics. `items` maps record id to question. |
-| `load_hf_rows` | `load_hf_rows(path: str, name: str \| None, split: str) -> list[dict[str, Any]]` | `datasets.load_dataset(path, name, split=split)` as dicts. A missing `datasets` raises `DependencyMissingError`; any other failure raises `KumaruError`. |
+| `load_hf_rows` | `load_hf_rows(path: str, name: str \| None, split: str, revision: str \| None = None) -> list[dict[str, Any]]` | `datasets.load_dataset(path, name, split=split, revision=revision)` as dicts. A pinned `revision` (a commit) means a dataset update can't silently change the questions; MultiPL-E pins one. A missing `datasets` raises `DependencyMissingError`; any other failure raises `KumaruError`. |
 | `select_items` | `select_items(items: list[BenchItem], limit: int \| None, seed: int) -> list[BenchItem]` | Deterministic stratified sample (rules below). |
 
 ### What `-n/--limit` picks (`select_items`)
@@ -126,12 +128,14 @@ Registering the same name twice raises `RegistryError`. Restart the interpreter 
 - **The contract, as rules:**
   - `load` is stable and complete; let the runner do the sampling.
   - ids are unique and stable.
-  - `grade` is pure and deterministic, and puts what it read into `extracted` and how it read it into `detail["method"]` (that feeds the report's `answers found by:` line). A grader that judges the whole reply, as `contains` does, records no method; the report counts those answers as `whole reply`. A code benchmark records its test outcome in `detail["status"]` (`passed`, `failed` or `timeout`) instead, and the line becomes `tests: passed 80, failed 20`.
+  - `grade` is pure and deterministic, and puts what it read into `extracted` and how it read it into `detail["method"]` (that feeds the report's `answers found by:` line). A grader that judges the whole reply, as `contains` does, records no method; the report counts those answers as `whole reply`. A code benchmark records its test outcome in `detail["status"]` (`passed`, `failed`, `timeout` or, for a compiled language, `compile_error`) instead, and the line becomes `tests: passed 80, failed 20`.
   - Expensive imports go inside methods.
 - **Use the shared extractors** in [`extract.md`](extract.md) instead of new regexes. They are tested, and their method names are already understood by the report.
 - **Few-shot or multi-turn prompts:** override `messages()`. Remember the prompt is part of the measurement; changing it changes every record key, so old results won't be reused.
 - **A benchmark-wide budget other than 8,192:** override `answer_tokens`, but only with evidence; `n_truncated` is the evidence that a cap binds. Prefer per-item `max_tokens` for single outliers. The tests read the default from `GoldenSet.answer_tokens` (`BUDGET` in `tests\test_bench_runner.py`, `MINI_SET` in `tests\test_cli.py`), so changing it needs no test edits.
 - **Partial credit:** return `Grade(score=...)`. The headline accuracy and the paired comparison still use `correct`. Report the graded metric through `aggregate` (as IFEval does).
+- **Verdicts that depend on something outside the settings** (a compiler, a sandbox image): return it from `fingerprint_extra()`, as MultiPL-E does with the toolchain's version. Return `{}` when nothing applies, so existing runs keep their fingerprint and still resume.
+- **Running model-written code:** set `needs_code_execution` and `blocking_grader`, and run it through [`codeexec.md`](codeexec.md), which handles the temp folder, limits, process-tree kill and `--sandbox docker`.
 - Registration and tests: the end-to-end walkthrough is in [`__init__.md`](__init__.md#add-a-benchmark-end-to-end).
 
 ## Failure modes
