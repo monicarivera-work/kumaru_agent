@@ -39,8 +39,9 @@ Two safeguards against fooling yourself
   splits (`Benchmark.training_data`, e.g. gsm8k_train) are accepted as
   sources, and near-copies of evaluation questions are dropped.
 * **A control arm.** `build_gold` makes the same dataset from GSM8K's own
-  human-written solutions. If the teacher arm beats the gold arm, the gain
-  came from the teacher; if not, it came from extra GSM8K-style practice.
+  human-written solutions. If the teacher arm beats the gold arm, the
+  teacher's answers taught more than human ones. Only the gold arm against
+  the untrained student says whether GSM8K-style practice alone helped.
 
 Output, all in one folder::
 

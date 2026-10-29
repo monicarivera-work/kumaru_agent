@@ -63,17 +63,17 @@ kumaru bench compare runs\distill\eval-base runs\distill\eval-gold
 
 ### Reading the result
 
-"Above" and "below" mean `kumaru bench compare` reports a difference with a p-value below 0.05; "no difference", one without. At 1,319 questions, a difference of about 3 points is the smallest it reliably detects. Train three seeds per arm before concluding ([how](distill-gsm8k.yaml.md#how-to-use-it)).
+"Above" and "below" mean `kumaru bench compare` reports a difference with a p-value below 0.05; "no difference", one without. "No difference" means none was detected, not that there was none. At 1,319 questions, a difference of about 3 points is the smallest it reliably detects. Train three seeds per arm before concluding ([how](distill-gsm8k.yaml.md#how-to-use-it)).
 
-A teacher arm above gold says only that the teacher's answers beat human ones, not that either helped. Read the teacher arm against base first:
+A teacher arm above gold says only that the teacher's answers beat human ones, not that either helped. Read the teacher arm against base first. Where a row turns on what human answers did on their own, read the gold arm against base (the second comparison above); never work it out from the other two. A teacher arm 2 points below base and 2 above gold can show no difference in either, while the gold arm, 4 points below base, shows one.
 
 | Teacher arm against base | Teacher arm against gold | What it means |
 |---|---|---|
 | Above | Above | The teacher's answers taught more than human ones: distillation worked. |
-| Above | No difference | The gain came from GSM8K-style practice; the teacher added nothing measurable. |
+| Above | No difference | A gain, but the teacher's answers added nothing measurable over human ones. If the gold arm is above base too, GSM8K-style practice alone was enough for a gain; if not, these runs cannot say whether the practice or the teacher's answers brought the teacher arm's gain. |
 | Any | Below | Human solutions were better data for this student, likely for the reason above. Next: shorter teacher answers, or both datasets mixed. |
-| No difference | Above | No gain. The arms differ because the gold arm lost points, not because the teacher arm gained any. [The 2026-10-22 run](../../TRAINING.md#results-2026-10-22) ended here: the gold arm fell 11.1 points below base, writing answers a third as long. |
-| No difference | No difference | Training changed nothing measurable. Check `example_preview.txt`, and whether the training loss fell (`log_history` in the last checkpoint's `trainer_state.json`). |
+| No difference | Above | No measurable gain. Only the gold arm against base says why the arms differ. If the gold arm is below base, they differ at least partly because it lost points; if not, neither arm moved measurably on its own. [The 2026-10-22 run](../../TRAINING.md#results-2026-10-22) ended here: compared directly, the gold arm against base was −11.1 points (−13.8 to −8.3), p 2.19e-14, with answers a third as long. |
+| No difference | No difference | The teacher's answers changed nothing measurable. Only the gold arm against base says whether human answers did. If neither did, check `example_preview.txt`, and whether the training loss fell (`log_history` in the last checkpoint's `trainer_state.json`). |
 | Below | Above or no difference | Training on the teacher's answers hurt. Look at the `-e 5` examples, and at how many answers were cut off (`kumaru bench report`), as for [the pilot](distill-gsm8k-0.5b.yaml.md#reading-the-result). |
 
 ## Tuning it

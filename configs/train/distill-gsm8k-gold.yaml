@@ -1,13 +1,17 @@
 # Distillation, control arm: the same student, the same questions and the
 # same training recipe as distill-gsm8k.yaml, but the answers are GSM8K's own
 # human-written solutions. If the teacher arm beats the untrained student,
-# this arm says why: if the teacher arm also beats this one, the gain came from
-# the teacher; if not, from extra GSM8K-style practice.
+# this arm says why: if the teacher arm also beats this one, the teacher's
+# answers taught more than human ones; if this one beats the untrained student
+# too (the last command below), GSM8K-style practice alone was enough for a
+# gain. Read each pair from its own comparison: "no difference" means none was
+# detected, not that there was none.
 #
 #   kumaru distill gold -o runs/distill/data-gold --match runs/distill/data-teacher
 #   kumaru train configs/train/distill-gsm8k-gold.yaml
 #   kumaru bench run gsm8k -c student --full --max-tokens 1024 --adapter runs/distill/qwen1.5b-gold/adapter --label student-gold -o runs/distill/eval-gold
 #   kumaru bench compare runs/distill/eval-gold runs/distill/eval-teacher
+#   kumaru bench compare runs/distill/eval-base runs/distill/eval-gold
 #
 # Identical to distill-gsm8k.yaml apart from the data files, output_dir and
 # run_name; a test enforces it. Change both files together. It takes the same

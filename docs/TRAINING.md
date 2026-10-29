@@ -449,18 +449,18 @@ Measured on an RTX 3090 (24 GB) under Windows 11, in [the 2026-10-22 run](#resul
 
 `kumaru bench compare` pairs two runs question by question: McNemar's exact test gives the p-value, and a paired bootstrap the interval ([how to read it](BENCHMARKS.md#4-reading-the-numbers)). At 1,319 questions, about 3 points is the smallest difference it reliably detects. Before concluding, train three seeds per arm: copy each recipe and change `optim.seed`, `output_dir` and `run_name`.
 
-Read the teacher arm against base first: only a gain there is a gain. The arms against each other then say where it came from.
+Read the teacher arm against base first: only a gain there is a gain. The arms against each other then say where it came from. Where a row turns on what human answers did on their own, read the gold arm against base: the second comparison in [Step 6](#step-6--score-both-students-and-compare).
 
 | Teacher arm against base | Teacher arm against gold | What it means |
 |---|---|---|
 | Above | Above | Distillation worked: the teacher's answers taught more than human ones. |
-| Above | No difference | Practice on GSM8K-style questions helped; the teacher added nothing measurable. |
+| Above | No difference | A gain, but the teacher's answers added nothing measurable over human ones. If the gold arm is above base too, practice on GSM8K-style questions alone was enough for a gain; if not, these runs cannot say whether the practice or the teacher's answers brought the teacher arm's gain. |
 | Any | Below | Human solutions were better data for this student. Next: shorter teacher answers, or a mix of both datasets. |
-| No difference | Above | No gain. The arms differ because the gold arm lost points, not because the teacher arm gained any. [The 2026-10-22 run](#results-2026-10-22) ended here. |
-| No difference | No difference | Training changed nothing measurable. Check `example_preview.txt`, and that the training loss fell. |
+| No difference | Above | No measurable gain. Only the gold arm against base says why the arms differ. If the gold arm is below base, they differ at least partly because it lost points; if not, neither arm moved measurably on its own. [The 2026-10-22 run](#results-2026-10-22) ended here: compared directly, the gold arm against base was −11.1 points (−13.8 to −8.3), p 2.19e-14. |
+| No difference | No difference | The teacher's answers changed nothing measurable. Only the gold arm against base says whether human answers did. If neither did, check `example_preview.txt`, and that the training loss fell. |
 | Below | Above or no difference | Training on the teacher's answers hurt. Look at the `-e 5` examples, and at how many answers were cut off (`kumaru bench report`). The [0.5B pilot](howto/configs/distill-gsm8k-0.5b.yaml.md#reading-the-result) fell this way against its untrained model. |
 
-"Above" and "below" mean a difference with a p-value under 0.05; "no difference", one without.
+"Above" and "below" mean a difference with a p-value under 0.05; "no difference", one without. "No difference" means none was detected, not that there was none, so never work out one comparison from the other two: a teacher arm 2 points below base and 2 above gold can show no difference in either, while the gold arm, 4 points below base, shows one.
 
 - **Never compare the arms' validation losses.** Each is measured on its own kind of answer; only the GSM8K scores compare.
 - **The arms differ in length by design.** The teacher arm trains on 2.26 million answer tokens, the gold arm on 0.62 million: 335 against 92 per answer. So a teacher win cannot say whether the teacher reasons better or only writes out more steps. A gold win is plausible too: Li et al. (2025) found that students of 3B parameters or fewer often learn more from short reasoning than from a strong teacher's long reasoning, and best from a mix of both ([details](howto/configs/distill-gsm8k-gold.yaml.md#cost-and-length)).
@@ -516,8 +516,8 @@ The two 1.5B arms were scored after the gold arm's training, perhaps still besid
 
 - **Distillation added nothing measurable at 1.5B.** The teacher arm learned the teacher's format, not more math: fine-tuning teaches [form](#first-do-you-actually-need-to-train). A likely reason: Qwen2.5-Instruct's own fine-tuning already included step-by-step math solutions, filtered for correct answers by rejection sampling (Qwen2.5 technical report, 2024), much like the data this pipeline makes.
 - **The gold arm lost 11 points.** Trained on GSM8K's terse solutions, the student learned to skip the working: its answers are a third as long, and in 218 of its 258 losses the right number appears nowhere.
-- **So the teacher arm's lead over gold is not a teacher gain.** It is mostly long worked answers beating terse ones, as [the length caveat](#reading-the-result) warns.
-- **The 0.5B lost 5.6 points where the 1.5B held even.** That fits Li et al. (2025): students of 3B parameters or fewer gain less from a strong teacher. The 0.5B also took the teacher's format (`**Step` in 1,134 answers) and was cut off more often (63 answers against 17).
+- **So the teacher arm's lead over gold is mostly the gold arm's loss.** Against base, the gold arm lost 11.1 points, and the teacher arm's interval reaches a gain of 2.1 at most. What the lead shows is long worked answers beating terse ones, as [the length caveat](#reading-the-result) warns.
+- **The 0.5B lost 5.6 points; the 1.5B showed no measurable change.** That fits Li et al. (2025): students of 3B parameters or fewer gain less from a strong teacher. The 0.5B also took the teacher's format (`**Step` in 1,134 answers) and was cut off more often (63 answers against 17).
 
 **Caveats.** One seed per arm, where this guide recommends three. The 11-point gaps are far larger than a change of seed usually moves a score; teacher arm against base could move by a point or two. About 3 points is the smallest difference 1,319 questions reliably detect, so a smaller gain would go unseen.
 
