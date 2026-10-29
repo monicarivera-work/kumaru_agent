@@ -19,8 +19,9 @@ Kumaru is a complete, running LLM system you own end to end:
 - **Measure** — public benchmarks (`kumaru bench`) with confidence intervals and significance tests, plus a fast eval harness, so "is it better?" has a number attached.
 - **Extend** — a plugin registry for backends, tools and benchmarks; new capabilities are additive, never surgical.
 - **Code and learn** — opt-in `coder` guidance for cross-platform development, Playwright,
-  Windows CLI and APIs; `kumaru learn` imports reviewed local references for new languages
-  and platforms without changing model weights.
+  Windows CLI and APIs; `kumaru learn` imports reviewed local references, or indexes whole
+  documentation folders such as the Godot, Rust or React docs so that each answer draws on
+  the relevant pages, for new languages and platforms without changing model weights.
 
 Every source file has a companion how-to in [`docs/howto/`](docs/howto/) explaining what it does, why it exists, how to operate it, how to extend it, and how it fails.
 
@@ -71,14 +72,14 @@ Full walkthrough with troubleshooting: [`docs/QUICKSTART.md`](docs/QUICKSTART.md
 | Command | What it does |
 |---|---|
 | `kumaru serve` | Web UI + OpenAI-compatible API |
-| `kumaru chat` | Terminal REPL, no server in between |
+| `kumaru chat` | Terminal REPL, no server in between. `--workspace DIR` lets it create and edit files and run builds and tests in that folder, with your yes for each change and command |
 | `kumaru info` | Versions, GPU, which optional components are installed |
 | `kumaru config` | Print the fully merged configuration — run this when something ignores your settings |
 | `kumaru train` | LoRA fine-tune or from-scratch pretrain |
 | `kumaru eval` | Latency, throughput, and quality regression checks |
 | `kumaru bench` | Public benchmarks with error bars; compares two runs with significance tests |
 | `kumaru distill` | Turns a large model's graded answers into training data for a small, fast one ([how](docs/TRAINING.md#part-3--distillation)) |
-| `kumaru learn` | Create a versioned local reference pack for a language or platform |
+| `kumaru learn` | Create a versioned local reference pack, or index a documentation folder, for a language or platform |
 
 ---
 
@@ -113,9 +114,23 @@ kumaru serve -c qwen36
 
 Guidance covers idiomatic code, testing, Playwright locators/fixtures/traces,
 Windows shell/version differences, remoting, and secure HTTP/HTTPS/API integration.
-It does **not** install browsers, grant shell/remote access, execute code, or make a
-model an expert in every technology. Kumaru remains chat-only; generated code and
-commands need review and execution in your own authorized environment.
+It does **not** install browsers, grant shell or remote access, or make a model an
+expert in every technology.
+
+To let the agent write the code and run it, give it a project folder in the terminal
+chat. It needs a backend that calls tools, such as `qwen36`; the transformers
+profiles, `coder` included, cannot:
+
+```powershell
+kumaru chat -c qwen36 --workspace C:\projects\my-app
+```
+
+It can then list, read, create and edit files in that folder, and run `python`,
+`node`, `npm`, `npx` and `dotnet` there, never a shell. It shows you each change as a
+diff and each command line first, and does it only if you answer `y`. Paths outside
+the folder are refused, but approved commands run with your permissions, so read them.
+The server and web UI never offer these tools, because they cannot ask
+([details](docs/howto/src/kumaru/cli.md#let-it-work-in-a-project-folder-kumaru-chat---workspace)).
 
 To add a new language or platform, save reviewed, version-specific documentation,
 examples and test results in a UTF-8 text file, then import it:
@@ -137,10 +152,30 @@ or unreviewed material. With remote inference, references go to that backend
 along with the prompt.
 
 `agent.max_knowledge_chars` bounds **all** reference text together (default 6000;
-0 disables it). This is prompt context, not semantic retrieval: put the most
-relevant pack first, keep notes focused, and raise the budget only when your
-model context allows it. Over-budget engineering prompts fail rather than being
-sent to the model; reduce references or increase the context/history budget.
+0 disables it). This is prompt context, not retrieval: every pack goes with every
+question, so put the most relevant pack first, keep notes focused, and raise the
+budget only when your model context allows it. Over-budget engineering prompts fail
+rather than being sent to the model; reduce references or increase the
+context/history budget.
+
+For a whole documentation set, such as the Godot, Rust or React docs, pass its folder
+instead. Kumaru indexes the Markdown, MDX, reStructuredText, HTML and plain-text files
+in it, and each question then gets only the passages that match it:
+
+```powershell
+kumaru learn Godot --version 4.3 --source C:\docs\godot-docs -o C:\references\godot-4.3.sqlite
+$env:KUMARU_AGENT__KNOWLEDGE_INDEXES = '["C:/references/godot-4.3.sqlite"]'
+kumaru chat -c coder
+```
+
+Passages are found by keyword search (BM25, in SQLite), cited by topic, version, file
+and section, labeled as untrusted data, and added to the question within
+`agent.max_retrieved_chars` (default 6000). Indexing reads only that folder: nothing is
+downloaded or run, and no embedding model or GPU is needed. Keyword search finds the
+API names and terms a question uses, but not paraphrases. Like packs, indexes are never
+overwritten and are opened at startup, so restart after changing the list.
+[The how-to](docs/howto/src/kumaru/agent/doc_index.md) covers where to get each
+documentation set, limits, and how to check which passages a question gets.
 
 For actual on-demand weight training, use the existing [LoRA workflow](docs/TRAINING.md):
 curate verified conversation examples, hold out independent coding tasks, validate
@@ -207,7 +242,8 @@ Start here, in this order:
 src/kumaru/
   core/        config, types, errors, logging, plugin registry
   backends/    inference engines behind one interface
-  agent/       prompt assembly, memory budgeting, tool seam
+  agent/       prompt assembly, memory budgeting, documentation retrieval,
+               tool loop, project-folder tools
   server/      FastAPI, OpenAI-compatible, SSE streaming
   train/       LoRA fine-tuning + from-scratch transformer
   eval/        speed and quality measurement; public benchmarks (eval/benchmarks/)
@@ -217,7 +253,7 @@ data/          sample training data and the golden benchmark questions
 scripts/       setup.ps1 (install), verify.ps1 (layered self-check),
                get-llama-server.ps1 (inference engine), check_graders.py (grader proof)
 docs/howto/    a page for every source file
-tests/         pytest suite (755 tests), runs with no GPU in under a minute
+tests/         pytest suite (1208 tests), runs with no GPU in under a minute
 ```
 
 ## Requirements

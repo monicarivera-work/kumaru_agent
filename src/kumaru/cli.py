@@ -10,7 +10,7 @@ One binary, eight commands::
     kumaru eval      # quick check: speed and a few known answers
     kumaru bench     # public benchmarks with confidence intervals; compare runs
     kumaru distill   # turn a teacher model's graded answers into training data
-    kumaru learn     # build a reviewed local reference pack
+    kumaru learn     # build a reference pack, or index a documentation folder
 
 Two rules keep the CLI fast and debuggable:
 
@@ -26,6 +26,8 @@ Two rules keep the CLI fast and debuggable:
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -137,62 +139,226 @@ def chat(
     think: bool = typer.Option(None, "--think/--no-think", help="Force reasoning on or off (default: profile)."),
     thinking_budget: int = typer.Option(None, "--thinking-budget", min=0, help="Max thinking tokens before answering."),
     prompt: str = typer.Option(None, "--prompt", "-q", help="Answer one question and exit."),
+    workspace: str = typer.Option(
+        None, "--workspace", "-w",
+        help="Project folder the agent may work in: list, read, create and edit files there, "
+        "and run allowed programs (agent.workspace.allowed_commands). It shows you each change "
+        "and command first, and does it only if you answer y.",
+    ),
 ) -> None:
     """Chat in the terminal, with no server in between."""
     import asyncio
 
     cfg = _load(config, backend=backend, model=model, device=device, adapter=adapter, context=context)
+    if workspace:
+        from kumaru.agent.tools import WORKSPACE_TOOLS
+
+        cfg.agent.workspace.root = workspace
+        cfg.agent.enabled_tools = list(dict.fromkeys([*cfg.agent.enabled_tools, *WORKSPACE_TOOLS]))
     # Sent with every message, as the UI sends its settings, so a flag beats both
     # of the profile's presets: `generation` and, while thinking, `thinking_mode`.
     overrides = {"temperature": temperature, "max_tokens": max_tokens,
                  "thinking": think, "thinking_budget": thinking_budget}
-    asyncio.run(_chat_loop(cfg, prompt, overrides))
+    with _exit_cleanly_on_signals():
+        asyncio.run(_chat_loop(cfg, prompt, overrides))
+
+
+def _visible(text: str) -> str:
+    """`text` with control and invisible formatting characters spelled out.
+
+    What the model sends is untrusted: an escape sequence or a right-to-left
+    override in a file's content could hide or disguise lines of the approval
+    prompt itself. Tabs and ``\\n`` stay as they are; every other line break
+    (``\\r``, ``\\x85``, U+2028, U+2029, ...) is spelled out, so the only lines
+    the prompt shows are the ones the summary was built with.
+    """
+    import unicodedata
+
+    return "".join(
+        ch if ch in "\t\n" or unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp")
+        else f"\\x{ord(ch):02x}" if ord(ch) < 0x100 else f"\\u{ord(ch):04x}"
+        for ch in text
+    )
+
+
+def _printable(text: str) -> str:
+    """Streamed model text with the control characters that steer a terminal spelled out.
+
+    The model can repeat what a file or a command's output told it to, and an
+    escape sequence printed raw could clear the screen, hide the text after it
+    or redraw what came before, including the next approval prompt. A carriage
+    return, which would let a line overwrite itself, is dropped. Unlike
+    `_visible`, this keeps formatting characters such as the joiners inside
+    emoji, since a reply is read rather than approved.
+    """
+    import unicodedata
+
+    return "".join(
+        "" if ch == "\r"
+        else ch if ch in "\t\n" or unicodedata.category(ch) != "Cc"
+        else f"\\x{ord(ch):02x}"
+        for ch in text
+    )
+
+
+@contextmanager
+def _exit_cleanly_on_signals() -> Iterator[None]:
+    """On POSIX, turn a hangup or a `kill` into an exit that runs the cleanups.
+
+    The programs `run_command` starts run in a session of their own, out of
+    reach of the terminal, and are stopped by the cleanup that ends the turn.
+    By default these signals end Python on the spot, skipping that cleanup, so
+    closing the terminal would leave a dev server running. Windows needs none
+    of this: a Job Object ends them however Kumaru exits. A signal someone
+    chose to ignore (``nohup``) or handle stays as it was.
+    """
+    if sys.platform == "win32":
+        yield
+        return
+    import signal
+
+    def leave(signum: int, frame: Any) -> None:
+        raise SystemExit(128 + signum)
+
+    previous = {}
+    for signum in (signal.SIGHUP, signal.SIGTERM):
+        if signal.getsignal(signum) == signal.SIG_DFL:
+            previous[signum] = signal.signal(signum, leave)
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+async def _approve(request: Any) -> bool:
+    """Show exactly what a tool call will do, and ask. Anything but yes is no."""
+    from rich.text import Text
+
+    body = Text()
+    for line in _visible(request.summary).splitlines():
+        style = ""
+        if line.startswith("+") and not line.startswith("+++"):
+            style = "green"
+        elif line.startswith("-") and not line.startswith("---"):
+            style = "red"
+        elif line.startswith("@@"):
+            style = "cyan"
+        elif line.startswith("$ "):
+            style = "bold"  # so a long command that wraps cannot pass for the lines below it
+        body.append(line + "\n", style=style)
+    body.rstrip()
+    console.print(Panel(body, title=f"[bold]{escape(request.tool)}[/]", title_align="left",
+                        border_style="yellow"))
+    _discard_type_ahead()
+    try:
+        # Blocking on purpose: nothing else may run while you decide.
+        answer = console.input(escape("Allow this? [y/N] "))
+    except (EOFError, KeyboardInterrupt):  # no one to answer: the safe answer is no
+        console.print()
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _discard_type_ahead() -> None:
+    """Drop the keys typed before the approval prompt appeared.
+
+    While the model streams you may answer its prose ("Shall I go ahead?"), and
+    that "y" and Enter, read by the prompt, would approve a change before you
+    had seen it. Only an interactive terminal is flushed: piped answers, as in
+    tests and scripts, are meant for the prompts, in order.
+    """
+    stdin = sys.stdin
+    try:
+        if stdin is None or not stdin.isatty():
+            return
+    except (AttributeError, OSError, ValueError):  # replaced or closed
+        return
+    if sys.platform == "win32":
+        import msvcrt
+
+        for _ in range(65_536):  # bounded, in case a console keeps reporting a key
+            if not msvcrt.kbhit():
+                break
+            msvcrt.getwch()
+    else:
+        import termios
+
+        with suppress(termios.error, OSError, ValueError):
+            termios.tcflush(stdin.fileno(), termios.TCIFLUSH)
 
 
 async def _chat_loop(cfg: Any, single_prompt: str | None, overrides: dict[str, Any]) -> None:
+    from rich.text import Text
+
     from kumaru.agent.chat import ChatAgent
     from kumaru.core.registry import BACKENDS
     from kumaru.core.types import Message
 
     with console.status(f"[cyan]loading {cfg.backend.model}…", spinner="dots"):
         backend = BACKENDS.create(cfg.backend.name, cfg.backend)
-        # Before load: a bad knowledge pack or tool name fails with nothing to release.
-        agent = ChatAgent(backend, cfg)
+        # Before load: a bad knowledge pack, tool name or project folder fails
+        # with nothing to release. The terminal can ask, so it is the approver.
+        agent = ChatAgent(backend, cfg, approver=_approve)
         await backend.load()
 
     info = backend.info()
     console.print(f"[dim]{info.model_id} on {info.device} ({info.dtype}), "
                   f"{info.context_length:,} token context[/]")
+    if agent.tools:
+        console.print(f"[dim]tools: {escape(', '.join(agent.tools.tools))}[/]")
+    if agent.tools.workspace is not None:
+        console.print(f"[dim]project folder:[/] {escape(str(agent.tools.workspace.root))} "
+                      "[dim](every change and command asks you first)[/]")
 
     history: list[Message] = []
 
     async def ask(question: str) -> None:
         history.append(Message.user(question))
         console.print()
-        parts: list[str] = []
+        turn: list[Message] = []
         stats = None
         thinking = False
+        mid_line = False
         # Print tokens as they arrive: the point of streaming is that you start
         # reading before generation finishes. Thoughts print dimmed; they are
-        # never added to the history sent back to the model.
-        async for chunk in agent.stream(history, **overrides):
+        # never added to the history sent back to the model. Both are untrusted
+        # text, so control characters are spelled out.
+        async for chunk in agent.stream(history, transcript=turn, **overrides):
             if chunk.reasoning:
                 if not thinking:
                     console.print("[dim italic]thinking…[/]")
                     thinking = True
-                console.print(chunk.reasoning, end="", style="dim", markup=False, highlight=False)
+                console.print(_printable(chunk.reasoning), end="", style="dim", markup=False, highlight=False)
             if chunk.delta:
                 if thinking:
                     console.print("\n")
                     thinking = False
-                parts.append(chunk.delta)
-                console.print(chunk.delta, end="", markup=False, highlight=False)
+                printed = _printable(chunk.delta)
+                if printed:
+                    console.print(printed, end="", markup=False, highlight=False)
+                    mid_line = not printed.endswith("\n")
+            if chunk.tool_calls:
+                if thinking or mid_line:
+                    console.print()
+                    thinking = mid_line = False
+                for call in chunk.tool_calls:
+                    shown = call["function"]["arguments"]
+                    shown = shown if len(shown) <= 120 else shown[:120] + "…"
+                    console.print(Text(_visible(f"» {call['function']['name']}({shown})"), style="cyan"))
+            if chunk.tool_result:
+                lines = chunk.tool_result.content.strip().splitlines()
+                first = lines[0] if lines else "(empty)"
+                style = ("red" if first.startswith("ERROR")
+                         else "yellow" if first.startswith(("DENIED", "NOT RUN")) else "dim")
+                console.print(Text(_visible(f"« {first[:200]}"), style=style))
             if chunk.usage:
                 stats = chunk.usage
         console.print("\n")
         if stats:
             console.print(f"[dim]{stats.prompt_tokens} prompt + {stats.completion_tokens} completion tokens[/]")
-        history.append(Message.assistant("".join(parts)))
+        # The calls, their results and the answer, so the next turn knows what was done.
+        history.extend(turn)
 
     try:
         if single_prompt:
@@ -285,12 +451,30 @@ def show_config(
 
 @app.command()
 def learn(
-    topic: str = typer.Argument(..., help="Language or platform to learn."),
-    source: Path = typer.Option(..., "--source", help="Reviewed UTF-8 reference file."),
+    topic: str = typer.Argument(..., help="Language, framework or platform to learn."),
+    source: Path = typer.Option(
+        ...,
+        "--source",
+        help="Reviewed UTF-8 reference file, or a documentation folder to index "
+        "(Markdown, MDX, reStructuredText, HTML or plain text).",
+    ),
     version: str = typer.Option(..., "--version", help="Language/platform version."),
-    output: Path = typer.Option(..., "--output", "-o", help="New knowledge pack JSON file."),
+    output: Path = typer.Option(
+        ...,
+        "--output",
+        "-o",
+        help="New knowledge pack JSON file; for a folder, a new index file such as godot.sqlite.",
+    ),
 ) -> None:
-    """Learn from local references without downloads, execution, or fine-tuning."""
+    """Learn from local references without downloads, execution, or fine-tuning.
+
+    A file becomes a knowledge pack, added whole to every prompt. A folder
+    becomes a documentation index: each question gets only its best passages.
+    """
+    if source.expanduser().is_dir():
+        _learn_folder(topic, source, version, output)
+        return
+
     from pydantic import ValidationError
 
     from kumaru.agent.knowledge import KnowledgePack, describe_errors, read_local_text, save_pack
@@ -309,6 +493,33 @@ def learn(
     save_pack(pack, output)
     console.print(f"Saved reference pack: {output}", markup=False)
     console.print("Add its absolute path to agent.knowledge_files and restart chat/server.")
+
+
+def _learn_folder(topic: str, folder: Path, version: str, output: Path) -> None:
+    """`kumaru learn` for a folder: index it and report what was left out."""
+    from collections import Counter
+
+    from kumaru.agent.doc_index import build_index, format_types
+
+    with console.status("Indexing documentation...") as status:
+
+        def progress(done: int, total: int) -> None:
+            status.update(f"Indexing {done:,}/{total:,} files...")
+
+        report = build_index(folder, output, topic=topic, version=version, progress=progress)
+    console.print(f"Saved documentation index: {report.output}", markup=False)
+    size = f"{report.bytes / 1e6:.1f} MB" if report.bytes >= 100_000 else f"{report.bytes / 1e3:.0f} kB"
+    console.print(f"{report.files:,} files, {report.chunks:,} passages, {size}.")
+    if report.empty:
+        console.print(f"{report.empty:,} files had no new text (empty, redirect or duplicate pages).")
+    reasons = Counter(skipped.reason for skipped in report.skipped)
+    for reason, count in reasons.most_common():
+        examples = [skipped.path for skipped in report.skipped if skipped.reason == reason]
+        more = f" and {count - 3:,} more" if count > 3 else ""
+        console.print(f"Skipped {count:,} ({reason}): {', '.join(examples[:3])}{more}", markup=False)
+    if report.other_types:
+        console.print(f"Ignored file types: {format_types(report.other_types)}", markup=False)
+    console.print("Add its absolute path to agent.knowledge_indexes and restart chat/server.")
 
 
 @app.command()

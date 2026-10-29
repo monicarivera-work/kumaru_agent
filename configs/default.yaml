@@ -134,11 +134,24 @@ agent:
   # none            never trim; raise when it does not fit
   memory_policy: sliding_window
 
-  enabled_tools: []           # chat-only so far; see src/kumaru/agent/tools.py
-  max_tool_iterations: 4
+  # Tools the model may call; see src/kumaru/agent/tools.py. `kumaru chat
+  # --workspace DIR` adds list_files, read_file, write_file, edit_file and
+  # run_command. kumaru chat asks you before every change and command; the
+  # server, web UI, eval and bench cannot ask, so they never offer those tools.
+  enabled_tools: []
+  max_tool_iterations: 10     # tool rounds per message; then it stops and asks
+  workspace:
+    root: null                # project folder; kumaru chat --workspace DIR sets it
+    allowed_commands: [python, node, npm, npx, dotnet]  # bare names; shells are refused
+    command_timeout_s: 300    # seconds per command (1-3600); the model may ask for less
+    max_output_chars: 16000   # tool output the model reads, per call
+    max_file_bytes: 262144    # largest file it reads or writes (256 KB)
+    max_list_entries: 500     # entries per list_files call
   expertise: []               # coding | playwright | windows | apis; see coder.yaml
   knowledge_files: []         # absolute paths to JSON packs created by kumaru learn
   max_knowledge_chars: 6000   # total reference characters added to the prompt
+  knowledge_indexes: []       # absolute paths to documentation indexes: kumaru learn --source FOLDER
+  max_retrieved_chars: 6000   # characters of matching passages added to each question; 0 = off
 
 server:
   host: 127.0.0.1             # 0.0.0.0 exposes to your LAN — set api_key first

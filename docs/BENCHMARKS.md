@@ -243,7 +243,7 @@ The habit that compounds: **whenever Kumaru gets something wrong that it should 
 
 Every number in this document can be traced to individual answers.
 
-**Resuming.** A run that dies (crash, reboot, Ctrl+C) resumes with `-o <its folder>` and the same flags. Answered questions are skipped, and a line half-written by a hard kill is repaired. Resuming with different settings (model, decoding parameters, seed, prompt mode, sandbox, compiler version or memory cap) is refused, so one folder never mixes two configurations.
+**Resuming.** A run that dies (crash, reboot, Ctrl+C) resumes with `-o <its folder>` and the same flags. Answered questions are skipped, and a line half-written by a hard kill is repaired. Resuming with different settings (model, decoding parameters, seed, prompt mode, documentation indexes, sandbox, compiler version or memory cap) is refused, so one folder never mixes two configurations.
 
 **Useful flags for `kumaru bench run`:**
 

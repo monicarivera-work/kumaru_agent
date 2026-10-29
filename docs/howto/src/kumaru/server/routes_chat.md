@@ -21,6 +21,8 @@
 
 `app.py`, not this file, serves the UI at `/`, `/static/*`, and FastAPI's `/docs` and `/openapi.json`.
 
+**No changes without a person to approve them.** The API cannot ask anyone before a tool changes a file or runs a program, so `app.py` builds the `ChatAgent` without an approver. It then withholds every tool that changes something or works in the project folder (`agent.workspace`), and logs `not offering <names>: they need approval, and nobody here can give it`. Read-only tools in `agent.enabled_tools`, such as `current_time`, still run. To let the model work on files, use `kumaru chat --workspace` (`docs\howto\src\kumaru\cli.md`).
+
 ## Why it exists
 
 - **OpenAI's wire format.** Every OpenAI SDK, LangChain-style client and eval harness works when pointed at `http://<host>:<port>/v1`. Kumaru-only data is additive: the top-level `kumaru` stats object and `reasoning_content`.
@@ -67,6 +69,7 @@ data: [DONE]
 - Frames carry the backend's chunks in order; the route never reorders them. Reasoning precedes content because models think first.
 - A chunk with both fields becomes one frame with both keys.
 - Empty chunks are not forwarded.
+- **Tool traffic is not forwarded either.** When read-only tools are enabled, the agent runs their calls between rounds, and only the text reaches the client: the chunks that carry calls and results have neither field. `finish_reason` is `tool_calls` only when `agent.max_tool_iterations` stopped the loop.
 - **On an error**, the remaining frames are replaced by `data: {"error":{"message","type","hint"}}`, then `data: [DONE]`. The `hint` key is present only for `KumaruError`s. Errors count in `metrics.errors`.
 - **On a client disconnect**, generation stops at the next chunk boundary.
   - Observed under uvicorn: no further frames, no `streamed:` log line, nothing added to `/metrics`.
@@ -294,7 +297,7 @@ Real `/v1/info` from `-c test` after one request, with large objects elided as `
 {
   "version": "0.2.0", "ready": true, "loading": false, "error": null,
   "available_backends": ["echo", "llamacpp", "llamacpp_server", "openai_compat", "transformers"],
-  "available_tools": ["current_time"],
+  "available_tools": ["current_time", "edit_file", "list_files", "read_file", "run_command", "write_file"],
   "config": {
     "backend": {...}, "generation": {...},
     "thinking_mode": {"max_tokens": null, "temperature": null, "top_p": null, "top_k": null, "min_p": null,
@@ -306,7 +309,8 @@ Real `/v1/info` from `-c test` after one request, with large objects elided as `
   "agent": {
     "backend": {"name": "echo", "model_id": "echo", "device": "cpu", "dtype": "none", "context_length": 8192,
                 "supports_streaming": true, "quantization": null, "extra": {"purpose": "testing and install verification"}},
-    "memory_policy": "sliding_window", "max_history_tokens": 2048, "tools": [], "generation": {...}, "thinking_mode": {}
+    "memory_policy": "sliding_window", "max_history_tokens": 2048, "tools": [], "expertise": [], "knowledge_topics": [],
+    "generation": {...}, "thinking_mode": {}
   }
 }
 ```
@@ -370,7 +374,7 @@ The `X-Accel-Buffering: no` header stops nginx from buffering the whole response
 | Request `model` has no effect | It is ignored; the loaded model answers. | Use `/v1/backend` to switch. `/v1/models` shows what is loaded. |
 | `/v1/backend` returns 200 but nothing changed as intended | Unknown keys are dropped silently, and values are not validated (for example `"load_in_4bit": "yes"` stays a string). | Check the `backend` block in the response or in `/v1/info`. |
 | `/v1/info` lacks an installed plugin backend | `BACKENDS.names()` does not scan entry points; plugins appear only after a lookup miss. | See `docs\howto\src\kumaru\core\registry.md`. |
-| The system prompt or model paths are readable without a key | `/v1/info`, `/metrics`, `/healthz` and `/v1/models` are unauthenticated by design. `/v1/info` includes `config.agent.system_prompt` and the backend config, but never `api_key` or the `server` section. | Don't expose the port publicly; put an authenticating proxy in front. |
+| The system prompt or model paths are readable without a key | `/v1/info`, `/metrics`, `/healthz` and `/v1/models` are unauthenticated by design. `/v1/info` includes `config.agent.system_prompt`, `config.agent.workspace` (the project folder and allowed programs, if a profile sets them) and the backend config, but never `api_key` or the `server` section. | Don't expose the port publicly; put an authenticating proxy in front. |
 | Generation continues after the user closes the tab | A backend that blocks between chunks. Cancellation only takes effect at a chunk boundary. | Yield regularly; use `iterate_in_thread()` for blocking generators. |
 
 ## Known limitations

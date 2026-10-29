@@ -14,7 +14,7 @@ The smoke suite is a regression tripwire, not a benchmark. The speed suite captu
 
 Every prompt goes through `ChatAgent.complete`, the same path chat uses:
 
-- `ChatAgent.prepare` adds the agent's system prompt: the configured persona, the shared quality directives, today's date and the enabled tools' descriptions;
+- `ChatAgent.prepare` adds the agent's system prompt: the configured persona, the shared quality directives and today's date. Enabled read-only tools, such as `current_time`, go with the request as tool declarations, and the agent runs their calls. Built without an approver, it never offers the tools that change things or use the project folder ([`tools.md`](../agent/tools.md));
 - decoding parameters resolve as they do in chat;
 - the request overrides only `temperature` (0) and `max_tokens` (the case's own value).
 
@@ -46,7 +46,7 @@ Both tools load backends from the same config. `kumaru bench` also resolves deco
 | | `kumaru eval` (this file) | `kumaru bench` (`src\kumaru\eval\benchmarks\`) |
 |---|---|---|
 | Question | Is this setup working, and how fast is it? | How accurate is it, and did a change really help? |
-| Prompt | The agent's system prompt (persona, quality directives, today's date, tool descriptions), then the case prompt. | Only the benchmark's messages: the question, plus a golden row's `system` if it has one. `--use-agent-prompt` passes them through the same `ChatAgent.prepare`. |
+| Prompt | The agent's system prompt (persona, quality directives, today's date), then the case prompt. Enabled read-only tools go with it as tool declarations. | Only the benchmark's messages: the question, plus a golden row's `system` if it has one. `--use-agent-prompt` passes them through the same `ChatAgent.prepare`, still without tools. |
 | Decoding | Temperature forced to 0. Per-case `max_tokens`: 24–96 (`smoke`), 8–512 (`speed`). Thinking from the profile, or `KUMARU_GENERATION__THINKING`. | The profile's preset (`-t` overrides), with a fixed seed per question. 8,192 answer tokens, plus the thinking budget. `--think/--no-think`, `--thinking-budget`. |
 | Scoring | Case-insensitive substrings: every `must_include` present, no `must_not_include`. | Per-benchmark graders: number and letter extraction, IFEval's instruction checkers, HumanEval's and MultiPL-E's unit tests, seven golden graders. |
 | Data | `smoke` (6 cases), `speed` (3), or a JSONL file of `Case` rows. | `golden` (27), GSM8K, MMLU-Pro, IFEval, HumanEval, MultiPL-E, and any golden-format JSONL. |
@@ -59,7 +59,7 @@ Both tools load backends from the same config. `kumaru bench` also resolves deco
 Which to use:
 
 - **New backend, quantization, context size or hardware.** Run `kumaru eval --suite speed` for TTFT and tokens/second. Then run `kumaru bench run golden` to confirm the answers are still right.
-- **The persona, `QUALITY_DIRECTIVES` or enabled tools changed.** `kumaru eval --suite smoke` sends the system prompt the agent builds from them. `kumaru bench` sends none of it unless you pass `--use-agent-prompt`.
+- **The persona, `QUALITY_DIRECTIVES` or enabled tools changed.** `kumaru eval --suite smoke` sends the system prompt the agent builds from them, and the enabled read-only tools. `kumaru bench` sends none of it unless you pass `--use-agent-prompt`, and never sends tools.
 - **Before and after a fine-tune.** Run `kumaru eval --suite smoke` as the fast tripwire. Then run `kumaru bench run ... --adapter <dir>` and `kumaru bench compare` for a number you can defend.
 - **"Is B better than A?"** Use only `kumaru bench`. Six substring cases cannot separate two decent models: 6/6 has a 95% Wilson interval of 61.0–100.0, and 5/6 one of 43.6–97.0.
 - **Your own questions.** Write them in golden format and run `kumaru bench run my.jsonl`. You get stricter graders (`numeric`, `regex`, `choice`), CIs, resume and `compare`. The two file formats are not interchangeable (see Failure modes).

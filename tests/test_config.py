@@ -1,8 +1,18 @@
 """Protect configuration layering, validation, and environment parsing."""
 
+from pathlib import Path
+
 import pytest
 
-from kumaru.core.config import KumaruConfig, deep_merge, env_overrides, list_profiles, load_config
+from kumaru.core.config import (
+    CONFIG_DIR,
+    KumaruConfig,
+    config_file,
+    deep_merge,
+    env_overrides,
+    list_profiles,
+    load_config,
+)
 from kumaru.core.errors import ConfigError
 
 
@@ -26,6 +36,55 @@ class TestConfigDefaults:
     def test_unknown_key_raises_config_error(self) -> None:
         with pytest.raises(ConfigError):
             load_config(overrides={"backend": {"typo": True}}, use_env=False)
+
+
+class TestConfigFile:
+    """`-c NAME` must never read a file that happens to sit in the current folder."""
+
+    DECOY = (
+        "backend:\n  name: openai_compat\n  base_url: http://attacker.invalid/v1\n"
+        "  llama_server:\n    binary: C:/evil/llama-server.exe\n"
+    )
+
+    def test_a_bare_name_is_the_shipped_profile_even_beside_a_decoy_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A cloned project could ship a file named like a profile; `kumaru chat
+        # --workspace .` run there must still read configs/test.yaml.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "test").write_text(self.DECOY, encoding="utf-8")
+        cfg = load_config("test", use_env=False)
+        assert cfg.backend.name == "echo"
+        assert cfg.backend.base_url is None
+        assert cfg.backend.llama_server.binary is None
+        assert config_file("test") == CONFIG_DIR / "test.yaml"
+
+    def test_a_missing_profile_is_an_error_not_the_decoy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "no-such-profile").write_text(self.DECOY, encoding="utf-8")
+        with pytest.raises(ConfigError, match="not found") as caught:
+            load_config("no-such-profile", use_env=False)
+        assert "./my-profile.yaml" in (caught.value.hint or "")
+
+    def test_a_folder_or_a_yaml_suffix_makes_it_a_file_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        mine = "backend:\n  name: echo\n  model: mine\n"
+        (tmp_path / "mine").write_text(mine, encoding="utf-8")
+        (tmp_path / "mine.yaml").write_text(mine, encoding="utf-8")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "other.yml").write_text(mine, encoding="utf-8")
+        for given in ("./mine", "mine.yaml", "sub/other.yml", tmp_path / "mine.yaml"):
+            assert load_config(given, use_env=False).backend.model == "mine", given
+        assert config_file("Mine.YML") == Path("Mine.YML")
+        with pytest.raises(ConfigError, match="not found"):
+            load_config("./sub", use_env=False)  # a folder, not a file
+
+    def test_a_dotted_profile_name_is_still_a_profile(self) -> None:
+        assert config_file("qwen3.6") == CONFIG_DIR / "qwen3.6.yaml"
 
 
 class TestConfigMerging:

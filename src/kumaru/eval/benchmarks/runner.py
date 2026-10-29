@@ -239,6 +239,14 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _file_sha(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while block := handle.read(1 << 20):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -573,6 +581,7 @@ class BenchRunner:
         self.out_dir: Path | None = None
         # Suite members left out because their toolchain is missing: name -> why.
         self.skipped: dict[str, str] = {}
+        self._index_digests: dict[str, str] = {}
 
     async def run(self, specs: Sequence[str]) -> list[BenchSummary]:
         benches = self._resolve(specs)
@@ -681,8 +690,9 @@ class BenchRunner:
         previous = read_summary(summary_path) if summary_path.exists() else None
         if previous is not None and previous.fingerprint != fingerprint:
             raise ConfigError(
-                f"{bench_dir} holds results from different settings (model, decoding "
-                "parameters, seed, prompt mode, sandbox, compiler version or memory cap).",
+                f"{bench_dir} holds results from different settings "
+                "(model, decoding parameters, seed, prompt mode, documentation indexes, "
+                "sandbox, compiler version or memory cap).",
                 hint="Omit --out (or choose a new directory) to start a fresh run.",
             )
         return _Job(bench, items, params, fingerprint, previous)
@@ -725,6 +735,11 @@ class BenchRunner:
             if self.settings.use_agent_prompt
             else None
         )
+        if agent_prompt is not None and a.knowledge_indexes:
+            # Added only with indexes, so earlier runs keep their fingerprints. Indexes
+            # count by content: a rebuilt index makes a new run, a moved one does not.
+            agent_prompt["knowledge_indexes"] = [self._index_digest(p) for p in a.knowledge_indexes]
+            agent_prompt["max_retrieved_chars"] = a.max_retrieved_chars
         payload = {
             "benchmark": bench.name,
             "backend": backend_name,
@@ -740,6 +755,12 @@ class BenchRunner:
         if extra := bench.fingerprint_extra():
             payload["extra"] = extra
         return _sha(json.dumps(payload, sort_keys=True))[:16]
+
+    def _index_digest(self, path: str) -> str:
+        """SHA-256 of a documentation index, read once per run."""
+        if path not in self._index_digests:
+            self._index_digests[path] = _file_sha(Path(path).expanduser())
+        return self._index_digests[path]
 
     def _question(
         self, bench: Benchmark, item: BenchItem, params: GenerationParams, fingerprint: str, agent: Any
