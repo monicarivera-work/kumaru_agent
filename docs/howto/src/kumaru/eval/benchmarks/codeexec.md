@@ -168,7 +168,7 @@ The script unpacks the files from stdin, runs each step as `timeout -k 2 <limit>
   - set `needs_code_execution = True` and `blocking_grader = True` on the benchmark;
   - put the marker last in the program, after the tests, written straight to the output stream (not through a buffer the program could replace), and flush it;
   - accept `sandbox` in `configure` and pass it to `run`; inside Docker, executables are the image's (plain names on its `PATH`), not paths on this machine.
-- **Another isolation** (a VM, a remote runner) would be a third value in `SANDBOXES` and a `_run_<name>` that returns the same `Outcome`s. Keep the pass rule (exit 0 and the marker) and the per-stage statuses.
+- **Another isolation** (a VM, a remote runner) would be a third value in `SANDBOXES`, in the `Literal` of `BenchSettings.sandbox` (`runner.py`) and in the `cast` of `--sandbox` in `kumaru bench run` (`cli.py`), plus a `_run_<name>` that returns the same `Outcome`s. Keep the pass rule (exit 0 and the marker) and the per-stage statuses.
 - **A setup step** (`stage="setup"`) prepares the folder, e.g. the Go cache copy in Docker. Its failure raises instead of failing the answer, because the answer never ran.
 
 Pinned behaviour: `tests\test_bench_codeexec.py` (the pass rule, stages, a timeout that kills a grandchild process, secrets withheld, the folder removed, the output tail, the memory and process caps, a program not started when its job can't be made or joined, the memory cap in the fingerprint, the worker limit, `find_program` passing over decoys in the current folder and in relative `PATH` entries, and the Docker command, script, record parsing and failure handling, and waking a paused Docker Desktop, with Docker faked).

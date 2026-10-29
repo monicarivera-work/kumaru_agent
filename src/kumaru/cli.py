@@ -29,7 +29,7 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import typer
 from rich.console import Console
@@ -623,7 +623,7 @@ def bench_run(
         temperature=temperature,
         use_agent_prompt=use_agent_prompt,
         allow_code_exec=allow_code_exec,
-        sandbox=sandbox,
+        sandbox=cast(Literal["none", "docker"], sandbox),  # one of SANDBOXES, checked above
         label=label,
         out_dir=Path(out) if out else None,
     )

@@ -536,7 +536,7 @@ def _run_step(
 def _kill_tree(proc: subprocess.Popen[bytes], job: _Job | None) -> None:
     if job:  # always, on Windows
         job.terminate()
-    else:
+    elif sys.platform != "win32":  # not _WINDOWS: type checkers narrow on sys.platform
         with suppress(ProcessLookupError, PermissionError):  # the group may be gone already
             os.killpg(proc.pid, signal.SIGKILL)
 
