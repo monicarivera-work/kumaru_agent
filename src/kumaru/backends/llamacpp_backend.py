@@ -126,8 +126,13 @@ class LlamaCppBackend(Backend):
             return super().count_tokens(messages)
 
     async def stream(
-        self, messages: Sequence[Message], params: GenerationParams
+        self,
+        messages: Sequence[Message],
+        params: GenerationParams,
+        *,
+        tools: Sequence[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamChunk]:
+        self.check_tools(tools)
         if not self._loaded:
             await self.load()
 

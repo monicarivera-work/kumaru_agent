@@ -18,7 +18,7 @@ This file defines the generic `Registry` class and three global registries.
 | Registry | Kind (in error text) | Entry-point group | Built-in entries (aliases in parentheses) |
 |---|---|---|---|
 | `BACKENDS` | `backend` | `kumaru.backends` | `echo`, `transformers` (`hf`), `llamacpp` (`gguf`), `openai_compat` (`ollama`, `vllm`, `remote`), `llamacpp_server` (`llama-server`, `llama_server`) — all lazy |
-| `TOOLS` | `tool` | `kumaru.tools` | `current_time`, registered by decorator when `kumaru.agent.tools` is imported |
+| `TOOLS` | `tool` | `kumaru.tools` | `current_time`, registered by decorator, and the lazy project-folder tools `list_files`, `read_file`, `write_file`, `edit_file` (`kumaru.agent.workspace`) and `run_command` (`kumaru.agent.commands`), all registered when `kumaru.agent.tools` is imported |
 | `BENCHMARKS` | `benchmark` | `kumaru.benchmarks` | `gsm8k`, `gsm8k_train` (`gsm8k-train`), `mmlu_pro` (`mmlu-pro`), `ifeval`, `humaneval`, `golden` — all lazy |
 
 v0.2 adds the `llamacpp_server` backend and the whole `BENCHMARKS` registry, which `kumaru bench` uses.
@@ -203,7 +203,7 @@ Do not give a plugin entry point the name of a built-in.
 - `src\kumaru\core\errors.py` — `RegistryError`, raised for duplicate and unknown names.
 - `src\kumaru\backends\base.py` — the `Backend` contract that registered backends implement.
 - `src\kumaru\backends\llamacpp_server.py` — the v0.2 backend behind `llamacpp_server`.
-- `src\kumaru\agent\tools.py` — `@TOOLS.register("current_time")`; `ToolBelt` creates enabled tools by name.
+- `src\kumaru\agent\tools.py` — `@TOOLS.register("current_time")` and the `register_lazy()` calls for the project-folder tools; `ToolBelt` creates enabled tools by name.
 - `src\kumaru\eval\benchmarks\runner.py` — `resolve_benchmark()` (registry name or a `.jsonl` golden-set path) and `list_benchmarks()`.
 - `src\kumaru\cli.py` — `kumaru info` lists all three registries; `chat`, `eval` and `bench` create from them.
 - `src\kumaru\server\routes_chat.py` — `/v1/info` reports `BACKENDS.names()` and `TOOLS.names()`.

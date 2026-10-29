@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import queue
 import threading
 import time
@@ -144,6 +145,9 @@ class Backend(ABC):
     #: `kumaru train`). `load()` refuses an adapter everywhere else, because a
     #: backend that ignored one would quietly serve, or benchmark, the base model.
     supports_adapters: bool = False
+    #: True if `stream(..., tools=...)` sends tool declarations to the model and
+    #: yields the calls it makes. See src/kumaru/agent/tools.py.
+    supports_tools: bool = False
 
     def __init__(self, config: BackendConfig) -> None:
         self.config = config
@@ -208,23 +212,50 @@ class Backend(ABC):
         heuristic exists so remote backends — which cannot tokenize locally —
         still produce a usable number for memory-trimming decisions.
         """
-        chars = sum(len(m.content) + len(m.role.value) + 4 for m in messages)
+        chars = sum(
+            len(m.content) + len(m.role.value) + 4
+            + (len(json.dumps(m.tool_calls)) if m.tool_calls else 0)
+            for m in messages
+        )
         return int(chars / 3.6) + 8
 
     @property
     def context_length(self) -> int:
         return self.config.max_context_length
 
+    def check_tools(self, tools: Sequence[dict[str, Any]] | None) -> None:
+        """Refuse tool declarations this backend cannot pass to its model.
+
+        A backend that dropped them silently would leave the model describing
+        tool calls in prose that nothing ever runs.
+        """
+        if tools and not self.supports_tools:
+            raise ConfigError(
+                f"The {self.name} backend cannot call tools, and tools are enabled "
+                "(agent.enabled_tools, or kumaru chat --workspace).",
+                hint="Use a backend that can: llamacpp_server (e.g. -c qwen36) or "
+                "openai_compat with a server that supports tool calls.",
+            )
+
     # -- generation ---------------------------------------------------------
 
     @abstractmethod
     def stream(
-        self, messages: Sequence[Message], params: GenerationParams
+        self,
+        messages: Sequence[Message],
+        params: GenerationParams,
+        *,
+        tools: Sequence[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """Yield incremental `StreamChunk`s until generation finishes.
 
         The final chunk must carry a `finish_reason` and, when the backend can
         supply it, a populated `usage`.
+
+        `tools` are OpenAI-style function declarations. A backend with
+        `supports_tools` sends them to the model and puts the calls the model
+        makes on the final chunk (`tool_calls`, finish reason "tool_calls");
+        every other backend calls `check_tools`, which refuses them.
         """
 
     async def generate(

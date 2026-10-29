@@ -455,8 +455,13 @@ class TransformersBackend(Backend):
     # -- generation ---------------------------------------------------------
 
     async def stream(
-        self, messages: Sequence[Message], params: GenerationParams
+        self,
+        messages: Sequence[Message],
+        params: GenerationParams,
+        *,
+        tools: Sequence[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamChunk]:
+        self.check_tools(tools)
         self._refuse_if_closing()
         if not self._loaded:
             await self.load()

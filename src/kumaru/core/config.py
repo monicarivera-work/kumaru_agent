@@ -20,6 +20,7 @@ startup rather than silently doing the wrong thing 40 minutes into a run.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -154,6 +155,66 @@ class ThinkingModeConfig(_Base):
     thinking_budget: int | None = Field(default=None, ge=0)
 
 
+# Programs that would turn one approved argv into arbitrary commands: shells,
+# script hosts and launchers. `run_command` exists to avoid shell strings. This
+# list is best-effort: an allowed program can still run others (`python -c`,
+# npm scripts), so approval, not this list, is what decides what runs.
+_SHELLS = frozenset({
+    "at", "bash", "busybox", "chroot", "cmd", "command", "conhost", "crontab", "csh",
+    "cscript", "dash", "doas", "elvish", "env", "explorer", "fish", "forfiles", "ionice",
+    "ksh", "mshta", "nice", "nohup", "nu", "pkexec", "powershell", "powershell_ise",
+    "pwsh", "regsvr32", "rundll32", "runas", "runuser", "schtasks", "setsid", "sh",
+    "start", "stdbuf", "su", "sudo", "taskset", "tcsh", "timeout", "wmic", "wscript",
+    "wsl", "wt", "xargs", "xonsh", "zsh",
+})  # fmt: skip
+_PROGRAM_NAME = re.compile(r"[a-z0-9][a-z0-9._+-]*")
+_PROGRAM_SUFFIXES = (".exe", ".com", ".cmd", ".bat")
+
+
+def program_name(raw: str) -> str:
+    """Normalize a program name for allowlist checks: ``"Python.EXE"`` -> ``"python"``."""
+    name = raw.strip().lower()
+    for suffix in _PROGRAM_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+class WorkspaceConfig(_Base):
+    """The project folder the agent may work in, and what it may run there.
+
+    Only `kumaru chat --workspace DIR` uses it: the terminal is the one interface
+    that asks you before each change and each command. See
+    src/kumaru/agent/workspace.py and src/kumaru/agent/commands.py.
+    """
+
+    # The folder. None = no workspace, so the file and command tools are off.
+    root: str | None = None
+    # Programs `run_command` may start, by bare name. Shells and launchers are
+    # refused here, because one approved argv could then run anything.
+    allowed_commands: list[str] = Field(
+        default_factory=lambda: ["python", "node", "npm", "npx", "dotnet"]
+    )
+    command_timeout_s: int = Field(default=300, ge=1, le=3600)
+    # Caps on what one tool call can pour into the context window.
+    max_output_chars: int = Field(default=16_000, ge=1_000, le=200_000)
+    max_file_bytes: int = Field(default=262_144, ge=1_024, le=8_388_608)
+    max_list_entries: int = Field(default=500, ge=10, le=10_000)
+
+    @field_validator("allowed_commands")
+    @classmethod
+    def _bare_program_names(cls, value: list[str]) -> list[str]:
+        names: list[str] = []
+        for raw in value:
+            name = program_name(raw)
+            if not _PROGRAM_NAME.fullmatch(name):
+                raise ValueError(f"{raw!r} is not a bare program name (no paths or spaces)")
+            if name in _SHELLS:
+                raise ValueError(f"{raw!r} is a shell or launcher, which could run any command")
+            names.append(name)
+        return list(dict.fromkeys(names))
+
+
 class AgentConfig(_Base):
     """How the conversation itself is managed."""
 
@@ -167,9 +228,12 @@ class AgentConfig(_Base):
     # policy decides what to drop or compress.
     max_history_tokens: int = 6144
     memory_policy: str = "sliding_window"  # sliding_window | drop_oldest | none
-    # Reserved for the tool layer; empty means "pure chat", the only mode so far.
+    # Tools the model may call; empty means "pure chat". `kumaru chat --workspace`
+    # adds the project-folder tools. See src/kumaru/agent/tools.py.
     enabled_tools: list[str] = Field(default_factory=list)
-    max_tool_iterations: int = 4
+    # Rounds of tool calls per message; then the agent stops and asks to continue.
+    max_tool_iterations: int = Field(default=10, ge=1, le=100)
+    workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     expertise: list[Literal["coding", "playwright", "windows", "apis"]] = Field(default_factory=list)
     knowledge_files: list[str] = Field(default_factory=list)
     max_knowledge_chars: int = Field(default=6000, ge=0, le=24000)
@@ -301,8 +365,10 @@ def load_config(
     Parameters
     ----------
     path:
-        YAML file, or a bare profile name resolved against ``configs/``
-        (``load_config("local-gpu")`` -> ``configs/local-gpu.yaml``).
+        A bare profile name, always resolved against ``configs/``
+        (``load_config("local-gpu")`` -> ``configs/local-gpu.yaml``), or a YAML
+        file: a path with a folder in it or a ``.yaml``/``.yml`` suffix. See
+        `config_file`.
     overrides:
         Highest-precedence nested dict, normally built from CLI flags.
     use_env:
@@ -311,13 +377,12 @@ def load_config(
     data: dict[str, Any] = {}
 
     if path is not None:
-        resolved = Path(path)
-        if not resolved.exists() and resolved.suffix == "":
-            resolved = CONFIG_DIR / f"{path}.yaml"
-        if not resolved.exists():
+        resolved = config_file(path)
+        if not resolved.is_file():
             raise ConfigError(
                 f"Config file not found: {path}",
-                hint=f"Available profiles: {', '.join(list_profiles()) or '(none)'}",
+                hint=f"Available profiles: {', '.join(list_profiles()) or '(none)'}. A file "
+                "outside configs/ needs a folder or a .yaml suffix, e.g. ./my-profile.yaml",
             )
         loaded = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
         if not isinstance(loaded, dict):
@@ -334,6 +399,23 @@ def load_config(
         return KumaruConfig(**data)
     except Exception as exc:
         raise ConfigError(f"Invalid configuration: {exc}") from exc
+
+
+def config_file(path: str | Path) -> Path:
+    """The file `load_config` reads for `path`.
+
+    A bare name (no folder, no ``.yaml``/``.yml`` suffix) is always a profile in
+    ``configs/``, never a file in the current folder: ``kumaru chat --workspace``
+    makes running Kumaru inside a cloned project normal, and a file named
+    ``qwen36`` there could otherwise point ``base_url`` at another server or set
+    the ``llama_server.binary`` that starts before anything asks you. To read a
+    file in the current folder, write ``./qwen36`` or ``qwen36.yaml``.
+    """
+    raw = str(path)
+    candidate = Path(raw)
+    if candidate.name == raw and candidate.suffix.lower() not in (".yaml", ".yml"):
+        return CONFIG_DIR / f"{raw}.yaml"
+    return candidate
 
 
 def list_profiles() -> list[str]:

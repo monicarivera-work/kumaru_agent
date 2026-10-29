@@ -21,7 +21,7 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
-FinishReason = Literal["stop", "length", "error", "cancelled"]
+FinishReason = Literal["stop", "length", "tool_calls", "error", "cancelled"]
 
 
 class Role(str, Enum):
@@ -43,9 +43,9 @@ class Message(BaseModel):
 
     role: Role
     content: str = ""
-    # Populated only when role == TOOL, or when an assistant turn requests a
-    # tool call. Unused while Kumaru is chat-only; present so the tool
-    # layer can be switched on later without a schema migration.
+    # Populated only when role == TOOL (`name`, `tool_call_id`: which call this
+    # result answers), or when an assistant turn requests tool calls
+    # (`tool_calls`, in the OpenAI shape). See src/kumaru/agent/tools.py.
     name: str | None = None
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
@@ -152,12 +152,19 @@ class StreamChunk(BaseModel):
     Consumers append. This keeps bandwidth O(output) instead of O(output^2).
     `reasoning` is the same idea for the model's thinking stream; a chunk can
     carry either or both.
+
+    With tools on, two more kinds of chunk report the agent's actions:
+    `tool_calls` (the calls the model asked for, OpenAI shape) and `tool_result`
+    (one call's result, a TOOL message). Consumers that only render text can
+    ignore both.
     """
 
     delta: str = ""
     reasoning: str = ""
     finish_reason: FinishReason | None = None
     usage: Usage | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    tool_result: Message | None = None
 
 
 class ChatResult(BaseModel):

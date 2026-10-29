@@ -22,7 +22,7 @@
 4. It starts the server on a free localhost port, or on a fixed `llama_server.port` that nothing else may be using. stdout and stderr go to `runs\logs\llama-server-<port>.log`.
 5. It polls `/health` until the weights are loaded, checks `/v1/models`, and reads `/props`.
 
-After that, every request is a plain OpenAI chat-completions call through the inherited `stream()`. The call adds llama.cpp's extra fields: `top_k`, `min_p`, `repeat_penalty`, `chat_template_kwargs.enable_thinking` and a per-request thinking budget. `aclose()` stops the process, which gives its VRAM back to the OS.
+After that, every request is a plain OpenAI chat-completions call through the inherited `stream()`. The call adds llama.cpp's extra fields: `top_k`, `min_p`, `repeat_penalty`, `chat_template_kwargs.enable_thinking` and a per-request thinking budget. Tool calling is inherited too (`supports_tools`): with `--jinja`, llama-server renders the tool declarations into the prompt with the model's own template and parses the model's calls back into `tool_calls`. `aclose()` stops the process, which gives its VRAM back to the OS.
 
 If you set `backend.base_url`, the backend runs in **attach mode** instead. It uses a server you started and never starts or stops a process.
 
@@ -162,7 +162,7 @@ match_gguf_files([...q4_k_m-00002-of-00002.gguf, ...q4_k_m-00001-of-00002.gguf, 
 | `backend.max_context_length` (CLI `--context`) | `--ctx-size` | always |
 | `llama_server.parallel` (4, range 1–64) | `--parallel` | always |
 | `llama_server.flash_attn` (`"on"`) | `--flash-attn` | always |
-| — | `--jinja` | always. Renders the GGUF's own Jinja chat template, which is what reads `enable_thinking`. |
+| — | `--jinja` | always. Renders the GGUF's own Jinja chat template, which is what reads `enable_thinking`, and lets the server turn the model's tool calls into `tool_calls` (`kumaru chat --workspace`). |
 | `backend.model` | `--alias` | always. This is the id that `/v1/models` reports. |
 | — | `--no-webui` | always. Kumaru serves its own UI. |
 | — | `--log-colors off` | always. Keeps ANSI codes out of the log file. |
