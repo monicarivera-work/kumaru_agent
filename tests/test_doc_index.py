@@ -9,7 +9,7 @@ import sqlite3
 import sys
 import time
 from collections import Counter
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 import pytest
@@ -313,6 +313,38 @@ def test_oversized_folders_are_refused_with_a_hint(
     assert not output.exists()
 
 
+@pytest.mark.parametrize(
+    "files",
+    [
+        {f"page{n:02}.md": "Text." for n in range(50)},
+        {**{f"a/page{n}.md": "Text." for n in range(6)}, **{f"b/page{n:02}.md": "Text." for n in range(50)}},
+    ],
+    ids=["one-folder", "across-folders"],
+)
+def test_a_huge_folder_is_refused_without_being_listed_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, files: dict[str, str]
+) -> None:
+    folder = write(tmp_path / "docs", files)
+    real_scandir = os.scandir
+    listed: list[str] = []
+
+    @contextmanager
+    def counting_scandir(path):
+        def entries(iterator):
+            for entry in iterator:
+                listed.append(entry.name)
+                yield entry
+
+        with real_scandir(path) as iterator:
+            yield entries(iterator)
+
+    monkeypatch.setattr(doc_index, "MAX_ENTRIES", 10)
+    monkeypatch.setattr(os, "scandir", counting_scandir)
+    with pytest.raises(ConfigError, match="more than 10 files and folders"):
+        build_index(folder, tmp_path / "docs.sqlite", topic="T", version="1")
+    assert len(listed) == 11  # one past the limit, however many entries the folder holds
+
+
 def test_folders_past_the_depth_limit_are_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -467,6 +499,22 @@ def test_ranking_is_deterministic_and_ties_go_to_the_earlier_index(
     assert block.count("$Button.pressed.connect") == 1
 
 
+def test_the_same_text_under_another_heading_stays_searchable(tmp_path: Path) -> None:
+    folder = write(
+        tmp_path / "api",
+        {
+            "clear.md": "# clear\n\nRemoves all items.",
+            "reset.md": "# reset\n\nRemoves all items.",
+            "vec/clear.md": "# Vec\n\n## clear\n\nRemoves all items.",  # same heading and text: stored once
+        },
+    )
+    output = tmp_path / "api.sqlite"
+    report = build_index(folder, output, topic="API", version="1")
+    assert (report.files, report.chunks, report.empty) == (2, 2, 1)
+    found = find_passages([open_index(output)], [Message.user("What does reset do?")])
+    assert [h.citation for h in found] == ["Topic: API; version: 1; source: api/reset.md; section: reset"]
+
+
 def test_off_topic_passages_are_cut_relative_to_the_best() -> None:
     class Fake:
         def __init__(self, hits: list[Hit]) -> None:
@@ -500,9 +548,22 @@ def test_short_follow_ups_borrow_the_subject_of_earlier_questions() -> None:
     assert query_terms(specific) == (["rust", "ownership", "borrowing", "lifetimes"], [])
 
 
-def test_pasted_code_cannot_crowd_out_the_question() -> None:
-    code = "\n".join(f"let variable_{n} = function_{n}();" for n in range(80))
-    terms, phrases = query_terms([Message.user(f"```rust\n{code}\n```\nWhy does the borrow checker fail?")])
+PASTED_CODE = "\n".join(f"let variable_{n} = function_{n}();" for n in range(80))
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        f"```rust\n{PASTED_CODE}\n```\nWhy does the borrow checker fail?",
+        f"~~~rust\n{PASTED_CODE}\n~~~\nWhy does the borrow checker fail?",
+        # A longer fence holds shorter ones, as in a pasted Markdown file.
+        f"````markdown\n```rust\n{PASTED_CODE}\n```\n````\nWhy does the borrow checker fail?",
+        f"Why does the borrow checker fail?\n```rust\n{PASTED_CODE}",  # never closed
+    ],
+    ids=["backticks", "tildes", "nested", "unclosed"],
+)
+def test_pasted_code_cannot_crowd_out_the_question(message: str) -> None:
+    terms, phrases = query_terms([Message.user(message)])
     assert terms[:3] == ["borrow", "checker", "fail"]
     assert len(terms) == MAX_QUERY_TERMS
 
@@ -615,6 +676,16 @@ def test_a_cut_passage_fits_the_budget_and_keeps_enough_text(section: str, body:
         assert whole.startswith(f"{text}\n"), limit  # cut at a line end
         assert len(text) >= MIN_CUT_CHARS and len(text) > len(best.citation) + 1, limit
     assert passage == whole
+
+
+def test_a_passage_that_would_keep_only_its_citation_gives_way_to_the_next() -> None:
+    # A paragraph on one line has no line end to cut at: it was once kept as a bare citation.
+    paragraph = hit("A long paragraph written on a single line. " * 40, 9, chunk=1)
+    short = hit("A short passage that fits whole.", 5, chunk=2)
+    limit = len(excerpt_block([short], 6000)[0]) + 300  # room for `short`, not `paragraph`
+    block, used = excerpt_block([paragraph, short], limit)
+    assert used == [short]
+    assert paragraph.citation not in block
 
 
 def test_documents_cannot_close_the_excerpts_block() -> None:

@@ -260,6 +260,98 @@ FILLER
         assert markup not in text_out
 
 
+def test_comment_openers_in_code_spans_hide_nothing() -> None:
+    # `<!--` in backticks once hid everything up to the next `-->`, fence or end of file.
+    text = f"""# Comments
+
+Write `<!--` to start an HTML comment.
+{FILLER}
+
+## Examples
+
+A whole comment in backticks, `<!-- note -->`, shows as written. MDX writes `{{/* note */}}`.
+{FILLER}
+
+## Later section
+
+Text after the examples survives. <!-- an editor's note --> Inline comments go.
+
+<!--
+A block comment
+
+with a blank line inside
+-->
+
+The end.
+"""
+    chunks = document_chunks(text, "comments.md")
+    assert [chunk.section for chunk in chunks] == [
+        "Comments",
+        "Comments > Examples",
+        "Comments > Later section",
+    ]
+    text_out = bodies(chunks)
+    assert "Write `<!--` to start an HTML comment.\n" in text_out
+    assert "A whole comment in backticks, `<!-- note -->`, shows as written. MDX writes `{/* note */}`.\n" in text_out
+    assert chunks[-1].body == "Text after the examples survives. Inline comments go.\n\nThe end."
+
+
+@pytest.mark.parametrize(
+    ("text", "body"),
+    [
+        ("Text <!-- a ` b --> more ` end.", "Text more ` end."),  # the comment opens first
+        ("A lone ` backtick, then <!-- a note --> text.", "A lone ` backtick, then text."),
+        # Inside a paragraph, a comment cannot cross a blank line: its opener is text.
+        ("a <!-- b\n\nc --> d", "a <!-- b\n\nc --> d"),
+        ("<!-- block\n\nwith a blank line -->\nAfter.", "After."),
+        ("Before.\n\n<!-- never closed\n\nHidden.", "Before."),
+    ],
+    ids=["backtick-in-comment", "lone-backtick", "inline-across-blank", "block-across-blank", "unclosed-block"],
+)
+def test_markdown_comments_end_where_commonmark_ends_them(text: str, body: str) -> None:
+    assert bodies(document_chunks(f"# T\n\n{text}", "x.md")) == body
+
+
+def test_indented_code_is_kept_verbatim_and_indented_prose_stays_prose() -> None:
+    # Indented code once went through the inline rewrites: "<span>OK</span>" became "OK".
+    text = """# Setting HTML
+
+Assign the markup as a string:
+
+    element.innerHTML = "<span>OK</span>";
+    // <!-- not a comment --> [not](a link)
+
+A paragraph
+    continued by an indented line.
+
+1. Install the package.
+
+    A continuation paragraph, indented four.
+
+        npm install kumaru
+
+!!! note
+    An admonition paragraph is prose.
+
+<!--
+    Indented text in a comment is not code.
+-->
+"""
+    text_out = bodies(document_chunks(text, "x.md"))
+    assert (
+        '```\nelement.innerHTML = "<span>OK</span>";\n// <!-- not a comment --> [not](a link)\n```'
+        in text_out
+    )
+    assert "```\nnpm install kumaru\n```" in text_out
+    assert text_out.count("```") == 4
+    for prose in ("continued by an indented line.", "A continuation paragraph", "An admonition paragraph"):
+        assert prose in text_out
+    assert "in a comment" not in text_out
+    # MDX has no indented code: indentation there is component layout.
+    mdx = document_chunks("# T\n\n<Note>\n    Indented text in a component.\n</Note>\n", "x.mdx")
+    assert bodies(mdx) == "Indented text in a component."
+
+
 def test_rst_roles_and_links_keep_their_titles() -> None:
     text = """Signals
 =======
@@ -306,6 +398,10 @@ def test_broken_html_keeps_the_text_before_the_break(page: str, body: str) -> No
         ("x.md", " ", "#"),
         ("x.md", "<a ", ""),
         ("x.md", '<a b="c" /> ', "x"),
+        ("x.md", "a <!-- `", ""),
+        ("x.md", "` {/* ", ""),
+        ("x.md", "- a\n\n    b\n", ""),
+        ("x.md", "\n    <!--", ""),
         ("x.rst", ":a", ""),
         ("x.rst", ":ref:`a <", "`"),
         ("x.rst", "`a <", ""),

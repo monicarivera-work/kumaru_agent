@@ -14,6 +14,7 @@ followed: a passage holds only what its own file says.
 
 from __future__ import annotations
 
+import bisect
 import html
 import re
 from collections import Counter
@@ -102,13 +103,13 @@ def _indent(line: str) -> int:
     return len(expanded) - len(expanded.lstrip())
 
 
-def _strip_indent(line: str, columns: int) -> str:
+def _strip_indent(line: str, columns: int, tab: int = 8) -> str:
     """Remove up to `columns` columns of leading whitespace, keeping deeper tabs."""
     column = 0
     for position, char in enumerate(line):
         if column >= columns or char not in " \t":
             return line[position:]
-        column = column + 1 if char == " " else (column // 8 + 1) * 8
+        column = column + 1 if char == " " else (column // tab + 1) * tab
     return ""
 
 
@@ -258,7 +259,13 @@ _MD_CONTAINER_FENCE = re.compile(r"^[ \t]*:{3,}")
 _MD_TAG_LINE = re.compile(r"^[ \t]*(?:</?[A-Za-z][\w.:-]*(?:[ \t][^<>]*|/)?>[ \t]*)+$")
 _MD_OPEN_TAG_START = re.compile(r"^[ \t]*<[A-Za-z][\w.:-]*(?:[ \t][^<>]*)?$")
 _MDX_STATEMENT = re.compile(r"^(?:import|export)\b")
-_MD_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)|\{/\*.*?(?:\*/\}|\Z)", re.S)
+_MD_COMMENT_OPEN = re.compile(r"<!--|\{/\*")
+_MD_COMMENT_CLOSERS = {"<!--": "-->", "{/*": "*/}"}
+# Matched on lines whose tabs are expanded: a list item, whose content starts after its
+# marker, and the MkDocs blocks whose content is indented four columns: admonitions
+# (!!! and ??? or ???+), content tabs (=== "Tab") and footnotes ([^1]:).
+_MD_LIST_ITEM = re.compile(r"^ *(?:[-*+:]|\d{1,9}[.)])(?= |$)")
+_MD_INDENTED_BLOCK = re.compile(r'^ *(?:!!!|\?\?\?\+?|=== +"|\[\^[^\]]+\]:)')
 _MD_FRONT_TITLE = re.compile(r"^title[ \t]*[:=](.*)$")
 
 _BACKTICKS = re.compile(r"`+")
@@ -292,16 +299,24 @@ def _restore(text: str, saved: list[str]) -> str:
     return _PLACEHOLDER.sub(lambda match: saved[int(match.group(1))], text)
 
 
-def _protect_code_spans(text: str) -> tuple[str, list[str]]:
-    """Placeholders for Markdown code spans: a backtick run up to the next run of the
-    same length. One pass, where a regex would rescan to the end from each unclosed run."""
-    runs = [match.span() for match in _BACKTICKS.finditer(text)]
+def _code_span_closers(runs: Sequence[tuple[int, int]]) -> list[int | None]:
+    """For each backtick run, the index of the next run of the same length, which
+    would close a code span it opens. One backward pass, where a regex would rescan
+    to the end of the text from each unclosed run."""
     closers: list[int | None] = [None] * len(runs)
     next_of_length: dict[int, int] = {}
     for number in range(len(runs) - 1, -1, -1):
         length = runs[number][1] - runs[number][0]
         closers[number] = next_of_length.get(length)
         next_of_length[length] = number
+    return closers
+
+
+def _protect_code_spans(text: str) -> tuple[str, list[str]]:
+    """Placeholders for Markdown code spans: a backtick run up to the next run of the
+    same length."""
+    runs = [match.span() for match in _BACKTICKS.finditer(text)]
+    closers = _code_span_closers(runs)
     saved: list[str] = []
     parts: list[str] = []
     position = number = 0
@@ -377,6 +392,94 @@ def _closes_fence(line: str, marker: str) -> bool:
     return bool(match and match.group(1)[0] == marker[0] and len(match.group(1)) >= len(marker))
 
 
+def split_fenced_code(text: str) -> tuple[str, str]:
+    """Split Markdown into its prose and the contents of its fenced code blocks.
+
+    Fence lines are dropped. Fences follow the converter's rules: three or more
+    backticks or tildes at any indentation, closed only by a run of the same
+    character at least as long, so a ```` fence can hold ``` lines. A fence
+    left open runs to the end.
+    """
+    prose: list[str] = []
+    code: list[str] = []
+    marker = ""
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if marker:
+            if _closes_fence(line, marker):
+                marker = ""
+            else:
+                code.append(line)
+            continue
+        opened = _opens_fence(line)
+        if opened:
+            marker = opened.group(2)
+        else:
+            prose.append(line)
+    return "\n".join(prose), "\n".join(code)
+
+
+def _strip_comments(text: str) -> str:
+    """Remove the HTML and MDX comments from Markdown that holds no fences.
+
+    One left-to-right pass decides each code span and comment where it opens, so
+    whichever opens first wins, as in CommonMark: `<!--` in backticks is code,
+    and backticks in a comment go with it. A comment that starts its line may
+    span blank lines, and one never closed runs to the end of `text`. Inside a
+    paragraph, a comment or code span must close before the paragraph ends (at
+    a blank, heading or comment line), or its opener stays as text.
+    """
+    openers = [(match.start(), match.group()) for match in _MD_COMMENT_OPEN.finditer(text)]
+    if not openers:
+        return text
+    closers = {
+        opener: [match.start() for match in re.finditer(re.escape(closer), text)]
+        for opener, closer in _MD_COMMENT_CLOSERS.items()
+    }
+    breaks: list[int] = []  # where paragraphs end, ascending
+    line_starts: set[int] = set()  # comments that start their line
+    offset = 0
+    for line in text.split("\n"):
+        content = line.lstrip(" \t")
+        if not content.strip():
+            breaks.append(offset)
+        elif _MD_ATX.match(line):
+            breaks += [offset, offset + len(line)]
+        elif content.startswith(tuple(_MD_COMMENT_CLOSERS)):
+            breaks.append(offset)
+            line_starts.add(offset + len(line) - len(content))
+        offset += len(line) + 1
+
+    def paragraph_end(position: int) -> int:
+        index = bisect.bisect_right(breaks, position)
+        return breaks[index] if index < len(breaks) else len(text)
+
+    runs = [match.span() for match in _BACKTICKS.finditer(text)]
+    span_closers = _code_span_closers(runs)
+    parts: list[str] = []
+    kept = cursor = run = 0  # text[kept:] is not copied yet; text[:cursor] is decided
+    for start, opener in openers:
+        while run < len(runs) and runs[run][0] < start:
+            if runs[run][0] >= cursor:
+                closer = span_closers[run]
+                if closer is not None and runs[closer][0] < paragraph_end(runs[run][0]):
+                    cursor, run = runs[closer][1], closer
+                else:
+                    cursor = runs[run][1]
+            run += 1
+        if start < cursor:
+            continue
+        ends = closers[opener]
+        index = bisect.bisect_left(ends, start + len(opener))
+        close = ends[index] if index < len(ends) else len(text)
+        if start not in line_starts and close >= paragraph_end(start):
+            cursor = start + len(opener)
+            continue
+        parts.append(text[kept:start])
+        kept = cursor = min(close + len(_MD_COMMENT_CLOSERS[opener]), len(text))
+    parts.append(text[kept:])
+    return "".join(parts)
+
+
 def _without_comments(lines: list[str]) -> list[str]:
     """Drop HTML and MDX comments, which may span lines, outside code fences."""
     out: list[str] = []
@@ -385,7 +488,7 @@ def _without_comments(lines: list[str]) -> list[str]:
 
     def flush() -> None:
         if pending:
-            out.extend(_MD_COMMENT.sub("", "\n".join(pending)).split("\n"))
+            out.extend(_strip_comments("\n".join(pending)).split("\n"))
             pending.clear()
 
     for line in lines:
@@ -405,6 +508,82 @@ def _without_comments(lines: list[str]) -> list[str]:
     return out
 
 
+def _md_indent(line: str) -> int:
+    """Leading columns of a Markdown line, with CommonMark's four-column tab stops."""
+    expanded = line.expandtabs(4)
+    return len(expanded) - len(expanded.lstrip(" "))
+
+
+def _fence_indented_code(lines: list[str]) -> list[str]:
+    """Rewrite Markdown's indented code blocks as fences, which later steps keep verbatim.
+
+    As in CommonMark, a code block is indented four columns past the content of
+    its list item (or MkDocs admonition, content tab or footnote) and cannot
+    interrupt a paragraph, so an indented continuation paragraph stays prose.
+    Fences, which win at any indentation, and comments that start their line
+    pass through untouched.
+    """
+    out: list[str] = []
+    columns: list[int] = []  # content columns of the open list items and MkDocs blocks
+    marker = closer = ""  # the open fence, or the end of the open comment
+    paragraph = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        opened = None if marker else _opens_fence(line)
+        if marker:
+            marker = "" if _closes_fence(line, marker) else marker
+        elif opened:  # ends a comment too, as fences split comments in _without_comments
+            marker, closer, paragraph = opened.group(2), "", False
+        elif closer:
+            if closer in line:
+                closer, paragraph = "", False
+        elif not line.strip():
+            paragraph = False
+        else:
+            indent = _md_indent(line)
+            base = columns[-1] if columns else 0
+            if indent >= base + 4 and not paragraph:
+                end = last = i + 1
+                while end < len(lines) and (not lines[end].strip() or _md_indent(lines[end]) >= base + 4):
+                    end += 1
+                    if lines[end - 1].strip():
+                        last = end
+                # Dedented by its least indentation, as reStructuredText literal blocks are,
+                # so that code under a "1. " item indented the MkDocs way (8) has no stray space.
+                cut = min(_md_indent(row) for row in lines[i:last] if row.strip())
+                code = [_strip_indent(row, cut, tab=4) for row in lines[i:last]]
+                out += [*fence("\n".join(code)).split("\n"), *lines[last:end]]
+                i = end
+                continue
+            expanded = line.expandtabs(4)
+            content = expanded.lstrip(" ")
+            item = None if _MD_BREAK.match(line) else _MD_LIST_ITEM.match(expanded)
+            block = None if item else _MD_INDENTED_BLOCK.match(expanded)
+            if item or block or not paragraph:
+                while columns and columns[-1] > indent:
+                    columns.pop()
+            if item:
+                rest = expanded[item.end() :]
+                gap = len(rest) - len(rest.lstrip(" "))
+                columns.append(item.end() + (gap if 0 < gap <= 4 and rest.strip() else 1))
+                paragraph = bool(rest.strip())
+            elif block:
+                columns.append(indent + 4)
+                paragraph = content.startswith("[^")
+            elif content.startswith(tuple(_MD_COMMENT_CLOSERS)):
+                opener = "<!--" if content.startswith("<!--") else "{/*"
+                closer = _MD_COMMENT_CLOSERS[opener]
+                closer = "" if closer in content[len(opener) :] else closer
+                paragraph = False
+            else:
+                setext = paragraph and _MD_SETEXT.match(line)
+                paragraph = not (setext or _MD_ATX.match(line) or _MD_BREAK.match(line))
+        out.append(line)
+        i += 1
+    return out
+
+
 def _skip_statement(lines: list[str], start: int) -> int:
     """Skip an MDX import/export statement, following its brackets over lines."""
     depth = 0
@@ -421,7 +600,10 @@ def _skip_statement(lines: list[str], start: int) -> int:
 def markdown_blocks(text: str, *, mdx: bool = False) -> tuple[str, list[Block]]:
     lines = text.split("\n")
     title, start = _front_matter(lines)
-    lines = _without_comments(lines[start:])
+    lines = lines[start:]
+    if not mdx:  # MDX has no indented code: indentation there is only layout
+        lines = _fence_indented_code(lines)
+    lines = _without_comments(lines)
     blocks: list[Block] = []
     paragraph: list[str] = []
     last_paragraph_line = -2

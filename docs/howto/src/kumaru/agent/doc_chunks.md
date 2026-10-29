@@ -85,16 +85,22 @@ Declare one with the `signal` keyword.
 
 ### Markdown and MDX
 - **Front matter**, YAML between `---` lines or TOML between `+++` lines, within the first 200 lines: its `title` names the document, and the rest is dropped.
-- **Code fences** of backticks or tildes are kept verbatim, dedented by the fence's own indent. The language is the first word of the info string: `rust,ignore` becomes `rust`, and `text`, `none` and `default` mean none.
+- **Code fences** of backticks or tildes are kept verbatim, dedented by the fence's own indent. The language is the first word of the info string: `rust,ignore` becomes `rust`, and `text`, `none` and `default` mean none. A fence closes only at a line of the same character, at least as long, so a fence of four backticks can show lines of three.
+- **Indented code**, four columns past the margin, is kept verbatim too, in a fence without a language, as in CommonMark. In a list item, the margin is where the item's text starts. In a MkDocs admonition (`!!!` or `???`), content tab (`=== "Tab"`) or footnote, it is four columns in. Each block is dedented by its least indentation.
+  - Indented code cannot interrupt a paragraph, so an indented line that continues one stays prose, as do a list item's later paragraphs.
+  - `.mdx` files have no indented code. Their indentation is only layout.
 - **Headings.** Both ATX (`## Title`) and setext (underlined with `===` or `---`) headings work. Closing `#`s need a space before them, so `# C#` keeps its `#`.
 - **Dropped:**
-  - images, HTML tags and comments (`<!-- -->`, and `{/* */}` in MDX);
+  - images, HTML tags and comments (`<!-- -->`, and MDX's `{/* */}`);
   - link definitions, table rules (`|---|`), thematic breaks and `:::` container fences;
   - lines holding only tags, such as JSX components;
   - in `.mdx` files, `import` and `export` statements, with the lines that continue their brackets, up to 200 lines.
 - **Links keep their text.** This covers `[text](url)` with one level of parentheses in the URL, `[text][ref]`, and `<https://...>` autolinks, which keep the URL. A link inside brackets, `[a [b](u) c]`, gives `[a b c]`.
 - **MDN macros.** `{{domxref("Window.fetch")}}` keeps its target, `Window.fetch`, for macros named `*ref`, `element`, `header`, `method`, `status`, `glossary` and `attr`. Other macros, such as `{{Deprecated_Inline}}`, are removed.
 - **Code spans**, such as `` `Vec<T>` ``, are kept verbatim, as are backticks that never close. Backslash escapes and HTML entities are decoded.
+- **Comments and code spans** are told apart as in CommonMark: whichever opens first wins. So `` `<!--` `` is code and hides nothing, and backticks inside a comment belong to the comment.
+  - A comment that starts its line may span blank lines. If it never closes, it hides the text up to the next code fence.
+  - A comment inside a paragraph must close before the paragraph ends, at a blank line, a heading or a line that starts a comment. Otherwise its `<!--` stays as text.
 - **Includes are not followed.** mdBook's `{{#include file.rs}}` is kept as written.
 
 ### reStructuredText
@@ -138,7 +144,8 @@ Paragraphs are split at blank lines and kept as written.
 `doc_index` reads files of up to 4 MiB. A converter that is quadratic on some input, even input no real page contains, could stall a build for hours on one crafted file. So every converter takes time proportional to the file's size:
 - **Regular expressions never rescan.** A repeat stops at the next opener: `[^\[\]]*`, not `.*?`.
 - **No two parts of a pattern can match the same character.** Otherwise a failed match retries every way of sharing it, which doubles the work with each repeat. That is exponential, not just slow: `_MD_TAG_LINE` once let both the attribute text and an optional `/` take the `/` of `<a b="c" />`, so 20 such tags before some text took a second, and 40 would have taken weeks. Now the `/` belongs to one part only, and 5,000 tags take 10 ms. This is the pattern to look for when you add a regular expression: an optional part or a repeat next to another that accepts the same character.
-- **Code spans** are paired in one pass (`_protect_code_spans`), because a regular expression would rescan the rest of the text from each unclosed run of backticks.
+- **Code spans and comments** are paired in one pass (`_protect_code_spans`, `_strip_comments`), because a regular expression would rescan the rest of the text from each unclosed run of backticks or `<!--`. Closers and paragraph ends are found by binary search in lists of their positions.
+- **Indented code** is found in one pass over the lines (`_fence_indented_code`), which keeps the open list items on a stack.
 - **HTML is guarded.** `html.parser` without the CVE-2025-6069 fix rescans the rest of the page from every `<` whose construct never closes.
   - `_escape_unclosed` escapes openers that come after the last closer of their kind, since they are text anyway.
   - `_HTML_ODD_SECTION` stops `html.parser` from raising on `<![` before an unexpected name.
@@ -150,11 +157,11 @@ Measured on a busy desktop PC, with files of 4 MiB, the largest `doc_index` read
 
 | Input | Time |
 |---|---|
-| Crafted openers that never close, such as `[`, `<a `, `<!--` or `:ref:` | 0.75–4.3 s |
+| Crafted openers that never close, such as `[`, `<a `, `<!--`, `` `<!--` `` or `:ref:` | 0.75–5 s |
 | One line of 220,000 `<Icon name="ok" />` tags and then text, or 10,500 lines of 20 | 0.65 s, 0.5 s |
 | `<div>` nested 247,000 deep, around as many `<pre>` blocks | 7 s |
 | reStructuredText nested 2,900 levels deep | 0.7 s |
-| One-letter paragraphs, the most blocks a file can hold | Markdown 17 s, reStructuredText 13 s, HTML 7 s, plain text 4 s |
+| One-letter paragraphs, the most blocks a file can hold | Markdown 20 s, reStructuredText 13 s, HTML 7 s, plain text 4 s |
 
 Real pages are far quicker: all 528 pages of Python 3.12's HTML documentation, 47 million characters, convert in about 22 s.
 
@@ -176,6 +183,7 @@ Real pages are far quicker: all 528 pages of Python 3.12's HTML documentation, 4
 | `code_pieces` | `code_pieces(code: str, lang: str = "", limit: int = MAX_CHUNK_CHARS) -> list[str]` | Code split at line ends into complete fences of at most `limit` characters. |
 | `chunk_blocks` | `chunk_blocks(blocks: Sequence[Block], title: str) -> list[Chunk]` | Packs blocks into passages. `title` roots the section path when no level-1 heading has text. |
 | `markdown_blocks` | `markdown_blocks(text: str, *, mdx: bool = False) -> tuple[str, list[Block]]` | The title from the front matter, or `""`, and the blocks. |
+| `split_fenced_code` | `split_fenced_code(text: str) -> tuple[str, str]` | `(prose, code)`: the lines outside and inside the code fences of Markdown, such as a chat message, by the fence rules above. Fence lines are dropped, and a fence left open runs to the end. `doc_index` searches a question's prose first. |
 | `rst_blocks` | `rst_blocks(text: str) -> tuple[str, list[Block]]` | The first section title and the blocks. |
 | `html_blocks` | `html_blocks(text: str) -> tuple[str, list[Block]]` | The `<title>` and the blocks. |
 | `text_blocks` | `text_blocks(text: str) -> tuple[str, list[Block]]` | `""` and one block per paragraph. |
@@ -236,9 +244,10 @@ Index the documentation's source files when you have them. They hold just the co
 | The section path is the file's name, or `Untitled` | The file has no level-1 heading and no title. | None needed; the file's path is still cited. |
 | Code has no language | Neither the fence, the directive nor the classes name one. | None needed; the code is still fenced. |
 | Deeply nested reStructuredText loses its structure | It is nested more than 16 levels deep. | None needed for real documentation. |
-| One file takes many seconds to convert | The file is large and made of many small blocks. At 4 MiB, one-letter Markdown paragraphs take about 17 s. | None needed: time grows only in proportion to size, and `doc_index` skips files over 4 MiB. |
+| Indented Markdown prose appears in a code fence | As in CommonMark, text indented four columns past its margin, after a blank line, is code. Some site generators have containers the converter does not know, whose text is indented. | None needed: the text is still indexed and searchable. |
+| One file takes many seconds to convert | The file is large and made of many small blocks. At 4 MiB, one-letter Markdown paragraphs take about 20 s. | None needed: time grows only in proportion to size, and `doc_index` skips files over 4 MiB. |
 
 ## Related files
 - `src\kumaru\agent\doc_index.py` — builds and searches documentation indexes, calling `document_chunks` on each file; see [doc_index.md](doc_index.md).
 - `src\kumaru\agent\knowledge.py` — single-file knowledge packs, which are sent whole and not converted; see [knowledge.md](knowledge.md).
-- `tests\test_doc_chunks.py` — 48 offline tests: each format on realistic samples, the inline markup rules, broken HTML, passage limits, and linear time on crafted and deeply nested files.
+- `tests\test_doc_chunks.py` — 60 offline tests: each format on realistic samples, the inline markup rules, comments next to code spans, indented code, broken HTML, passage limits, and linear time on crafted and deeply nested files.

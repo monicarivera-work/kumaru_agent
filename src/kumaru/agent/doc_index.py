@@ -37,7 +37,12 @@ from typing import Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from kumaru import __version__
-from kumaru.agent.doc_chunks import SUPPORTED_SUFFIXES, document_chunks
+from kumaru.agent.doc_chunks import (
+    SECTION_SEPARATOR,
+    SUPPORTED_SUFFIXES,
+    document_chunks,
+    split_fenced_code,
+)
 from kumaru.agent.knowledge import (
     Source,
     Topic,
@@ -243,7 +248,8 @@ def _scan(folder: Path, output: Path) -> _Scan:
         directory, prefix, depth = pending.pop()
         try:
             with os.scandir(directory) as iterator:
-                entries = sorted(iterator, key=lambda entry: entry.name)
+                # One past the limit at most: a huge folder is refused, not read into memory.
+                entries = list(itertools.islice(iterator, MAX_ENTRIES - scan.entries + 1))
         except OSError as exc:
             if not prefix:
                 raise ConfigError(f"Cannot read documentation folder {folder}: {exc}") from exc
@@ -252,6 +258,7 @@ def _scan(folder: Path, output: Path) -> _Scan:
         scan.entries += len(entries)
         if scan.entries > MAX_ENTRIES:
             raise _too_big(folder, f"more than {MAX_ENTRIES:,} files and folders")
+        entries.sort(key=lambda entry: entry.name)
         subfolders = []
         for entry in entries:
             relative = prefix + entry.name
@@ -343,7 +350,12 @@ def _fill(conn: sqlite3.Connection, scan: _Scan, progress: Callable[[int, int], 
         else:
             rows = []
             for chunk in found:
-                digest = hashlib.blake2b(chunk.body.encode(), digest_size=8).digest()
+                # Text and last heading: `clear` and `reset` that both say "Removes all
+                # items." stay searchable by name, while a section included in several
+                # pages (Python's deprecation lists are in three) is stored once.
+                heading = chunk.section.rsplit(SECTION_SEPARATOR, 1)[-1]
+                key = f"{heading}\n{chunk.body}".encode()
+                digest = hashlib.blake2b(key, digest_size=8).digest()
                 if digest not in seen:
                     seen.add(digest)
                     rows.append(chunk)
@@ -607,7 +619,6 @@ _WORD = re.compile(r"[^\W_]+")
 # lookbehind starts matches only at word starts; without it, finditer retries from every
 # letter of a long word (a pasted hash or base64 blob), which is quadratic.
 _IDENTIFIER = re.compile(r"(?<![^\W_])[^\W_]+(?:(?:::|->|[._-])[^\W_]+)+")
-_FENCED = re.compile(r"```.*?(?:```|\Z)", re.S)
 
 
 def _terms_of(text: str) -> tuple[list[str], list[str]]:
@@ -625,16 +636,17 @@ def _terms_of(text: str) -> tuple[list[str], list[str]]:
 def query_terms(messages: Sequence[Message]) -> tuple[list[str], list[str]]:
     """Search terms and identifier phrases for the latest user message.
 
-    Prose comes before pasted code, so the question survives the term cap. A
-    short follow-up such as "and in C#?" also borrows the terms of up to
-    `FOLLOW_UP_MESSAGES` earlier user messages, which carry its subject.
+    Prose comes before fenced code (`split_fenced_code`), so the question
+    survives the term cap. A short follow-up such as "and in C#?" also borrows
+    the terms of up to `FOLLOW_UP_MESSAGES` earlier user messages, which carry
+    its subject.
     """
     asked = [message.content for message in messages if message.role == Role.USER]
     terms: list[str] = []
     phrases: list[str] = []
     for text in reversed(asked[-1 - FOLLOW_UP_MESSAGES :]):
         text = unicodedata.normalize("NFKC", text)
-        for part in (_FENCED.sub(" ", text), " ".join(_FENCED.findall(text))):
+        for part in split_fenced_code(text):
             found_terms, found_phrases = _terms_of(part)
             terms.extend(found_terms)
             phrases.extend(found_phrases)

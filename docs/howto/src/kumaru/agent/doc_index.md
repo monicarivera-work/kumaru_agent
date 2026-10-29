@@ -40,7 +40,7 @@ The functions cover an index's whole life:
 2. **Walks the folder** in name order, so the same folder always gives the same index. Links and junctions are never followed. Some entries are left out silently and others are reported, as the table below shows.
 3. **Reads each file.** It reads at most 4 MiB, which must be UTF-8, with or without a byte-order mark, or UTF-16 with one. A NUL byte marks a file as binary. The file opened must have the device and file ID listed in step 2. If not, it or a folder above it was replaced in the meantime, perhaps by a link, and it is skipped unread.
 4. **Converts** each file with `document_chunks`. Markup is stripped, code is kept in fences, and the text is cut into passages of at most 1,500 characters. Each passage sits under its section path, such as `json — JSON encoder and decoder > Basic Usage`.
-5. **Removes duplicates.** A passage identical to an earlier one, such as a footer on every page, is stored once. A file with no new passages counts as having "no new text".
+5. **Removes duplicates.** A passage with the same text and last heading as an earlier one is stored once. Examples are a footer on every page, or a deprecation list that Python's documentation includes in three pages. The same text under another heading is kept: if `clear` and `reset` both say "Removes all items.", a search for either name finds its own. A file with no new passages counts as having "no new text".
 6. **Stores** the passages in the full-text table, optimizes it, writes the `meta` table and compacts the file with `VACUUM`. On any failure, including Ctrl+C, the partial file is deleted.
 
 | Left out | Reported by `kumaru learn` as |
@@ -81,7 +81,7 @@ The checks cost well under a millisecond per connection.
 
 ### Choosing passages for a question
 This runs on every `prepare()`, when `agent.knowledge_indexes` is set and `agent.max_retrieved_chars` is above 0:
-1. **Search terms** (`query_terms`). After Unicode NFKC normalization, every word of the latest user message is a term if it is at least two letters or digits long and not in `STOPWORDS`. Terms are lowercased. `STOPWORDS` holds filler such as `how`, `does`, `the`, `please` and `explain`. Identifiers joined by `_`, `.`, `-`, `::` or `->` are also searched as phrases, so the exact sequence `move_and_slide` ranks first. A phrase keeps at most its last 8 words, the most specific end of a long name. Words outside fenced code come first, so a pasted snippet cannot push the question past the cap of 32 terms and 8 phrases.
+1. **Search terms** (`query_terms`). After Unicode NFKC normalization, every word of the latest user message is a term if it is at least two letters or digits long and not in `STOPWORDS`. Terms are lowercased. `STOPWORDS` holds filler such as `how`, `does`, `the`, `please` and `explain`. Identifiers joined by `_`, `.`, `-`, `::` or `->` are also searched as phrases, so the exact sequence `move_and_slide` ranks first. A phrase keeps at most its last 8 words, the most specific end of a long name. Words outside code fences come first, so a pasted snippet cannot push the question past the cap of 32 terms and 8 phrases. Fences are found as in Markdown (`doc_chunks.split_fenced_code`): a line of three or more backticks or tildes opens one, and only a line of the same character, at least as long, closes it.
 2. **Follow-ups.** A short follow-up, such as `Why?` or `And in C#?`, yields fewer than 3 terms and phrases. It then borrows the terms of the user message before it, and if still short, of the one before that.
 3. **Search** (`find_passages`). All terms and phrases are quoted, joined with `OR` and sent to every index, which returns its best 16 passages by BM25.
 4. **Rank.** All candidates are sorted by score. Ties go to the earlier index, then to the earlier passage, so the same question always gets the same passages. Passages scoring under a quarter of the best one are dropped as off-topic.
@@ -137,7 +137,7 @@ Consequences:
 |---|---|---|
 | Documentation files of supported types | 100,000 (`MAX_FILES`) | Error. Index a subfolder. |
 | Their total size | 1 GiB (`MAX_TOTAL_BYTES`) | Error |
-| Files and folders seen, of any type | 500,000 (`MAX_ENTRIES`) | Error |
+| Files and folders seen, of any type | 500,000 (`MAX_ENTRIES`) | Error. A folder is listed only up to one entry past the limit, so a huge one is refused, not read into memory. |
 | Folder depth | 32 (`MAX_DEPTH`) | Deeper folders are skipped as `too deep`. |
 | One file | 4 MiB (`MAX_DOC_FILE_BYTES`) | Skipped as `too large` |
 | One passage | 1,500 characters (`doc_chunks.MAX_CHUNK_CHARS`) | Split |
@@ -162,7 +162,7 @@ Measured on a desktop PC:
 
 | Documentation | Input | Index | Build |
 |---|---|---|---|
-| Python 3.12, HTML (`Doc\html`) | 528 HTML files, 51 MB | 492 pages, 8,811 passages, 17.8 MB | About 20 s; 36 s with a cold disk cache |
+| Python 3.12, HTML (`Doc\html`) | 528 HTML files, 51 MB | 492 pages, 8,818 passages, 17.8 MB | About 20 s; 36 s with a cold disk cache |
 | npm 11, Markdown | 87 files | 569 passages, 0.8 MB | 0.3 s |
 | Synthetic Markdown | 2,000 files | 50,000 passages, 98 MB | 38 s |
 
@@ -323,7 +323,7 @@ for hit in hits[:6]:
 * 27.81 Topic: Python; version: 3.12; source: html/library/json.html; section: json — JSON encoder and decoder > Command Line Interface > Command line options
 * 27.60 Topic: Python; version: 3.12; source: html/library/json.html; section: json — JSON encoder and decoder > Encoders and Decoders
   27.11 Topic: Python; version: 3.12; source: html/library/json.html; section: json — JSON encoder and decoder
-* 24.87 Topic: Python; version: 3.12; source: html/library/json.html; section: json — JSON encoder and decoder > Command Line Interface
+* 24.88 Topic: Python; version: 3.12; source: html/library/json.html; section: json — JSON encoder and decoder > Command Line Interface
   23.82 Topic: Python; version: 3.12; source: html/whatsnew/2.6.html; section: What’s New in Python 2.6 > New and Improved Modules > The json module: JavaScript Object Notation
 ```
 
