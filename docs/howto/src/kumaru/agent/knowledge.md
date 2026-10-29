@@ -47,9 +47,9 @@ The functions cover a pack's whole life:
   - The budget covers everything: header, labels and content. `0` turns references off; the maximum is 24,000.
   - **Order is priority.** Packs are sent in `knowledge_files` order. Whatever comes after the budget runs out is not sent at all, and the pack at the boundary is cut mid-text, possibly inside a code block.
   - `reference_context` stops reading packs once the budget is full, so many or large packs do not slow requests down. All packs stay in memory, though, at up to 100,000 characters each.
-  - **Packs cannot switch roles.** Chat-template control tokens become HTML entities in the prompt, whatever the backend: `<|im_end|>` becomes `&lt;|im_end|&gt;`, and `[INST]` becomes `&#91;INST&#93;` (`neutralize_control_tokens`).
+  - **Packs cannot switch roles.** Chat-template control tokens become HTML entities in the prompt, whatever the backend:   `<|im_end|>` becomes `&lt;|im_end|&gt;`, and `[INST]` becomes `&#91;INST&#93;` (`neutralize_control_tokens`, from `untrusted.py`, which escapes tool results the same way).
     - llama-server and the transformers backend read such strings in a prompt as real special tokens. So a pack quoting `<|im_end|>` and `<|im_start|>system`, as the documentation of LLM tools does, would otherwise end the turn and open a system one.
-    - The change is visible rather than a zero-width character, so code the model copies from a pack cannot carry a hidden character into a program. [doc_index.md](doc_index.md) lists the forms covered.
+      - The change is visible rather than a zero-width character, so code the model copies from a pack cannot carry a hidden character into a program. [untrusted.md](untrusted.md) lists the forms covered.
     - The pack file keeps them as written.
 - **Characters, not tokens.** 6,000 characters is about 1,500–1,700 tokens of English prose, and more for code or other languages. The token budget for the whole prompt comes from `agent.max_history_tokens` and the context window; see `docs\howto\src\kumaru\agent\chat.md`.
 - **The overflow guard.** When `expertise` or packs are configured and the prepared prompt is still over the history budget after the memory policy has trimmed it, `prepare()` raises `ContextLengthExceededError` (HTTP 413). The over-budget prompt is never sent to the backend.
@@ -78,10 +78,9 @@ The functions cover a pack's whole life:
 | `load_pack` | `load_pack(path: Path) -> KnowledgePack` | `read_local_text`, then `model_validate_json`. Raises `ConfigError("Invalid knowledge pack <path>: <describe_errors>")` with the hint ``A pack is a JSON object with only nonempty topic, version, source and content strings; `kumaru learn` creates one.`` |
 | `save_pack` | `save_pack(pack: KnowledgePack, path: Path) -> None` | Writes indented UTF-8 JSON, non-ASCII characters unescaped, in mode `"x"`: it never overwrites and never creates folders. Raises `ConfigError("Knowledge pack exceeds the local reference size limit")` or `ConfigError("Cannot create knowledge pack <path>: <OSError>")`. |
 | `REFERENCE_HEADER` | `str`, 245 characters | The untrusted-data notice that starts the reference block. |
-| `CONTROL_TOKEN` | `re.Pattern[str]` | Chat control tokens: `<\|name\|>` and `<｜name｜>` with names of 1–64 characters, without spaces, `\|`, `<`, `>` or `&`; `<s>`, `<bos>`, `<eos>`, `<start_of_turn>`, `<end_of_turn>`, `<think>`, `<tool_call>`, `<tool_response>` and `<<SYS>>`; and `[INST]`, `[SYSTEM_PROMPT]`, `[AVAILABLE_TOOLS]`, `[TOOL_RESULTS]`, `[TOOL_CALLS]` and `[THINK]`. Closing forms match too. |
-| `MAX_CONTROL_TOKEN_CHARS` | `68` | The longest `CONTROL_TOKEN` match. |
-| `neutralize_control_tokens` | `neutralize_control_tokens(text: str) -> str` | Escapes the brackets of each `CONTROL_TOKEN` match as HTML entities: `&lt;`, `&gt;`, `&#91;` and `&#93;`. Other text is unchanged. Used for packs and documentation excerpts. |
-| `reference_context` | `reference_context(packs: Sequence[KnowledgePack], limit: int) -> str` | The first `limit` characters of the header, labels and contents, with control tokens escaped. `""` when there are no packs or `limit <= 0`. Stops reading packs once the budget is full. It reads up to `MAX_CONTROL_TOKEN_CHARS` past the cut, so a token the cut splits is escaped too. |
+| `reference_context` | `reference_context(packs: Sequence[KnowledgePack], limit: int) -> str` | The first `limit` characters of the header, labels and contents, with control tokens escaped (`untrusted.neutralize_control_tokens`). `""` when there are no packs or `limit <= 0`. Stops reading packs once the budget is full. It reads up to `untrusted.MAX_CONTROL_TOKEN_CHARS` (68) characters past the cut, so a token the cut splits is escaped too. |
+
+The escaping itself, `CONTROL_TOKEN`, `MAX_CONTROL_TOKEN_CHARS` and `neutralize_control_tokens`, is in `src\kumaru\agent\untrusted.py`, shared with documentation excerpts and tool results; see [untrusted.md](untrusted.md).
 
 The config fields, in `src\kumaru\core\config.py`, `AgentConfig`:
 - `expertise: list[Literal["coding", "playwright", "windows", "apis"]] = Field(default_factory=list)`
@@ -266,6 +265,7 @@ Rules to keep:
 - `src\kumaru\core\config.py` — `AgentConfig.expertise`, `knowledge_files` and `max_knowledge_chars`.
 - `src\kumaru\cli.py` — `kumaru learn`, which builds a pack from a file or an index from a folder (`_learn_folder`).
 - `src\kumaru\agent\doc_index.py` — documentation indexes, which share `Topic`, `Version`, `Source` and `describe_errors`; see [doc_index.md](doc_index.md).
+- `src\kumaru\agent\untrusted.py` — `neutralize_control_tokens` and `MAX_CONTROL_TOKEN_CHARS`, which `reference_context` escapes packs with; see [untrusted.md](untrusted.md).
 - `configs\coder.yaml` — the profile that enables all four expertise areas.
 - `src\kumaru\core\errors.py` — `ConfigError`, and `ContextLengthExceededError` (HTTP 413).
 - `tests\test_knowledge.py` — offline tests, including one that checks a bad pack stops every entry point before the model loads.

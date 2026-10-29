@@ -9,8 +9,10 @@ import sqlite3
 import sys
 import time
 from collections import Counter
+from collections.abc import AsyncIterator, Sequence
 from contextlib import closing, contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -38,13 +40,15 @@ from kumaru.agent.doc_index import (
     query_terms,
     with_excerpts,
 )
-from kumaru.agent.knowledge import CONTROL_TOKEN, KnowledgePack, save_pack
+from kumaru.agent.knowledge import KnowledgePack, save_pack
 from kumaru.agent.prompt import build_system_prompt
+from kumaru.agent.tools import Tool
+from kumaru.agent.untrusted import CONTROL_TOKEN
 from kumaru.backends.echo import EchoBackend
 from kumaru.cli import _chat_loop, app
 from kumaru.core.config import AgentConfig, BackendConfig, KumaruConfig
 from kumaru.core.errors import ConfigError, KumaruError
-from kumaru.core.types import GenerationParams, Message
+from kumaru.core.types import GenerationParams, Message, Role, StreamChunk
 from kumaru.eval.benchmarks.runner import BenchSettings, run_benchmarks
 from kumaru.eval.harness import run_eval
 from kumaru.server.app import AppState, create_app
@@ -786,6 +790,69 @@ async def test_agent_adds_excerpts_beside_packs_for_complete_and_stream(
         await backend.aclose()
     assert "$Button.pressed.connect" in result.message.content  # echo repeats what it was sent
     assert "$Button.pressed.connect" in "".join(chunk.delta for chunk in chunks)
+
+
+TILEMAP_NOTES = (
+    "Paint a TileMap from its TileSet: a TileMap is a grid of tiles for building levels."
+)
+
+
+class TileMapNotes(Tool):
+    """A tool whose result, searched on its own, would find the TileMaps page."""
+
+    name = "tilemap_notes"
+
+    async def run(self, **kwargs: Any) -> str:
+        return TILEMAP_NOTES
+
+
+class CallingModel(EchoBackend):
+    """Calls `tilemap_notes` in its first `calls` replies, then answers; records each request."""
+
+    def __init__(self, config: BackendConfig, calls: int) -> None:
+        super().__init__(config)
+        self.calls = calls
+        self.requests: list[list[Message]] = []
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        params: GenerationParams,
+        *,
+        tools: Sequence[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        self.requests.append(list(messages))
+        if len(self.requests) > self.calls:
+            yield StreamChunk(delta="Use connect().", finish_reason="stop")
+            return
+        function = {"name": TileMapNotes.name, "arguments": "{}"}
+        call = {"id": f"call_{len(self.requests)}", "type": "function", "function": function}
+        yield StreamChunk(tool_calls=[call], finish_reason="tool_calls")
+
+
+@pytest.mark.asyncio
+async def test_every_tool_round_sends_the_excerpts_found_for_the_question(index_file: Path) -> None:
+    # The tool loop prepares, and so searches, again for each round of calls.
+    cfg = echo_config(knowledge_indexes=[str(index_file)], enabled_tools=["current_time"])
+    model = CallingModel(cfg.backend, calls=2)
+    agent = ChatAgent(model, cfg)
+    agent.tools.tools[TileMapNotes.name] = TileMapNotes()
+    question = "How do I connect a signal?"
+    found = find_passages(agent.indexes, [Message.user(question)])
+    block, _ = excerpt_block(found, cfg.agent.max_retrieved_chars)
+    assert "signals.rst" in block and "tilemaps.html" not in block
+    # Searched on its own, the tool's result would find another page.
+    notes = find_passages(agent.indexes, [Message.user(TILEMAP_NOTES)])
+    assert "tilemaps.html" in notes[0].citation
+
+    chunks = [chunk async for chunk in agent.stream([Message.user(question)])]
+    assert "".join(chunk.delta for chunk in chunks) == "Use connect()."
+    assert len(model.requests) == 3
+    for rounds, request in enumerate(model.requests):
+        roles = [Role.SYSTEM, Role.USER, *[Role.ASSISTANT, Role.TOOL] * rounds]
+        assert [message.role for message in request] == roles
+        assert request[1].content == f"{block}\n\n{question}"
+        assert [m.content for m in request if m.role == Role.TOOL] == [TILEMAP_NOTES] * rounds
 
 
 def test_without_indexes_the_prompt_is_unchanged(tmp_path: Path) -> None:

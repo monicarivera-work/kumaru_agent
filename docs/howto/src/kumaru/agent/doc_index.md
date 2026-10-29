@@ -116,13 +116,14 @@ How do I pretty-print JSON with indentation?
 Consequences:
 - **The source** is the indexed folder's name plus the file's path inside it, so indexing `...\Doc\html` gives `html/library/json.html`.
 - **Documents cannot close the block.** `<excerpts` and `</excerpts` inside a passage become `<excerpts_` and `</excerpts_`. As with packs, the notice is guidance to the model, not an enforced boundary.
-- **Documents cannot switch roles.** Chat-template control tokens in passages and citations become HTML entities, whatever the backend: `<|im_end|>` becomes `&lt;|im_end|&gt;`, and `[INST]` becomes `&#91;INST&#93;` (`knowledge.neutralize_control_tokens`).
+- **Documents cannot switch roles.** Chat-template control tokens in passages and citations become HTML entities, whatever the backend: `<|im_end|>` becomes `&lt;|im_end|&gt;`, and `[INST]` becomes `&#91;INST&#93;` (`untrusted.neutralize_control_tokens`, which escapes packs and tool results the same way).
   - llama-server and the transformers backend read such strings in a prompt as real special tokens. The documentation of LLM tools quotes them, and a quoted `<|im_end|>` followed by `<|im_start|>system` would otherwise end the user's turn and open a system one.
-  - Covered: `<|…|>` and `<｜…｜>` with names up to 64 characters; `<s>`, `<bos>`, `<eos>`, `<start_of_turn>`, `<end_of_turn>`, `<think>`, `<tool_call>` and `<tool_response>`; `<<SYS>>`; `[INST]`, `[SYSTEM_PROMPT]`, `[AVAILABLE_TOOLS]`, `[TOOL_RESULTS]`, `[TOOL_CALLS]` and `[THINK]`. Closing forms are covered too.
+  - Covered: every form in [untrusted.md](untrusted.md#mental-model)'s table, from Qwen's `<|im_start|>` and DeepSeek's `<｜…｜>` to `<s>`, `<start_of_turn>`, `<think>` and Mistral's `[INST]`, opening and closing.
   - The change is visible rather than a zero-width character, so code the model copies from a passage cannot carry a hidden character into a program. HTML's `<s>` tag, in a code example, is escaped too.
 - **Citations can be imitated.** A line in a document such as `Topic: X; version: Y; source: …` looks like a citation. At worst, the model credits text to the wrong source.
 - **Nothing is stored.** The agent is stateless, and clients send back the question as typed. Each turn searches afresh, so earlier excerpts never pile up in the history.
 - **Every entry point retrieves.** `kumaru chat`, the API and web UI, `kumaru eval` and `kumaru bench run --use-agent-prompt` all go through `prepare()`. To measure the model without the documentation, leave the index out of the config.
+- **Every tool round gets the question's passages.** With tools enabled, each round of the tool loop prepares its request afresh ([chat.md](chat.md#the-tool-loop)), so the search runs again. It reads only user messages, so each round's request has the same excerpts before the question, and nothing a tool returns, such as a file the model reads, changes which passages are found. As the round's results fill the prompt budget, step 7 may shorten the block or leave it out.
 
 ### Budgets
 - `agent.max_retrieved_chars` bounds the whole block, header included. The default is 6,000, the range is 0–24,000, and `0` turns retrieval off.
@@ -234,7 +235,7 @@ kumaru learn Python --version 3.12 --source "$env:LOCALAPPDATA\Programs\Python\P
 
 ```text
 Saved documentation index: C:\references\python-3.12.sqlite
-492 files, 8,811 passages, 17.8 MB.
+492 files, 8,818 passages, 17.8 MB.
 4 files had no new text (empty, redirect or duplicate pages).
 Ignored file types: (none) (1), .inv (1), .js (1)
 Add its absolute path to agent.knowledge_indexes and restart chat/server.
@@ -403,7 +404,8 @@ Rules to keep:
 - `src\kumaru\agent\chat.py` — `ChatAgent.__init__` opens the indexes into `agent.indexes`, `_apply_memory()` adds the excerpts within the budget, and `describe()` reports `index_topics`.
 - `src\kumaru\agent\prompt.py` — `build_system_prompt(..., excerpts=True)` adds `EXCERPTS_RULE`.
 - `src\kumaru\agent\knowledge.py` — knowledge packs, plus the `Topic`, `Version` and `Source` labels and `describe_errors`, which indexes share.
+- `src\kumaru\agent\untrusted.py` — `neutralize_control_tokens`, which `excerpt_block` escapes passages and citations with; see [untrusted.md](untrusted.md).
 - `src\kumaru\core\config.py` — `AgentConfig.knowledge_indexes` and `max_retrieved_chars`.
 - `src\kumaru\cli.py` — `kumaru learn`, which builds an index when `--source` is a folder (`_learn_folder`).
-- `tests\test_doc_index.py` — offline tests of building, searching, budgets and entry points, including one that checks a missing index stops every entry point before the model loads.
+- `tests\test_doc_index.py` — offline tests of building, searching, budgets and entry points, including one that checks a missing index stops every entry point before the model loads, and one that checks every tool round sends the excerpts found for the question.
 - `docs\SCALABILITY.md` — where retrieval fits as the documentation grows.

@@ -43,13 +43,8 @@ from kumaru.agent.doc_chunks import (
     document_chunks,
     split_fenced_code,
 )
-from kumaru.agent.knowledge import (
-    Source,
-    Topic,
-    Version,
-    describe_errors,
-    neutralize_control_tokens,
-)
+from kumaru.agent.knowledge import Source, Topic, Version, describe_errors
+from kumaru.agent.untrusted import neutralize_control_tokens
 from kumaru.core.errors import ConfigError, KumaruError
 from kumaru.core.logging import get_logger
 from kumaru.core.types import Message, Role

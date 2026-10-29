@@ -3,14 +3,17 @@
 Files in the project folder, and the output of the programs `run_command`
 starts, are untrusted: whoever could write them could try to steer the model
 (prompt injection). Your approval of every change and command is the backstop;
-this module takes away one lever on top of it.
+this module takes away one lever on top of it. Knowledge packs and documentation
+excerpts are untrusted reference data, and are escaped the same way.
 
 Chat models mark the turns of a conversation with control tokens, such as
-Qwen's ``<|im_start|>`` and ``<|im_end|>``. llama-server turns the rendered
-prompt into tokens with these recognised anywhere in it, so a file holding
-``<|im_end|>`` and then ``<|im_start|>system`` would open a real system turn.
-`neutralize_control_tokens` escapes such text (``&lt;|im_end|&gt;``): the model
-can still read it, but it no longer becomes a control token.
+Qwen's ``<|im_start|>`` and ``<|im_end|>``. llama-server, like the transformers
+backend, turns the rendered prompt into tokens with these recognised anywhere in
+it, so a file holding ``<|im_end|>`` and then ``<|im_start|>system`` would open
+a real system turn. `neutralize_control_tokens` escapes such text
+(``&lt;|im_end|&gt;``): the model can still read it, but it no longer becomes a
+control token. The change is visible, not a zero-width character, so code the
+model copies from such text cannot carry a hidden character into a program.
 `restore_control_tokens` turns the escaped forms back, for the one place that
 needs the real characters: `edit_file`, when the model copies text it read and
 the file holds the real tokens.

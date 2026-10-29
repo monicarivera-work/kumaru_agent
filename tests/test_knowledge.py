@@ -12,18 +12,17 @@ from typer.testing import CliRunner
 
 from kumaru.agent.chat import ChatAgent
 from kumaru.agent.knowledge import (
-    CONTROL_TOKEN,
     EXPERTISE,
     MAX_FILE_BYTES,
     REFERENCE_HEADER,
     KnowledgePack,
     load_pack,
-    neutralize_control_tokens,
     read_local_text,
     reference_context,
     save_pack,
 )
 from kumaru.agent.prompt import build_system_prompt
+from kumaru.agent.untrusted import CONTROL_TOKEN, neutralize_control_tokens
 from kumaru.backends.echo import EchoBackend
 from kumaru.cli import _chat_loop, app
 from kumaru.core.config import AgentConfig, BackendConfig, KumaruConfig, load_config
