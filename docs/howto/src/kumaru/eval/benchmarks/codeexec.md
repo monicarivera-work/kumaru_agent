@@ -53,8 +53,10 @@ Program{files, steps, marker}
 | Platform | How the step runs | What is killed, and when |
 |---|---|---|
 | Windows | The process is created suspended, put in a new **job object**, then resumed (`NtResumeProcess`), so it can't start a child before it is contained. Every process it starts joins the job and can't leave it. | `TerminateJobObject` kills the whole job when the step ends or times out, then waits up to 5 s until no process is left. The job also has `KILL_ON_JOB_CLOSE`, so the job dies with Kumaru. |
-| Windows, if a job can't be created | As above, but without a job. | `taskkill /F /T` on the process tree. |
+| Windows, if a job can't be created or joined | Nothing runs: `run` raises `KumaruError` (see below). | The process, if it was created, is killed while still suspended. |
 | Linux, macOS | The process leads a new session (`start_new_session`), so it and its children share a process group. | `killpg(SIGKILL)` on the group. A child that starts its own session escapes it; Docker doesn't have that gap. |
+
+Without a job nothing would cap the program's memory, and a process it started could outlive it while holding its output pipes open, keeping the step's readers waiting past the time limit. So a program Kumaru can't contain is not run. The error is not a wrong answer: the runner records it against the question ("grader failed: KumaruError: Could not create the Windows job object …"), a resumed run asks the question again, and five such errors in a row stop the run. If it keeps happening (the machine is out of memory or handles), grade with `--sandbox docker`.
 
 The job object also carries three limits:
 
@@ -79,7 +81,7 @@ The job object also carries three limits:
 
 | Name | Signature | What it's for |
 |---|---|---|
-| `run` | `run(program: Program, *, sandbox: str = "none") -> Outcome` | Run one program. Raises `ValueError` for an unknown sandbox or a program without steps, `ToolchainMissing` when a step's executable can't start, and `KumaruError` when a setup step fails or Docker misbehaves. |
+| `run` | `run(program: Program, *, sandbox: str = "none") -> Outcome` | Run one program. Raises `ValueError` for an unknown sandbox or a program without steps, `ToolchainMissing` when a step's executable can't start, and `KumaruError` when a setup step fails, Docker misbehaves, or (on Windows) a step's job object can't be created or joined. |
 | `Program` | `Program(files: dict[str, str], steps: tuple[Step, ...], marker: str, env: dict[str, str] = {}, keep_env: frozenset[str] = frozenset())` | Relative path → text; the steps; the marker the last step must print; variables set for every step; extra variables passed through from your environment. |
 | `Step` | `Step(argv: tuple[str, ...], timeout_s: float, stage: Stage = "run")` | One command, run in the program's folder. A relative `argv[0]` that names a file in the folder (`./program.exe`, which an earlier step built) is run from there. `stage` is `setup`, `compile` or `run`. |
 | `Outcome` | `Outcome(status, stage, returncode, stdout, stderr, elapsed_s, note="")`, `.passed` | How the program ended (table above). `returncode` is `None` after a timeout. Docker keeps 4 KB of each stream, not 64 KB. |
@@ -90,6 +92,7 @@ The job object also carries three limits:
 | `max_workers`, `set_max_workers` | `max_workers() -> int`, `set_max_workers(n: int) -> None` | Programs at once: `KUMARU_CODE_WORKERS`, else half the CPU cores, between 1 and 4. `set_max_workers` resizes the pool; call it before grading starts. |
 | `child_env` | `child_env(program: Program, workdir: Path) -> dict[str, str]` | The environment a local step sees. |
 | `memory_limit_mb` | `memory_limit_mb() -> int` | `KUMARU_CODE_MEMORY_MB`, else 4096. |
+| `fingerprint_limits` | `fingerprint_limits(sandbox: str) -> dict[str, int]` | What a run's fingerprint records of these limits: `{"memory_mb": n}` for a local run on Windows whose cap isn't the default (`0` = no cap), else `{}`. A cap can change a verdict, so a run at another cap is another run; runs at the default keep the fingerprints they were made with. Docker's cap is fixed (2 GB), and only Windows reads the variable. |
 | `docker_image` | `docker_image() -> str` | `KUMARU_SANDBOX_IMAGE`, else `kumaru-sandbox`. |
 | `check_docker` | `check_docker(image: str \| None = None) -> str` | The image's ID. Raises `ToolchainMissing`, with a hint that gives the `docker build` command, when Docker isn't installed (not in a `PATH` folder), isn't running or lacks the image. When the lookup by name fails, it first starts a container from the image (`/bin/true`, no network) and looks again: Docker Desktop's Resource Saver, which pauses the engine after 5 minutes without a container, answers lookups by name with `No such image` until a container starts. |
 | `docker_command` | `docker_command(docker: str, image: str, name: str, env: dict[str, str], script: str) -> list[str]` | The `docker run` argv, starting with `docker`, the docker program's absolute path from `find_program` (limits listed in [Run it in Docker](#run-it-in-docker)). |
@@ -129,7 +132,7 @@ A compiled language has a `compile` step first; see `build_program` in [`multipl
 | Variable | Default | Effect |
 |---|---|---|
 | `KUMARU_CODE_WORKERS` | half the CPU cores, 1 to 4 | Programs that run at once. Lower it when the CPU is shared (a model on the CPU, a game): a compiler under load can run out of time. |
-| `KUMARU_CODE_MEMORY_MB` | 4096 | Windows only: memory per step, all its processes together. `0` = no cap. |
+| `KUMARU_CODE_MEMORY_MB` | 4096 | Windows only: memory per step, all its processes together. `0` = no cap. Any other value than 4096 is part of the run's fingerprint, so a run resumes only at the cap it was started with. |
 | `KUMARU_SANDBOX_IMAGE` | `kumaru-sandbox` | The image `--sandbox docker` uses. |
 
 The time limits belong to each benchmark (HumanEval: 15 s; MultiPL-E: 120 s to compile, 15 s to run), not to this module.
@@ -168,7 +171,7 @@ The script unpacks the files from stdin, runs each step as `timeout -k 2 <limit>
 - **Another isolation** (a VM, a remote runner) would be a third value in `SANDBOXES` and a `_run_<name>` that returns the same `Outcome`s. Keep the pass rule (exit 0 and the marker) and the per-stage statuses.
 - **A setup step** (`stage="setup"`) prepares the folder, e.g. the Go cache copy in Docker. Its failure raises instead of failing the answer, because the answer never ran.
 
-Pinned behaviour: `tests\test_bench_codeexec.py` (the pass rule, stages, a timeout that kills a grandchild process, secrets withheld, the folder removed, the output tail, the memory and process caps, the worker limit, `find_program` passing over decoys in the current folder and in relative `PATH` entries, and the Docker command, script, record parsing and failure handling, and waking a paused Docker Desktop, with Docker faked).
+Pinned behaviour: `tests\test_bench_codeexec.py` (the pass rule, stages, a timeout that kills a grandchild process, secrets withheld, the folder removed, the output tail, the memory and process caps, a program not started when its job can't be made or joined, the memory cap in the fingerprint, the worker limit, `find_program` passing over decoys in the current folder and in relative `PATH` entries, and the Docker command, script, record parsing and failure handling, and waking a paused Docker Desktop, with Docker faked).
 
 ## Failure modes
 
@@ -178,6 +181,7 @@ Pinned behaviour: `tests\test_bench_codeexec.py` (the pass rule, stages, a timeo
 | `failed` with `exited with code 0 before the tests finished (an early exit?)` | The program exited with 0 before its last test, so the marker never printed. | Expected: the tests didn't run. Read the answer. |
 | `failed` with an out-of-memory error (`MemoryError`, `std::bad_alloc`, `OutOfMemoryError`, `memory allocation of N bytes failed`) | The program hit the memory cap: usually a runaway loop that keeps allocating. | Expected for such loops. If a compile step hits it, raise `KUMARU_CODE_MEMORY_MB`. |
 | `failed` with `[WinError 1816]` or `Not enough quota` | The program had 512 processes running at once (`MAX_PROCESSES`): a fork bomb. | Expected. |
+| `grader failed: KumaruError: Could not create the Windows job object …` (or `Could not start … inside its Windows job object`) | Windows refused a job object, or refused to put the program in it or resume it there, usually for lack of memory or handles. The program did not run. | Free memory and resume the run (`--out`): the question is asked again. If it persists, grade with `--sandbox docker`. |
 | A toolchain is "not on PATH", but `where node` finds it | `where` and `shutil.which` also search the current folder and relative `PATH` entries; Kumaru doesn't. | Put the toolchain's folder in `PATH` as an absolute path. |
 | `Could not start <path>: [WinError 2] ...` | A step's executable doesn't exist (removed, or a wrong path in a toolchain). | Reinstall the toolchain, or check `PATH`. |
 | `Sandbox setup step 'cp -R /opt/gocache /tmp/gocache' failed ...` | The image lacks what a setup step copies. | Rebuild the image from `docker/sandbox/Dockerfile`. |

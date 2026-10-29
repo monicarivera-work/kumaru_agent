@@ -233,6 +233,31 @@ async def test_a_grader_crash_is_recorded_against_the_question_not_raised(
     assert (summary.n_errors, summary.n_correct, summary.extraction) == (4, 0, {"error": 4})
 
 
+async def test_a_program_kumaru_cannot_contain_is_an_error_not_a_wrong_answer(
+    echo_config: KumaruConfig, scratch_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kumaru.eval.benchmarks import codeexec, humaneval
+
+    class NoJob:
+        def __init__(self) -> None:
+            raise OSError(1455, "The paging file is too small for this operation to complete")
+
+    def popen(*args, **kwargs):
+        raise AssertionError("started outside a job")
+
+    rows = [{"task_id": f"HumanEval/{n}", "entry_point": "add", "prompt": "def add(a, b):\n", "test": ""} for n in range(2)]
+    monkeypatch.setattr(humaneval, "load_hf_rows", lambda *args, **kwargs: rows)
+    monkeypatch.setattr(codeexec, "_WINDOWS", True)
+    monkeypatch.setattr(codeexec, "_Job", NoJob)
+    monkeypatch.setattr(codeexec.subprocess, "Popen", popen)
+    out, [summary] = await bench(echo_config, ["humaneval"], scratch_dir / "code", allow_code_exec=True)
+
+    errors = {r.error for r in records_of(out, "humaneval").values()}
+    assert len(errors) == 1
+    assert errors.pop().startswith("grader failed: KumaruError: Could not create the Windows job object")
+    assert (summary.n, summary.n_errors, summary.n_correct) == (2, 2, 0)  # retried on resume
+
+
 async def test_a_grader_failing_every_question_stops_the_run_and_says_so(
     echo_config: KumaruConfig, scratch_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

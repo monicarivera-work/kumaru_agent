@@ -141,6 +141,42 @@ def test_a_brace_that_ends_a_type_does_not_end_the_statement() -> None:
     assert [piece.head for piece in chunks(ts, "ts")] == ["function f(): { a: number } {\n  return { a: 1 };\n}"]
 
 
+def test_a_call_lookup_or_array_type_on_a_braces_line_continues_the_statement() -> None:
+    js = (
+        'const one = {value: 1}["value"];\n'
+        "const two = function () { return 2; }();\n"
+        "function f() {\n  return one + two;\n}\n"
+        "[1, 2].forEach((x) => f(x));\n"
+        "class A {}\n"
+        "(() => f())();\n"
+    )
+    assert [piece.text.strip() for piece in chunks(js, "js")] == [
+        'const one = {value: 1}["value"];',
+        "const two = function () { return 2; }();",
+        # On a later line, "[" or "(" starts a statement: an example call after a declaration.
+        "function f() {\n  return one + two;\n}",
+        "[1, 2].forEach((x) => f(x));",
+        "class A {}",
+        "(() => f())();",
+    ]
+    ts = (
+        "type Points = { x: number }[];\n"
+        'type X = { x: number }["x"];\n'
+        "let points: { x: number }[] = [];\n"
+        "const byName = new Map<string, { x: number }>();\n"
+        "function first(): { x: number }[] {\n  return points;\n}\n"
+        "[first()].map(String);\n"
+    )
+    assert [piece.text.strip() for piece in chunks(ts, "ts")] == [
+        "type Points = { x: number }[];",
+        'type X = { x: number }["x"];',
+        "let points: { x: number }[] = [];",
+        "const byName = new Map<string, { x: number }>();",
+        "function first(): { x: number }[] {\n  return points;\n}",
+        "[first()].map(String);",
+    ]
+
+
 def test_an_import_or_export_list_does_not_end_at_its_brace() -> None:
     code = "import { a, b as c } from './m';\nimport type { T } from './t'\nexport { a } from './m';\nconst x = 1;\n"
     heads = [piece.head for piece in chunks(code, "ts")]
@@ -203,7 +239,7 @@ PUMPS = (
     *string.punctuation,
     *("$@", '@"', '$"', "${", "`${", "/[", "\\/", "r#", 'r#"', "br#", "b'", 'R"(', 'u8R"'),
     *('"""', "'''", "/*", "//", "#["),
-    *("\n", "+\n", "add(", "long add(", "const add:", "a = add(1);\n"),
+    *("\n", "+\n", "add(", "long add(", "const add:", "a = add(1);\n", "{}[0]", "}  ("),
 )
 
 

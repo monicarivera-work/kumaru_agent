@@ -88,7 +88,7 @@ check(<entry_point>)
 |---|---|---|
 | Opt-in `--allow-code-exec` | Model code running without your decision. | Anything, once you have given it. |
 | A separate process: the base interpreter with `-I -X utf8`, stdin from `DEVNULL`, no console window | A crash or hang inside Kumaru. `PYTHON*` variables and user site-packages leaking in. | — |
-| 15 s wall-clock limit (`timeout_s`), then everything the program started is killed: a job object on Windows, a process group elsewhere | An endless loop. Processes the program started, by any means, outliving it: they die when the program ends, timed out or not. | On Linux and macOS, a process that starts its own session leaves the group and survives. |
+| 15 s wall-clock limit (`timeout_s`), then everything the program started is killed: a job object on Windows, a process group elsewhere | An endless loop. Processes the program started, by any means, outliving it: they die when the program ends, timed out or not. On Windows a program whose job object can't be made doesn't run: the question gets an error, not a verdict. | On Linux and macOS, a process that starts its own session leaves the group and survives. |
 | A fresh, empty working directory, `%TEMP%\kumaru-code-*`, deleted afterwards; `TEMP`, `TMP` and `TMPDIR` point into it | Relative paths and temporary files landing in your repo or your temp folder. | Absolute paths: `open(r"C:\Users\you\notes.txt", "w")` works. |
 | Environment reduced to `codeexec.ENV_BASE`: `PATH`, `PATHEXT`, `SYSTEMROOT`, `SYSTEMDRIVE`, `WINDIR`, `COMSPEC`, `HOME`, `USERPROFILE`, `LANG`, `LC_ALL`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`, `OS` | API keys and tokens held in environment variables (`HF_TOKEN`, `OPENAI_API_KEY`, ...). | Secrets in files: `~\.ssh`, `~\.cache\huggingface\token`, browser profiles, cloud CLI logins. |
 | A 4 GB memory cap (`KUMARU_CODE_MEMORY_MB`) and a 512-process cap (`codeexec.MAX_PROCESSES`) on Windows, for the program and everything it starts | A runaway allocation paging the machine to a standstill: allocations past the cap fail, and so does the answer. A fork bomb filling the machine: past 512 processes, starting another fails. | Linux and macOS have neither cap outside the sandbox. |
@@ -107,7 +107,7 @@ The known gap the module docstring used to name, a timeout that killed only the 
 | `HumanEval` | `HumanEval()` | The benchmark, registered lazily as `humaneval`. `name = "humaneval"`. `description = "Python function synthesis graded by hidden unit tests (pass@1)."` `source = "openai/openai_humaneval (164 problems) - Chen et al. 2021"`. Class attributes: `needs_code_execution = True`, `blocking_grader = True`, `timeout_s = 15.0` (no CLI flag), `sandbox = "none"`. |
 | `HumanEval.configure` | `configure(self, *, sandbox: str = "none") -> None` | Called by the runner with `--sandbox`. Raises `KumaruError` (`Unknown sandbox '...'`) for anything but `codeexec.SANDBOXES`. |
 | `HumanEval.preflight` | `preflight(self) -> None` | In the sandbox: `codeexec.check_docker()`, which raises `ToolchainMissing` without Docker or the image, and keeps the image's ID. Locally: nothing. |
-| `HumanEval.fingerprint_extra` | `fingerprint_extra(self) -> dict[str, Any]` | `{}` locally; `{"sandbox": "docker", "image": <image ID>}` in the sandbox. |
+| `HumanEval.fingerprint_extra` | `fingerprint_extra(self) -> dict[str, Any]` | Locally, `codeexec.fingerprint_limits("none")`: `{}` at the default memory cap, `{"memory_mb": n}` on Windows with another `KUMARU_CODE_MEMORY_MB` (`0` = no cap). `{"sandbox": "docker", "image": <image ID>}` in the sandbox. |
 | `HumanEval.load` | `load(self) -> list[BenchItem]` | All 164 problems, in dataset order. Needs `datasets` (the `bench` extra) and, the first time, the internet. |
 | `HumanEval.generation_overrides` | `generation_overrides(self) -> dict[str, Any]` | `{"presence_penalty": 0.0, "repetition_penalty": 1.0}`. |
 | `HumanEval.grade` | `grade(self, item: BenchItem, output: str) -> Grade` | Assembles the program, runs it and returns the verdict. Blocks for up to `timeout_s`, plus waiting for a free `codeexec` slot, clean-up, and in the sandbox starting a container. |
@@ -217,7 +217,7 @@ run_program(program, timeout_s=15)   # ('failed', '...AssertionError\n'): the re
 
 - **What a resumed run notices** (`-o <run dir>`):
   - Change `PROMPT` and every question is re-asked, because each record's `key` covers the messages sent.
-  - Change `generation_overrides`, the sandbox or the sandbox image and the resume is refused, because they are in the fingerprint.
+  - Change `generation_overrides`, the sandbox, the sandbox image or (on Windows) `KUMARU_CODE_MEMORY_MB` and the resume is refused, because they are in the fingerprint. The memory cap is left out at its default (4096), so runs made before it was added still resume.
   - Change `GUARD`, `timeout_s` or the pass rule in `run_program`, and the old verdicts are silently kept: the fingerprint covers settings, not code, and none of these is in the fingerprint or the key. After changing any of them, start a fresh run.
 - **A different time limit:** subclass `HumanEval`, set `timeout_s` and give the subclass a new `name` (it's a different measurement). Then register it ([`__init__.md`](__init__.md#add-a-benchmark-end-to-end)). There is no CLI flag.
 - **Another kind of isolation:** add it to `codeexec` ([`codeexec.md`](codeexec.md)) as a new sandbox, next to `none` and `docker`, so every code benchmark gets it. Keep the finish-marker check, or an early `sys.exit(0)` passes again.
@@ -228,6 +228,7 @@ Pinned behaviour:
 - `tests\test_bench_graders.py::TestHumanEval`: both reply shapes, the indentation fix, pass, fail with the traceback tail, timeout, a clean exit before the tests (`test_a_clean_exit_before_the_tests_is_not_a_pass`, for `sys.exit(0)`, `os._exit(0)` and `raise SystemExit`), the image's Python and the out-of-memory note in the sandbox (Docker faked), the guard blocking `os.remove`, environment secrets withheld, and the `Grade` fields.
 - `tests\test_bench_codeexec.py`: what `codeexec` guarantees for every code benchmark ([`codeexec.md`](codeexec.md)).
 - `tests\test_bench_runner.py::test_code_execution_benchmarks_need_explicit_consent`.
+- `tests\test_bench_runner.py::test_a_program_kumaru_cannot_contain_is_an_error_not_a_wrong_answer`: with job objects failing, each question gets `grader failed: KumaruError: Could not create the Windows job object …`, none a verdict.
 - `tests\test_cli.py::test_errors_become_a_message_a_hint_and_exit_code_1`.
 
 `scripts\check_graders.py humaneval` also runs every reference solution through `HumanEval.grade` in three shapes (whole function, body only, unindented body), and checks a wrong solution, a hang and the guard; add `--sandbox docker` to check the sandbox. The "Are the graders right?" section of [`docs\BENCHMARKS.md`](../../../../../BENCHMARKS.md) reports the result.

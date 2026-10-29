@@ -12,7 +12,8 @@ small ideas get far enough:
    longer pass for the end of a function, and every offset into the masked
    text is also an offset into the original.
 2. `chunks` cuts the masked text at the top level: a piece ends at ";", at the
-   "}" that closes its block, or (in JavaScript, TypeScript and Go, which
+   "}" that closes its block unless what follows continues the statement
+   (`} else {`, `{ a: 1 }["a"]`), or (in JavaScript, TypeScript and Go, which
    insert semicolons at line ends) at a line break that ends a complete
    statement. The comments before a piece belong to it.
 
@@ -54,10 +55,16 @@ _NOT_A_TYPE = frozenset({
     "not", "and", "or", "is", "as", "do", "default",
 })  # fmt: skip
 # Tokens that, right after a top-level "}", continue the same statement. In Go
-# and TypeScript a "}" can end a type: `func f() interface{} {`, `var x struct{} = ...`.
+# and TypeScript a "}" can end a type: `func f() interface{} {`, `var x struct{} = ...`,
+# `Map<string, { a: number }>`.
 _AFTER_BRACE = {
-    "js": ",.?:=", "ts": ",.?:=|&{", "java": ",.=", "cs": ",.=", "cpp": ",.=", "go": ",.={", "rs": ",.=",
+    "js": ",.?:=", "ts": ",.?:=|&{>", "java": ",.=", "cs": ",.=", "cpp": ",.=", "go": ",.={", "rs": ",.=",
 }
+# JavaScript/TypeScript: a "(" or "[" on the "}"'s own line continues it too: a
+# call or a lookup (`{ a: 1 }["a"]`), or an array or indexed-access type
+# (`{ x: number }[]`). On a later line it starts a statement of its own, as an
+# example call after a function does when the model leaves out the ";".
+_JS_SAME_LINE_AFTER_BRACE = "(["
 _AFTER_BRACE_WORDS = frozenset({"else", "catch", "finally", "while", "as", "satisfies"})
 # And in JavaScript/TypeScript: `import { a } from "m"`, `export { a } from "m"`.
 _JS_AFTER_BRACE_WORDS = _AFTER_BRACE_WORDS | {"from"}
@@ -458,7 +465,8 @@ def chunks(
     masked = mask(text, lang) if masked is None else masked
     end = len(text) if end is None else end
     asi = lang in ("js", "ts", "go")
-    after_words = _JS_AFTER_BRACE_WORDS if lang in ("js", "ts") else _AFTER_BRACE_WORDS
+    js = lang in ("js", "ts")
+    after_words = _JS_AFTER_BRACE_WORDS if js else _AFTER_BRACE_WORDS
     out: list[Chunk] = []
     begin, started, depth, i = start, False, 0, start
     last = -1  # the current piece's last non-space character so far
@@ -512,7 +520,12 @@ def chunks(
                     emit(j + 1)
                     i = j + 1
                     continue
-                if j < end and (masked[j] in _AFTER_BRACE[lang] or _word_at(masked, j) in after_words):
+                if j < end and (
+                    masked[j] in _AFTER_BRACE[lang]
+                    or _word_at(masked, j) in after_words
+                    # (the whitespace after each "}" is read once more: linear still)
+                    or (js and masked[j] in _JS_SAME_LINE_AFTER_BRACE and "\n" not in masked[i + 1 : j])
+                ):
                     i += 1
                     continue
                 emit(i + 1)

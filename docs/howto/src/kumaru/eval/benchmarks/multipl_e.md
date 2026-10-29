@@ -49,7 +49,7 @@ Chat models answer with more than the function: imports, helpers, a `main`, exam
 | C# | the type that defines the function becomes `class Problem` (a static class stays static), and references to its old name follow; other types go before it; `using`s; loose methods and fields go into `Problem`; namespaces are unwrapped | the model's `Main`; top-level statements; `#` directives | the tests' `Main` first checks that `Debug` is on (exit 97 if not), turns a failed `Debug.Assert` into "Assertion failed." and exit 1, and an unhandled exception into exit 1; then the marker |
 | Java | the type that defines the function becomes `class Problem`; other types go before it, without `public`; imports, less those the prompt already has | the `package` line; the model's `main` | the tests' `main` first checks that `-ea` took effect (exit 97 with `KUMARU_NO_ASSERT` if not); the marker goes straight to `FileDescriptor.out` |
 | C++ | everything; the prompt's `#include`s go first | the model's `main` | a prelude makes an abort exit with 134 (no crash dialog); after the model's code, `assert` is redefined, so the model's `#define NDEBUG` can't switch the tests' asserts off; the marker is printed before the tests' last `}` |
-| Go | the code; the model's imports while the code or tests still use them (Go refuses an unused import); `fmt` is always imported | `package` lines; `Test…`, `Benchmark…`, `Fuzz…` and `Example…` functions | one `_test` package; the marker is printed before the tests' last `}` |
+| Go | the code; the model's imports while the code or tests still use them (Go refuses an unused import). An import binds a name to a package, so an answer's `f "fmt"` is kept beside the tests' `"fmt"`; only the same name for the same package, or a second `_` import of one, is a duplicate. `fmt` is imported unless a name `fmt` already is | `package` lines; `Test…`, `Benchmark…`, `Fuzz…` and `Example…` functions | one `_test` package; the marker is printed before the tests' last `}` |
 | Rust | the model's items and `use`s; `#![…]` attributes first; the prompt's `use`s unless the model's own bind the same names | `fn main`, `mod tests`, and items marked `#[cfg(test)]` or `#[test]` | the tests' `main`; the marker is written before its last `}` |
 
 MultiPL-E's C++, Java, C# and Rust tests begin with the `}` that closes the prompt's open function; a whole answer closes its own, so that brace is dropped.
@@ -135,7 +135,7 @@ As with HumanEval, presence and repetition penalties are turned off (`generation
 | `note` | E.g. `exited with code 0 before the tests finished (an early exit?)`. |
 | `stderr` | For a failure: the last 800 characters of the step's error output, or of its standard output when that is empty (`dotnet` and `tsc` report compile errors on standard output). |
 
-**What makes a run reproducible.** Besides the usual settings, the results fingerprint holds each language's `sandbox` and toolchain version (`node v24.17.0`, `.NET SDK 10.0.301`, `go version go1.27.3 windows/amd64`, `docker image 1a2b3c4d5e6f`…), for TypeScript whether types were checked (`checker`: `tsc` or `strip`), and for C# the test fix (`test_fixes`: `nuprl/MultiPL-E#71`). Resuming a run with another compiler is refused, because the scores could differ, and so is resuming C# results graded on the tests as published. The datasets are pinned to fixed revisions.
+**What makes a run reproducible.** Besides the usual settings, the results fingerprint holds each language's `sandbox` and toolchain version (`node v24.17.0`, `.NET SDK 10.0.301`, `go version go1.27.3 windows/amd64`, `docker image 1a2b3c4d5e6f`…), for TypeScript whether types were checked (`checker`: `tsc` or `strip`), for C# the test fix (`test_fixes`: `nuprl/MultiPL-E#71`), and, for a local run on Windows, a memory cap other than the default 4096 MB (`memory_mb`, from `KUMARU_CODE_MEMORY_MB`; runs at the default record nothing, so their fingerprints are unchanged). Resuming a run with another compiler is refused, because the scores could differ, and so is resuming C# results graded on the tests as published. The datasets are pinned to fixed revisions.
 
 ## Public API
 
@@ -147,7 +147,7 @@ As with HumanEval, presence and repetition penalties are turned off (`generation
 | `MultiPLE.configure` | `configure(*, sandbox: str = "none") -> None` | Choose `none` or `docker`; forgets the toolchain found for the other. An unknown sandbox raises `KumaruError`. |
 | `MultiPLE.toolchain` | property → `Toolchain` | Found on first use (`detect_toolchain`). Raises `ToolchainMissing` with an install hint. |
 | `MultiPLE.preflight` | `preflight() -> None` | Finds the toolchain and grades the language's canary: a fenced whole answer must pass and a wrong continuation must fail, else `ToolchainMissing` ("... failed Kumaru's self-test: ..."). |
-| `MultiPLE.fingerprint_extra` | `fingerprint_extra() -> dict` | `{"sandbox", "toolchain"}`, plus `"checker"` for TypeScript and `"test_fixes"` for C#. |
+| `MultiPLE.fingerprint_extra` | `fingerprint_extra() -> dict` | `{"sandbox", "toolchain"}`, plus `"checker"` for TypeScript, `"test_fixes"` for C#, and `"memory_mb"` when `codeexec.fingerprint_limits` gives one. |
 | `MultiPLE.load` | `load() -> list[BenchItem]` | The 152 problems, their tests fixed by `fix_tests`; `meta` = `prompt`, `tests`, `entry_point`, `language`, `problem` (HumanEval's number). Raises if the dataset doesn't give exactly 152, or if the fixes don't change exactly the problems in `TEST_FIXES`. |
 | `MultiPLE.grade` | `grade(item, output) -> Grade` | Steps 1 to 4 above. Blocks for up to 135 s (compile plus run). |
 | `LANGUAGES` | `dict[str, Language]` | `Language(key, name, fence, aliases)`: `name` is shown to the model, `fence` is the prompt's code-fence tag, `aliases` are the fence tags that count as this language. |
@@ -252,7 +252,7 @@ If a new language lacks a problem the others have, `load` fails with `Expected 1
 
 **MBPP.** MultiPL-E also translates MBPP (`mbpp-<lang>` configs). A second suite could reuse the assemblers and toolchains.
 
-Pinned behaviour: `tests\test_bench_multipl_e.py`: answer reading, entry points, each assembler, the problem set, the C# test fix (the exact rewrite, the problems it changes, and a real .NET run), the suite, the sandbox, the agreement sampling (graded on the tests as published), and the time a long, repetitive reply takes to grade (`test_a_degenerate_reply_is_graded_in_moments`). Eleven tests compile and run real programs; they need `KUMARU_TEST_TOOLCHAINS=1` and skip a language whose toolchain is missing.
+Pinned behaviour: `tests\test_bench_multipl_e.py`: answer reading, entry points, each assembler (including a JavaScript or TypeScript declaration that goes on after its `}`, `test_a_declaration_keeps_the_lookup_call_or_array_type_after_its_brace`, and a Go answer's own name for a package the tests import too, `test_go_keeps_an_answers_own_name_for_a_package_the_tests_import_too`), the problem set, the C# test fix (the exact rewrite, the problems it changes, and a real .NET run), the suite, the sandbox, the agreement sampling (graded on the tests as published), and the time a long, repetitive reply takes to grade (`test_a_degenerate_reply_is_graded_in_moments`). Twelve tests compile and run real programs; they need `KUMARU_TEST_TOOLCHAINS=1` and skip a language whose toolchain is missing.
 
 ## Failure modes
 
@@ -271,7 +271,7 @@ Pinned behaviour: `tests\test_bench_multipl_e.py`: answer reading, entry points,
 | `Could not find the function a <language> prompt asks for.` | A prompt in an unexpected shape. | A dataset problem; report the item. |
 | `timeout` at the `compile` stage | A shared CPU: compilers are slowed by a model running on the CPU, a game, or too many programs at once. | Lower `KUMARU_CODE_WORKERS` ([`codeexec.md`](codeexec.md)). |
 | Grading one answer takes seconds or more, the CPU busy in Kumaru rather than in a compiler | Reading or assembling went quadratic on a long, repetitive reply. | Profile `grade` on the item's `output` (`python -m cProfile`). Fix the scan ([`codeparse.md`](codeparse.md)) or regex, and add the reply to `test_a_degenerate_reply_is_graded_in_moments`. |
-| `The results folder was made with other settings` when resuming | A compiler was updated, TypeScript gained or lost `tsc`, the sandbox changed, or C# results were graded before its tests were fixed: each is part of the fingerprint. | Start a new run (`--out` elsewhere). |
+| `<run>\<bench> holds results from different settings (…)` when resuming | A compiler was updated, TypeScript gained or lost `tsc`, the sandbox changed, C# results were graded before its tests were fixed, or (local runs on Windows) `KUMARU_CODE_MEMORY_MB` changed: each is part of the fingerprint. | Start a new run (`--out` elsewhere), or set the variable back. |
 
 ## Related files
 

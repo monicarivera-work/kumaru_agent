@@ -344,7 +344,7 @@ kumaru bench run multipl_e -c qwen36 --no-think --allow-code-exec
 
 - **Resuming.**
   - A rerun with the same `--out` reuses the finished answers.
-  - A run whose fingerprint differs (model, decoding parameters, seed, prompt mode, sandbox or compiler version) is refused before anything is written.
+  - A run whose fingerprint differs (model, decoding parameters, seed, prompt mode, sandbox, compiler version or memory cap) is refused before anything is written.
   - On Ctrl+C the runner prints `Stopped. Finished answers are saved; resume with --out <dir>`.
 - **`humaneval` and `multipl_e*`** refuse to run without `--allow-code-exec`. Read `docs\howto\src\kumaru\eval\benchmarks\multipl_e.md` for the toolchains each language needs.
 
@@ -440,7 +440,7 @@ def serve(
 | `error: Training config not found: <path>`. | A wrong path. | Start from a file in `configs\train\`. |
 | `error: 'humaneval' grades answers by running model-written code on this machine.` (or `'multipl_e' ...`) | Benchmarks that execute code are opt-in. | Add `--allow-code-exec` after reading the safeguards in `docs\BENCHMARKS.md`, or drop the benchmark. |
 | `not run: multipl_e_go: Go needs the go command, which is not on PATH. ...` after a suite run | That language's compiler or runtime is missing, so the suite skipped it instead of scoring it 0. | Install it and resume with `-o <run dir>`, or ignore it. |
-| `error: <dir> holds results from different settings (model, decoding parameters, seed or prompt mode).` | `--out` points at a run made with other settings, and resuming would mix them. | Omit `--out`, or choose a new directory. |
+| `error: <dir> holds results from different settings (model, decoding parameters, seed, prompt mode, sandbox, compiler version or memory cap).` | `--out` points at a run made with other settings, and resuming would mix them. | Omit `--out`, or choose a new directory. |
 | A bench run is not in `runs\bench\<label>`. | The default folder is `runs\bench\<YYYYMMDD-HHMMSS>-<label>`. | Use the `results:` or `saved to` path that the run prints. |
 | `error: No benchmark results in <dir>`. | `bench report` was pointed at a folder that `bench run` didn't create. | Point it at a run folder under `runs\bench\`. |
 | `error: <dir> holds answers to gsm8k, an evaluation set: training on them would inflate the score it measures.` | `distill build` was given a run of a test split or a golden set. | Run the teacher on `gsm8k_train` and pass that run. See `docs\howto\src\kumaru\train\distill.md`. |

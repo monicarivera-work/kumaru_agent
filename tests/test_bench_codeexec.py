@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from kumaru.core.errors import KumaruError
-from kumaru.eval.benchmarks import codeexec
+from kumaru.eval.benchmarks import codeexec, multipl_e
 from kumaru.eval.benchmarks.codeexec import (
     EARLY_EXIT_NOTE,
     TAIL_BYTES,
@@ -28,6 +28,7 @@ from kumaru.eval.benchmarks.codeexec import (
     Step,
     ToolchainMissing,
 )
+from kumaru.eval.benchmarks.humaneval import HumanEval
 
 PYTHON = getattr(sys, "_base_executable", None) or sys.executable
 
@@ -157,6 +158,68 @@ def test_a_program_cannot_run_more_processes_at_once_than_the_cap(monkeypatch: p
     assert outcome.passed, outcome.stderr
     # The program itself and two children; the third is ERROR_NOT_ENOUGH_QUOTA.
     assert "refused after 2 1816" in outcome.stdout
+
+
+def test_a_program_kumaru_cannot_put_in_a_job_is_not_started(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Outside a job nothing caps its memory, and what it starts can outlive it
+    # with its pipes open. Grading stops with an error instead, which the
+    # runner records against the question (and retries) rather than as wrong.
+    class NoJob:
+        def __init__(self) -> None:
+            raise OSError(1455, "The paging file is too small for this operation to complete")
+
+    def popen(*args, **kwargs):
+        raise AssertionError("started outside a job")
+
+    monkeypatch.setattr(codeexec, "_WINDOWS", True)
+    monkeypatch.setattr(codeexec, "_Job", NoJob)
+    monkeypatch.setattr(codeexec.subprocess, "Popen", popen)
+    with pytest.raises(KumaruError, match="Could not create the Windows job object") as caught:
+        codeexec.run(python("pass"))
+    assert "--sandbox docker" in str(caught.value.hint)
+
+    # A process that cannot join its job is killed while still suspended.
+    class Suspended:
+        stdout = stderr = None
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 1
+
+    class Unjoinable:
+        def adopt(self, proc: object) -> None:
+            raise OSError(5, "Access is denied")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(codeexec, "_Job", Unjoinable)
+    monkeypatch.setattr(codeexec.subprocess, "Popen", lambda *args, **kwargs: Suspended())
+    with pytest.raises(KumaruError, match=r"Could not start .* inside its Windows job object: \[Errno 5\]"):
+        codeexec.run(python("pass"))
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected"),
+    [(None, {}), ("4096", {}), ("8192", {"memory_mb": 8192}), ("0", {"memory_mb": 0})],
+)
+def test_a_local_runs_fingerprint_records_a_memory_cap_other_than_the_default(
+    monkeypatch: pytest.MonkeyPatch, setting: str | None, expected: dict[str, int]
+) -> None:
+    # The cap can change a verdict, so a run at another cap (or none: 0) is
+    # another run. At the default, runs keep the fingerprints they were made with.
+    monkeypatch.setattr(codeexec, "_WINDOWS", True)
+    if setting is None:
+        monkeypatch.delenv("KUMARU_CODE_MEMORY_MB", raising=False)
+    else:
+        monkeypatch.setenv("KUMARU_CODE_MEMORY_MB", setting)
+    assert HumanEval().fingerprint_extra() == expected
+    rust = multipl_e.MultiPLERust()
+    rust._toolchain = multipl_e.Toolchain({"rustc": "rustc"}, "rustc 1.0")
+    assert rust.fingerprint_extra() == {"sandbox": "none", "toolchain": "rustc 1.0", **expected}
+    # Docker caps memory itself (--memory 2g), and only Windows reads the setting.
+    assert codeexec.fingerprint_limits("docker") == {}
+    monkeypatch.setattr(codeexec, "_WINDOWS", False)
+    assert HumanEval().fingerprint_extra() == {}
 
 
 def test_a_compiler_that_is_not_installed_is_a_missing_toolchain() -> None:

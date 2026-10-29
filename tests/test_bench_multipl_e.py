@@ -354,6 +354,31 @@ def test_typescript_drops_type_only_imports_and_keeps_type_declarations() -> Non
         assert kept in program
 
 
+@pytest.mark.parametrize(
+    ("lang", "declaration"),
+    [
+        ("js", 'const one = {value: 1}["value"];'),
+        ("js", "const one = function () { return 1; }();"),
+        ("ts", 'const one: number = {value: 1}["value"];'),
+        ("ts", "type Points = { x: number; y: number }[];"),
+        ("ts", 'type X = { x: number }["x"];'),
+    ],
+)
+def test_a_declaration_keeps_the_lookup_call_or_array_type_after_its_brace(lang: str, declaration: str) -> None:
+    # Cut at its "}", the rest became a statement of its own and was dropped:
+    # `one` was the object, `Points` a single point.
+    canary = CANARIES[lang]
+    signature = "(x: number, y: number): number" if lang == "ts" else "(x, y)"
+    source = (
+        f"{declaration}\n"
+        f"function add{signature} {{\n  return x + y;\n}}\n"
+        "[add(2, 3)].forEach((n) => console.log(n));\n"
+    )
+    program = assemble(lang, canary.prompt, source, canary.tests, MARK, "add")
+    assert declaration in program
+    assert "console.log" not in program  # the example on the line after the function still goes
+
+
 def test_go_keeps_only_the_imports_that_the_code_and_tests_still_use() -> None:
     go = CANARIES["go"]
     source = (
@@ -370,6 +395,28 @@ def test_go_keeps_only_the_imports_that_the_code_and_tests_still_use() -> None:
     assert program.count("func TestAdd(") == 1
     assert program.count("func main()") == 1  # an ordinary function outside package main
     assert program.endswith(f'\tfmt.Print("\\n{MARK}\\n")\n}}\n')
+
+
+def test_go_keeps_an_answers_own_name_for_a_package_the_tests_import_too() -> None:
+    # An import binds a name: the answer's `f "fmt"` is not the tests' "fmt",
+    # and Go takes both. Only the same name for the same package is dropped.
+    go = CANARIES["go"]
+    source = (
+        'package main\n\nimport (\n\tf "fmt"\n\tfmt "fmt"\n\t_ "fmt"\n\t. "strings"\n)\n\n'
+        'func add(x int, y int) int {\n\treturn len(f.Sprint(Repeat("a", x))) + y\n}\n'
+    )
+    program = assemble("go", go.prompt, source, go.tests, MARK, "add")
+    assert program.startswith('package add_test\n\nimport (\n\t"testing"\n\t"fmt"\n\tf "fmt"\n\t. "strings"\n)\n\n')
+
+
+def test_go_compiles_an_answer_that_names_fmt_its_own_way() -> None:
+    bench = installed("go")
+    reply = (
+        '```go\npackage main\n\nimport f "fmt"\n\n'
+        "func add(x int, y int) int {\n\tvar n int\n\tf.Sscan(f.Sprint(x+y), &n)\n\treturn n\n}\n```\n"
+    )
+    grade = bench.grade(canary_item("go"), reply)
+    assert grade.correct, grade.detail
 
 
 def test_rust_keeps_the_models_items_and_drops_its_main_and_its_tests() -> None:

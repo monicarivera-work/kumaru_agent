@@ -13,7 +13,7 @@ Two functions do the work; the rest are helpers built on them.
 1. **`mask(text, lang)`** returns the text with every comment turned into spaces and every string or character literal turned into `0`s, character for character. A `}` inside a string or a comment can no longer pass for the end of a function, and every offset in the masked text is also an offset in the original, so code finds positions in the masked text and cuts the original. Comments keep their line breaks (lines still end where they did); literals lose theirs, so a multi-line string still reads as one complete expression.
 2. **`chunks(text, lang)`** cuts the text into top-level pieces (`Chunk`s). A piece ends:
    - at a `;` outside any bracket;
-   - at the `}` that closes its top-level block, unless what follows continues the statement: `;` (taken into the piece), a token such as `,` `.` `=` (and `{` `|` `&` `?` `:` where the language allows), or a word such as `else`, `catch`, `finally`, `while`, `as`, `satisfies`, and in JavaScript and TypeScript `from` (`import { a } from "m"`);
+   - at the `}` that closes its top-level block, unless what follows continues the statement: `;` (taken into the piece), a token such as `,` `.` `=` (and `{` `|` `&` `?` `:` `>` where the language allows), in JavaScript and TypeScript a `(` or `[` on the `}`'s own line (a call or a lookup, `{ a: 1 }["a"]`, or an array or indexed-access type, `{ x: number }[]`), or a word such as `else`, `catch`, `finally`, `while`, `as`, `satisfies`, and in JavaScript and TypeScript `from` (`import { a } from "m"`). A `(` or `[` on a later line starts a piece of its own, as an example call does after a function whose model left out the `;`;
    - in JavaScript, TypeScript and Go, which insert semicolons at line ends, at a line break after a complete expression (one ending in a word, a literal, `)`, `]`, `}`, `++` or `--`), unless (JavaScript, TypeScript) the next line starts with an operator or a continuing word such as `else` or `extends`;
    - a C++ or C# preprocessor line (`#include`, `#if`, following `\` continuations) and a Rust inner attribute (`#![...]`) are pieces of their own, and so is a stray closing bracket.
 
@@ -120,12 +120,14 @@ See [`multipl_e.md`](multipl_e.md).
 
 - **A new literal form** (a language adds a string syntax): handle it in `_Scanner._literal`, return the index just past the literal, and add a case to `test_mask_blanks_comments_and_zeroes_literals_at_the_same_offsets` in `tests\test_bench_codeparse.py`.
 - **Keep it linear.** A probe that can fail must not be retried from each following character: remember what it read, as `_cs_fail` and `_dead` do. Recursion must be bounded, as holes are by `_MAX_NESTING`. Add each new prefix to `PUMPS` in `tests\test_bench_codeparse.py`, which times a long run of it in every language.
-- **A token that continues a statement after `}`**: add it to `_AFTER_BRACE` for the language, or to `_AFTER_BRACE_WORDS`.
+- **A token that continues a statement after `}`**: add it to `_AFTER_BRACE` for the language, or to `_AFTER_BRACE_WORDS`. One that continues it only on the `}`'s own line (JavaScript, TypeScript) goes in `_JS_SAME_LINE_AFTER_BRACE`.
 - **A new language**: add it to `LANGUAGES`, then to the language checks in `_Scanner` (`_literal`, comments) and `chunks` (statement ends), and to `defines`. Then test `mask` and `chunks` on what models write in it: imports, generics, lambdas, nested types, attributes.
 - **Bugs show up as compile errors.** When a MultiPL-E answer fails to compile, run `scripts\check_graders.py multipl_e_<lang>`: a disagreement on an answer MultiPL-E passed often means a piece was cut in the wrong place. Three such bugs are pinned as tests:
   - `import { a } from "m"` was cut at its `}`, which is why `from` now continues a statement;
   - `void` was taken for a keyword, so `void main(` was missed and a model's own `main` was kept beside the tests' `main`;
   - a function body that names a local variable after its function (`let intersection = …` in `intersection`) was taken for a whole answer, so the program never defined the function, and `tsc` reported `TS2349` (`… has no call signatures`) at the tests' calls. A binding now counts only at the top level. This one was found in the Docker sandbox, which type-checks TypeScript; 52 completions that MultiPL-E passed (19 JavaScript, 33 TypeScript) had failed this way.
+
+  A code review found a fourth: a declaration whose `}` is followed on the same line by a call, a lookup or an array type (`const one = {value: 1}["value"];`, `type Points = { x: number }[];`) was cut at that `}`, and the rest dropped as an example statement. No MultiPL-E completion and no stored Qwen3.6 answer has that shape, so no verdict changed; `test_a_call_lookup_or_array_type_on_a_braces_line_continues_the_statement` pins it.
 
 Pinned behaviour: `tests\test_bench_codeparse.py`.
 
@@ -143,4 +145,4 @@ Pinned behaviour: `tests\test_bench_codeparse.py`.
 
 - `src\kumaru\eval\benchmarks\multipl_e.py`: the only caller ([`multipl_e.md`](multipl_e.md)).
 - `scripts\check_graders.py`: replays MultiPL-E's graded completions, which exercises this module ([`check_graders.py.md`](../../../../scripts/check_graders.py.md)).
-- `tests\test_bench_codeparse.py`: pinned behaviour, including `test_a_repeated_piece_is_read_in_linear_time`, `test_a_long_run_of_a_binding_without_a_value_is_read_in_linear_time` and `test_interpolations_nested_past_the_limit_run_to_the_end_of_the_text`.
+- `tests\test_bench_codeparse.py`: pinned behaviour, including `test_a_repeated_piece_is_read_in_linear_time`, `test_a_long_run_of_a_binding_without_a_value_is_read_in_linear_time`, `test_interpolations_nested_past_the_limit_run_to_the_end_of_the_text` and `test_a_call_lookup_or_array_type_on_a_braces_line_continues_the_statement`.

@@ -681,8 +681,8 @@ class BenchRunner:
         previous = read_summary(summary_path) if summary_path.exists() else None
         if previous is not None and previous.fingerprint != fingerprint:
             raise ConfigError(
-                f"{bench_dir} holds results from different settings "
-                "(model, decoding parameters, seed, prompt mode, sandbox or compiler version).",
+                f"{bench_dir} holds results from different settings (model, decoding "
+                "parameters, seed, prompt mode, sandbox, compiler version or memory cap).",
                 hint="Omit --out (or choose a new directory) to start a fresh run.",
             )
         return _Job(bench, items, params, fingerprint, previous)

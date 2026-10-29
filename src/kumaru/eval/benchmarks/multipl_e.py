@@ -486,13 +486,17 @@ def _assemble_go(prompt: str, source: str, tests: str, marker: str) -> str:
 
     Go refuses to compile an unused import, and a model's imports often served
     only the `main` it wrote, so its imports are kept only while still used.
+    An import is a binding, a name for a path: the code's `f "fmt"` is kept
+    beside the tests' `"fmt"`, as Go allows.
     """
     package = re.search(r"(?m)^\s*package\s+(\w+)", mask(prompt, "go"))
-    imports: dict[str, str] = {}
+    # (name bound, path) -> the alias as written; the name is "_" or "." for
+    # blank and dot imports.
+    imports: dict[tuple[str, str], str] = {}
     for chunk in chunks(prompt, "go"):
         if re.match(r"import\b", chunk.head):
             for alias, path in _go_imports(chunk.text):
-                imports.setdefault(path, alias)
+                imports.setdefault((alias or _go_name(path), path), alias)
     kept: list[str] = []
     wanted: list[tuple[str, str]] = []
     for chunk in chunks(source, "go"):
@@ -510,10 +514,11 @@ def _assemble_go(prompt: str, source: str, tests: str, marker: str) -> str:
     # by one; past the first few (only a degenerate reply has more), they
     # count as unused.
     odd: dict[str, bool] = {}
+    paths = {path for _, path in imports}
     for alias, path in wanted:
-        if path in imports:
-            continue
         name = alias or _go_name(path)
+        if (name, path) in imports or (alias == "_" and path in paths):
+            continue
         if re.fullmatch(r"\w+", name):
             is_used = name in qualifiers
         else:
@@ -521,9 +526,11 @@ def _assemble_go(prompt: str, source: str, tests: str, marker: str) -> str:
                 odd[name] = re.search(rf"(?<![\w.]){re.escape(name)}\s*\.", used) is not None
             is_used = odd.get(name, False)
         if alias in ("_", ".") or is_used:
-            imports[path] = alias
-    imports.setdefault("fmt", "")
-    specs = "".join(f'\t{alias + " " if alias else ""}"{path}"\n' for path, alias in imports.items())
+            imports[name, path] = alias
+            paths.add(path)
+    if not any(name == "fmt" for name, _ in imports):  # the tests and the marker print with it
+        imports["fmt", "fmt"] = ""
+    specs = "".join(f'\t{alias + " " if alias else ""}"{path}"\n' for (_, path), alias in imports.items())
     tests = _before_last_brace(tests, "go", f'\tfmt.Print("\\n{marker}\\n")\n')
     name = package.group(1) if package else "main_test"
     return f"package {name}\n\nimport (\n{specs})\n\n{code}\n\n{tests.strip(chr(10))}\n"
@@ -1379,12 +1386,13 @@ class MultiPLE(Benchmark):
                 )
 
     def fingerprint_extra(self) -> dict[str, Any]:
-        extra = {"sandbox": self.sandbox, "toolchain": self.toolchain.version}
+        extra: dict[str, Any] = {"sandbox": self.sandbox, "toolchain": self.toolchain.version}
         if self.toolchain.checker:
             extra["checker"] = self.toolchain.checker
         if self.lang in TEST_FIXES:
             # Results graded on the tests as published are not resumed with fixed ones.
             extra["test_fixes"] = TEST_FIXES[self.lang][0]
+        extra.update(codeexec.fingerprint_limits(self.sandbox))
         return extra
 
     def generation_overrides(self) -> dict[str, Any]:

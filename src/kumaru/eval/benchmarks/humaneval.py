@@ -131,9 +131,10 @@ class HumanEval(Benchmark):
             self._image = codeexec.check_docker()
 
     def fingerprint_extra(self) -> dict[str, Any]:
-        # Nothing for local runs, so runs made before the sandbox option still resume.
+        # Nothing for local runs at the default limits, so runs made before the
+        # sandbox option still resume.
         if self.sandbox == "none":
-            return {}
+            return codeexec.fingerprint_limits(self.sandbox)
         return {"sandbox": self.sandbox, "image": self._image}
 
     def load(self) -> list[BenchItem]:

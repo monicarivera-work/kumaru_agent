@@ -11,8 +11,9 @@ protections:
 - a time limit per step. When a step ends or times out, everything it started
   is killed, not just its own process. On Windows each step runs in a job
   object, which also caps memory (`KUMARU_CODE_MEMORY_MB`, default 4096) and
-  running processes (512, as in Docker) and turns crash dialogs off. On Linux
-  and macOS each step gets its own process group;
+  running processes (512, as in Docker) and turns crash dialogs off; a step
+  whose job cannot be made is not started (an error, not a wrong answer). On
+  Linux and macOS each step gets its own process group;
 - bounded output: only the last 64 KB of each stream is kept;
 - a random marker the program prints after its last test, so code that exits
   early with status 0 cannot pass untested.
@@ -341,6 +342,16 @@ def memory_limit_mb() -> int:
     return int(raw) if raw.isdigit() else DEFAULT_MEMORY_MB
 
 
+def fingerprint_limits(sandbox: str) -> dict[str, int]:
+    """The limits a run's fingerprint records, as they change verdicts: the
+    memory cap where it applies (local runs on Windows; 0 is none), unless it
+    is the default, so runs at the default keep the fingerprints they had."""
+    if sandbox != "none" or not _WINDOWS:
+        return {}
+    limit = memory_limit_mb()
+    return {} if limit == DEFAULT_MEMORY_MB else {"memory_mb": limit}
+
+
 class _Job:
     def __init__(self) -> None:
         k32 = _kernel32()
@@ -463,10 +474,16 @@ def _run_step(
     out, err = _Tail(marker), _Tail()
     job = None
     if _WINDOWS:
+        # Without a job nothing caps the program's memory, and processes it
+        # starts can outlive it (holding its pipes open): it does not run.
         try:
             job = _Job()
-        except OSError:
-            job = None  # fall back to taskkill /T below
+        except OSError as exc:
+            raise KumaruError(
+                f"Could not create the Windows job object that contains {argv[0]!r}: {exc}",
+                hint="Kumaru runs no model-written program it cannot contain. If this keeps "
+                "happening, grade in Docker instead (--sandbox docker).",
+            ) from exc
     flags = (_CREATE_NO_WINDOW | (_CREATE_SUSPENDED if job else 0)) if _WINDOWS else 0
     start = time.monotonic()
     try:
@@ -488,10 +505,9 @@ def _run_step(
         if job:
             try:
                 job.adopt(proc)
-            except OSError:
-                proc.wait()
-                job.close()
-                raise
+            except OSError as exc:
+                proc.wait()  # adopt killed it, still suspended
+                raise KumaruError(f"Could not start {argv[0]!r} inside its Windows job object: {exc}") from exc
         pumps = [
             threading.Thread(target=_pump, args=(proc.stdout, out), daemon=True),
             threading.Thread(target=_pump, args=(proc.stderr, err), daemon=True),
@@ -518,17 +534,8 @@ def _run_step(
 
 
 def _kill_tree(proc: subprocess.Popen[bytes], job: _Job | None) -> None:
-    if job:
+    if job:  # always, on Windows
         job.terminate()
-    elif _WINDOWS:
-        if proc.poll() is None:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                capture_output=True,
-                creationflags=_CREATE_NO_WINDOW,
-                check=False,
-            )
-            proc.kill()
     else:
         with suppress(ProcessLookupError, PermissionError):  # the group may be gone already
             os.killpg(proc.pid, signal.SIGKILL)
