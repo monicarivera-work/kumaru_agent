@@ -1,6 +1,6 @@
 # `src\kumaru\agent\commands.py`
 
-> `run_command`: how the agent builds, tests and installs in the project folder. Every command is shown to you first, has no shell, and is stopped at its time limit with every program it started.
+> `run_command`: how the agent builds, tests and installs in the project folder. Every command is shown to you first, has no shell, and is stopped at its time limit with the programs it started.
 
 **Read this when:** the agent should run `npm test`, `dotnet build` or `python -m pytest`, a command is refused, you want to allow another program, or a command's output looks cut.
 
@@ -11,8 +11,8 @@ This file defines `RunCommandTool`, the `run_command` tool that `kumaru chat --w
 
 1. checks the list, and finds the program: an allowed name on a cleaned-up PATH, or an allowed program file inside the project folder;
 2. shows you the exact command line, the folder it runs in, the full path of the program, and its time limit, and waits for `Allow this? [y/N]`;
-3. on yes, runs it without a shell, with a reduced environment and no input, inside the project folder;
-4. at exit, timeout or cancel, ends the program **and everything it started**;
+3. on yes, checks the folder and the program again, then runs it without a shell, with a reduced environment and no input, inside the project folder;
+4. at exit, timeout or cancel, ends the program **and everything it started**, even programs that detached themselves (except on macOS and BSD);
 5. returns the exit code and the output (stdout and stderr together), cut to `max_output_chars`.
 
 ## Why it exists
@@ -22,7 +22,7 @@ Running programs is also the riskiest thing an agent can do, so the tool is shap
 - **No shell.** Nothing a model writes, and nothing it read in a file, can add `&& del ...` to an approved command.
 - **Allowed programs only**, found where a file the agent wrote cannot pose as one.
 - **No secrets** from your environment.
-- **Nothing left running** after the time limit.
+- **Nothing left running** after the time limit (on macOS and BSD, except programs that detach themselves).
 
 ## Mental model
 - **Prepare, then apply.** As with the file tools, calling the tool does nothing. `prepare()` validates and resolves everything; the summary you approve is exactly what `apply` runs.
@@ -35,6 +35,7 @@ Running programs is also the riskiest thing an agent can do, so the tool is shap
 
   On Windows only `.com`, `.exe`, `.bat` and `.cmd` files count, and cmd.exe is told not to search the current folder first (`NoDefaultCurrentDirectoryInExePath`).
 - **Programs in the folder, by path.** `[".venv/Scripts/python.exe", "-m", "pytest"]` works if the file's name is allowed. The path goes through `Workspace.resolve`, so the same confinement applies: no links, no `..`.
+- **Checked again at the start.** You may take a while to answer, and the folder can change meanwhile. Just before the start, the folder and the program are resolved again. If either is now a link or junction, is gone, or resolves to another file, nothing runs: `Not run: the folder or the program changed after you approved the command: ...`. A link put in their place while you read the prompt is refused, not followed.
 - **Batch files are special.** `npm` and `npx` are `npm.cmd` and `npx.cmd` on Windows, and Windows runs `.cmd` files through cmd.exe, which re-reads their arguments. So for a `.bat` or `.cmd` program, arguments containing `" % ! ^ & | < > ( )` or line breaks are refused, as are command lines over 8,000 characters. On Windows the `program:` line of the approval prompt ends with `(batch script, runs in cmd.exe)` for them, since a batch file in the project folder, such as `tools/python.cmd`, also matches its allowed name.
 - **One command, one line.** The approval prompt shows the command on its `$` line (`display_command`). Every line break inside an argument is shown as its escape there: `\n`, `\r`, `\u2028` and the other characters `str.splitlines()` breaks at (`_LINE_BREAKS`). When there are any, a `note:` line says so, for example `note:    \n in the command is a line break inside an argument`. So an argument cannot draw lines of its own, such as a fake `program:` line, or push the real ones off the screen with thousands of blank lines.
 - **A reduced environment.** Programs get only:
@@ -46,11 +47,14 @@ Running programs is also the riskiest thing an agent can do, so the tool is shap
 
   Nothing else from your environment is passed, so API keys and tokens stay out. Kumaru adds `PYTHONIOENCODING=utf-8`, `PYTHONUNBUFFERED=1` and `NO_COLOR=1`.
 - **No input, no window.** stdin is empty, so an interactive prompt gets end-of-file. On Windows the program gets no console window.
-- **Everything stops.** Each run has a limit: `command_timeout_s` (300 s), or less if the model passes `timeout_s` (a number of seconds, at least 1; `NaN` and `Infinity` are refused). After the program exits, times out, or the chat is cancelled, everything it started is ended:
-  - on Windows by closing a Job Object (with `taskkill /T` as the fallback);
-  - elsewhere by killing its process group.
+- **Everything stops.** Each run has a limit: `command_timeout_s` (300 s), or less if the model passes `timeout_s` (a number of seconds, at least 1; `NaN` and `Infinity` are refused). After the program exits, times out, or the chat is cancelled, everything it started is ended, including programs that left its process group or session, as a daemon, `setsid` or a detached Node child does:
+  - **Windows:** the program starts suspended, is put in a Job Object, and only then runs, so nothing it starts is outside the job. Closing the job ends every process in it.
+  - **Linux:** its process group is killed. Kumaru also registers as a "child subreaper" (`prctl(PR_SET_CHILD_SUBREAPER)`), so a process whose parent exits becomes Kumaru's child instead of init's, wherever it moved. Afterwards Kumaru kills every child process it did not have before the command, until none is left.
+  - **macOS and BSD:** only its process group is killed, so a program that detaches itself keeps running. The approval prompt and the report say so: `stops after 300s, with the programs it starts (but not ones that detach themselves)`.
 
-  So a dev server or a file watcher runs only until the limit, and a command cannot leave a background process behind. The same holds when Kumaru exits mid-command:
+  If Windows cannot create the job or put the program in it, or Linux refuses the registration or has no `/proc` to find the processes in, the command is not run, and a `Not run: ...` error says why.
+
+  So a dev server or a file watcher runs only until the limit, and a command cannot leave a background process behind (on macOS and BSD, unless it detaches itself). The same holds when Kumaru exits mid-command:
   - on Windows the Job Object ends the programs however Kumaru ends;
   - on Linux and macOS, `kumaru chat` turns a closed terminal (SIGHUP) or a `kill` (SIGTERM) into an orderly exit that stops the command first.
 - **Output is bounded and untrusted.** stdout and stderr are merged.
@@ -63,7 +67,7 @@ Running programs is also the riskiest thing an agent can do, so the tool is shap
 | Name | Signature | What it's for |
 |---|---|---|
 | `RunCommandTool` | `RunCommandTool(workspace: Workspace)` | The `run_command` tool. `read_only = False` and `needs_workspace = True`, so `ToolBelt` offers it only with an approver. Its description and schema are built per instance, naming the allowed programs and the time limit. |
-| `RunCommandTool.prepare` | `async prepare(**kwargs) -> Action` | Arguments: `command` (a list, required), `cwd` (a folder in the project, default `"."`) and `timeout_s` (a finite number, at least 1; at most the configured limit is used). Validates them, resolves the program and folder, and returns the `Action`. Raises `ToolError` for every refusal. |
+| `RunCommandTool.prepare` | `async prepare(**kwargs) -> Action` | Arguments: `command` (a list, required), `cwd` (a folder in the project, default `"."`) and `timeout_s` (a finite number, at least 1; at most the configured limit is used). Validates them, resolves the program and folder, and returns the `Action`. Raises `ToolError` for every refusal. The `Action` resolves the folder and the program again just before the start, and refuses if either changed. |
 | `RunCommandTool.run` | `async run(**kwargs) -> str` | Refuses: the tool acts only through `prepare()` and approval. |
 | `RunCommandTool.timeout_s` | `int` | `command_timeout_s + 30`: the outer safety net for `Tool.safe_apply`. The process itself stops at the inner limit. |
 | `build_env` | `build_env(root: Path) -> dict[str, str]` | The reduced environment, with the cleaned-up PATH. |
@@ -101,6 +105,8 @@ Allow this? [y/N]
 ```
 
 Check that `program:` points where you expect. A path inside the project folder means the agent is running a file in the project.
+
+On macOS and BSD the last line reads `stops after 300s, with the programs it starts (but not ones that detach themselves)`, because there Kumaru can stop only the command's process group.
 
 ### Use it directly (no model needed)
 
@@ -161,7 +167,7 @@ On Linux and macOS a venv's `bin/python` is a symlink, which the folder rules re
   - `build_env` for the environment;
   - `which` with `build_env(...)["PATH"]` to find the program;
   - `display_command` for the summary;
-  - `_run` to run with the time limit and the process-tree cleanup.
+  - `_run` to run with the time limit and the process-tree cleanup, with a `check` that validates the folder and the program again just before the start, as `prepare` does.
 
   Show the resolved program and folder in the `Action` summary, never pass `shell=True`, and keep the output under `max_output_chars`.
 
@@ -173,6 +179,10 @@ On Linux and macOS a venv's `bin/python` is a symlink, which the folder rules re
 | `ERROR: 'python' is allowed, but it was not found on PATH. Is it installed?` | Not installed, or found only in places removed from the PATH (the project folder, Kumaru's venv, relative entries). | Install it system-wide, or run the project's own copy by path. |
 | `error: ... 'bash' is a shell or launcher, which could run any command` when Kumaru starts | A shell in `allowed_commands`. | Remove it; ask the agent for the program the script would run instead. |
 | `Command timed out after 300s and was stopped, with every program it started.` | A long build, or something that never exits (a dev server, `--watch`, a prompt waiting for input). | Raise `command_timeout_s` (up to 3600) for long builds. Start servers and watchers yourself in another terminal. |
+| `ERROR: Not run: the folder or the program changed after you approved the command: ...` | Between the prompt and your answer, the folder or the program was replaced by a link or junction, removed, or now resolves to another file. Something else is changing the project folder. | Find out what changed it. Nothing was run; the model can ask again. |
+| `ERROR: Not run: Windows could not create a job object (...)`, or `... could not be started inside a job object (...)` | Rare: Windows refused the Job Object, for example in a sandbox. Without it, programs the command starts could outlive it. Nothing was run. | Run Kumaru outside that sandbox, or run the command yourself. |
+| `ERROR: Not run: Kumaru could not set itself up to stop the programs this command starts (prctl: Operation not permitted), ...` (Linux) | A seccomp profile, as some containers have, blocks `prctl`, or `/proc` is not mounted. Without them Kumaru could not find programs that detach themselves. Nothing was run. | Allow `prctl` or mount `/proc`, or run the command yourself. |
+| `stops after 300s, with the programs it starts (but not ones that detach themselves)` in the approval prompt (macOS, BSD) | There Kumaru can stop only the command's process group. | Expected. Stop daemons and servers that detach themselves yourself. |
 | `... is run by cmd.exe, which would treat '&' in the argument ...` | An argument to `npm`/`npx` or another `.cmd` program holds a character cmd.exe would act on. | Expected. The model rephrases it, or you run that command yourself. |
 | `program: ...\tools\python.cmd  (batch script, runs in cmd.exe)` in the approval prompt | The program is a batch file. `npm` and `npx` always are on Windows; a batch file in the project folder matches its allowed name too. | Check that it is the program you expect before you answer `y`. |
 | `note:    \n in the command is a line break inside an argument` in the approval prompt | An argument holds a line break, such as a multi-line `python -c` script. It is shown as `\n` on the `$` line. | Expected. Read each `\n` there as a line break. |
@@ -189,7 +199,8 @@ On Linux and macOS a venv's `bin/python` is a symlink, which the folder rules re
 - **Code the agent wrote earlier.** `npm test` runs whatever the agent put in `package.json` and the test files. Approving the run approves that code.
 - **Programs in the folder.** An allowed name inside the project folder (a `node.cmd` the agent wrote) can be run by path. The summary shows the full path, so you can see it is a project file, and on Windows labels a batch file `(batch script, runs in cmd.exe)`.
 - **Every launcher.** The refused-shell list is best-effort. A program you allow that starts others (a task runner, a test runner, `npm run`) runs whatever it is given.
-- **A small race on Windows.** A program is put in its Job Object just after it starts. A child started in that instant could escape the job. The `taskkill` fallback covers only the case where no job exists.
+- **Programs a service starts for it.** A command can ask a process that is already running to start a program: Task Scheduler, WMI, systemd (`systemd-run`), launchd or Docker. That program belongs to the service, not to the command, so it keeps running. `schtasks` and `wmic` are refused by name, but any allowed program can call the same services.
+- **Programs that detach themselves on macOS and BSD.** There only the command's process group is stopped. The approval prompt says so.
 - **`kill -9` on Linux and macOS.** It ends Kumaru with no cleanup, so a running command carries on until it ends by itself. It runs in its own session, out of reach of the terminal. On Windows the Job Object still ends it.
 
 ## Related files
@@ -198,4 +209,4 @@ On Linux and macOS a venv's `bin/python` is a symlink, which the folder rules re
 - `src\kumaru\backends\llamacpp_server.py` — `_WindowsJob`, the Job Object helper reused here.
 - `src\kumaru\core\config.py` — `WorkspaceConfig`, `program_name` and the list of refused shells.
 - `src\kumaru\cli.py` — the approval prompt.
-- `tests\test_commands.py` — argv validation, the allowlist and shell refusals, PATH cleaning, batch-file arguments and their label, line breaks kept off the approval prompt, the environment, time limits that end grandchildren, commands stopped when the turn is cancelled or Kumaru exits, and output capping.
+- `tests\test_commands.py` — argv validation, the allowlist and shell refusals, PATH cleaning, batch-file arguments and their label, line breaks kept off the approval prompt, the environment, a folder or program swapped for a link while you decide, time limits that end grandchildren, programs that detach themselves, commands refused when what they start could not be stopped, commands stopped when the turn is cancelled or Kumaru exits, and output capping.

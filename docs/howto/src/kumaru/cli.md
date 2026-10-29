@@ -236,7 +236,7 @@ you ›
   - `asyncio.run` installs its own SIGINT handler, which cancels the chat task.
   - The cancellation reaches Typer as a `KeyboardInterrupt`, and Typer turns it into a silent `Exit(130)`.
   - Use `/exit` for a clean 0.
-- **On Linux and macOS, closing the terminal or a `kill` exits 129 or 143** with no message, after the same cleanup as Ctrl+C. A running command, and everything it started, is stopped first. `kill -9` cannot be caught: it leaves a running command to finish on its own.
+- **On Linux and macOS, closing the terminal or a `kill` exits 129 or 143** with no message, after the same cleanup as Ctrl+C. A running command is stopped first, with everything it started (on macOS, except programs that detached themselves). `kill -9` cannot be caught: it leaves a running command to finish on its own.
 - **A `KumaruError` during a turn ends the whole session** with `error:`/`hint:` and exit 1. For example, `agent.memory_policy: none` refuses a history over the budget. The loop has no per-turn recovery, and the history is not saved.
 
 ### Let it work in a project folder: `kumaru chat --workspace`

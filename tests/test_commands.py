@@ -3,12 +3,18 @@
 `run_command` is the one tool that executes code, so these tests pin down what
 the approval prompt shows, which programs can start (and which never can), the
 environment they get, and that a time limit or a cancelled turn ends the
-program together with every program it started.
+program together with every program it started, even one that detached itself.
+Nothing runs if that cannot be arranged, or if the folder or the program
+changed after approval.
 """
 
 import asyncio
+import ctypes
+import errno
 import os
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -36,6 +42,12 @@ from kumaru.core.errors import ToolError
 
 windows_only = pytest.mark.skipif(os.name != "nt", reason="Windows behaviour")
 posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX behaviour")
+# Where programs that detach themselves stop with the command too: Windows (a
+# job object) and Linux (Kumaru adopts them); elsewhere only its process group.
+stops_detached = pytest.mark.skipif(
+    sys.platform != "win32" and not sys.platform.startswith("linux"),
+    reason="only the command's process group is stopped here",
+)
 
 # Commands never see Kumaru's own virtual environment on PATH (so `pip install`
 # in a project cannot change Kumaru), so tests put the base interpreter first.
@@ -48,6 +60,50 @@ HEARTBEAT = (
     "    with open('beat.txt', 'a') as f:\n"
     "        f.write('.')\n"
     "    time.sleep(0.05)\n"
+)
+# The same, but it also ends once stop.txt exists, so that `stop_strays` can end
+# any that a failing test leaves running.
+STOPPABLE = (
+    "import os, time\n"
+    "for _ in range(400):\n"
+    "    if os.path.exists('stop.txt'):\n"
+    "        break\n"
+    "    with open('beat.txt', 'a') as f:\n"
+    "        f.write('.')\n"
+    "    time.sleep(0.05)\n"
+)
+_QUIET = "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL"
+# Ways a program detaches from the command, as a daemon, `setsid` or a detached
+# Node child does: it leaves the command's process group and session.
+DETACH = {
+    # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP on Windows; a new session elsewhere.
+    "session": (
+        "import subprocess, sys\n"
+        f"subprocess.Popen([sys.executable, '-c', {STOPPABLE!r}], {_QUIET}, "
+        + ("creationflags=0x8 | 0x200)\n" if os.name == "nt" else "start_new_session=True)\n")
+    ),
+    # The classic daemon: fork, setsid, fork again, and the middle process exits.
+    "double fork": (
+        "import os, sys\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    os.setsid()\n"
+        "    if os.fork() == 0:\n"
+        "        null = os.open(os.devnull, os.O_RDWR)\n"
+        "        for fd in (0, 1, 2):\n"
+        "            os.dup2(null, fd)\n"
+        f"        os.execv(sys.executable, [sys.executable, '-c', {STOPPABLE!r}])\n"
+        "    os._exit(0)\n"
+        "os.waitpid(pid, 0)\n"
+    ),
+}
+WAIT_FOR_BEAT = (
+    "import os, time\n"
+    "for _ in range(500):\n"
+    "    if os.path.exists('beat.txt'):\n"
+    "        break\n"
+    "    time.sleep(0.02)\n"
+    "print('started', flush=True)\n"
 )
 
 
@@ -79,6 +135,34 @@ def assert_stopped(beat: Path) -> None:
     assert size > 0
     time.sleep(0.6)
     assert beat.stat().st_size == size
+
+
+def stop_strays(folder: Path) -> None:
+    """End any STOPPABLE heartbeat running in `folder`, such as one a failing test left behind."""
+    (folder / "stop.txt").write_text("stop", encoding="utf-8")
+    time.sleep(0.3)
+
+
+def link_folder(target: Path, link: Path) -> None:
+    """A junction on Windows, a symbolic link elsewhere: both can lead out of the project."""
+    if os.name == "nt":
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
+def fake_python(folder: Path, word: str) -> str:
+    """A script with an allowed name that writes `word` to marker.txt; returns its file name."""
+    folder.mkdir(parents=True)
+    if os.name == "nt":
+        (folder / "python.cmd").write_bytes(f"@echo {word}> marker.txt\r\n".encode())
+        return "python.cmd"
+    script = folder / "python"
+    script.write_text(f"#!/bin/sh\necho {word} > marker.txt\n", encoding="utf-8")
+    script.chmod(0o755)
+    return "python"
 
 
 # -- what may run ----------------------------------------------------------------------
@@ -239,6 +323,34 @@ async def test_a_program_in_the_folder_must_be_executable(root: Path) -> None:
         await make_tool(root).prepare(command=["tools/node"])
 
 
+CHANGED = r"^Not run: the folder or the program changed after you approved the command: "
+
+
+async def test_a_folder_swapped_for_a_link_while_you_decide_is_refused(
+    root: Path, scratch_dir: Path, python_on_path: None
+) -> None:
+    (root / "app").mkdir()
+    outside = scratch_dir / "outside"
+    outside.mkdir()
+    action = await make_tool(root).prepare(command=["python", "-c", "open('ran.txt', 'w').close()"], cwd="app")
+    (root / "app").rmdir()  # while the approval prompt waits
+    link_folder(outside, root / "app")
+    with pytest.raises(ToolError, match=CHANGED + r"'app' is a link or junction\."):
+        await action.apply()
+    assert not (outside / "ran.txt").exists()
+
+
+async def test_a_program_swapped_for_a_link_while_you_decide_is_refused(root: Path, scratch_dir: Path) -> None:
+    name = fake_python(root / "tools", "inside")
+    fake_python(scratch_dir / "elsewhere", "outside")
+    action = await make_tool(root).prepare(command=[f"tools/{name}"])
+    shutil.rmtree(root / "tools")  # while the approval prompt waits
+    link_folder(scratch_dir / "elsewhere", root / "tools")
+    with pytest.raises(ToolError, match=CHANGED + r"'tools' is a link or junction\."):
+        await action.apply()
+    assert not (root / "marker.txt").exists()
+
+
 @pytest.mark.parametrize(
     ("value", "limit"),
     [(None, 300), (5, 5), ("5", 5), (2.7, 2), (10**6, 300), (10**400, 300)],
@@ -248,7 +360,7 @@ async def test_the_model_can_shorten_the_time_limit_but_not_lengthen_it(
     root: Path, python_on_path: None, value: object, limit: int
 ) -> None:
     action = await make_tool(root).prepare(command=["python", "-V"], timeout_s=value)
-    assert action.summary.splitlines()[-1] == f"stops after {limit}s, with every program it starts"
+    assert action.summary.splitlines()[-1] == f"stops after {limit}s, {commands._stopped_with()}"
 
 
 async def test_the_approval_prompt_shows_the_command_the_folder_and_the_program(
@@ -265,7 +377,7 @@ async def test_the_approval_prompt_shows_the_command_the_folder_and_the_program(
         "$ " + display_command(argv),
         f"folder:  src  ({tool.workspace.root / 'src'})",
         f"program: {program}",
-        "stops after 20s, with every program it starts",
+        f"stops after 20s, {commands._stopped_with()}",
     ]
 
 
@@ -391,7 +503,7 @@ async def test_a_timeout_stops_the_program_and_every_program_it_started(
         "time.sleep(30)\n"
     )
     lines = (await run(root, ["python", "-c", parent], timeout_s=2)).splitlines()
-    assert lines[0] == "Command timed out after 2s and was stopped, with every program it started."
+    assert lines[0] == f"Command timed out after 2s and was stopped, {commands._stopped_with(past=True)}."
     assert lines[-1] == "started"
     assert_stopped(root / "beat.txt")
 
@@ -475,11 +587,142 @@ def test_the_runner_reports_a_program_that_cannot_start(root: Path) -> None:
 def test_the_report_cuts_a_very_long_command_short() -> None:
     text = commands._report(commands._Outcome("cancelled", None, 0.2, ""), "x" * 400, "src", 9)
     assert text.splitlines() == [
-        "Command was cancelled and stopped, with every program it started.",
+        f"Command was cancelled and stopped, {commands._stopped_with(past=True)}.",
         "$ " + "x" * 300 + " …",
         "(in: src)",
         "(no output)",
     ]
+
+
+# -- containment: whatever a command starts stops with it ---------------------------------
+
+
+@stops_detached
+@pytest.mark.parametrize(
+    ("way", "timeout_s"),
+    [
+        pytest.param("session", None, id="new-session-then-exits"),
+        pytest.param("session", 5, id="new-session-then-times-out"),
+        pytest.param("double fork", None, id="double-fork-then-exits", marks=posix_only),
+    ],
+)
+async def test_programs_that_detach_themselves_still_stop_with_the_command(
+    root: Path, python_on_path: None, way: str, timeout_s: int | None
+) -> None:
+    code = DETACH[way] + WAIT_FOR_BEAT + ("import time; time.sleep(30)\n" if timeout_s else "")
+    try:
+        lines = (await run(root, ["python", "-c", code], timeout_s=timeout_s)).splitlines()
+        if timeout_s:
+            assert lines[0] == "Command timed out after 5s and was stopped, with every program it started."
+        else:
+            assert lines[0].startswith("Command finished with exit code 0 in ")
+        assert lines[-1] == "started"
+        assert_stopped(root / "beat.txt")
+    finally:
+        stop_strays(root)
+
+
+async def test_programs_kumaru_started_before_a_command_keep_running(root: Path, python_on_path: None) -> None:
+    # Stopping what a command left behind must not reach Kumaru's own programs, such as llama-server.
+    other = subprocess.Popen([getattr(sys, "_base_executable", sys.executable), "-c", "import time; time.sleep(60)"])
+    try:
+        await run(root, ["python", "-c", DETACH["session"] + WAIT_FOR_BEAT])
+        assert other.poll() is None
+    finally:
+        other.kill()
+        other.wait()
+        stop_strays(root)
+
+
+@windows_only
+@pytest.mark.parametrize("failure", ["create", "assign", "resume"])
+async def test_a_command_that_cannot_be_contained_is_not_run(
+    root: Path, python_on_path: None, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from kumaru.backends import llamacpp_server
+
+    class BrokenJob(llamacpp_server._WindowsJob):
+        def __init__(self) -> None:
+            if failure == "create":
+                raise OSError(errno.EACCES, "Access is denied")
+            super().__init__()
+
+        def assign(self, proc: subprocess.Popen) -> None:
+            if failure == "assign":
+                raise OSError(errno.EACCES, "Access is denied")
+            super().assign(proc)
+
+    def no_resume(pid: int) -> None:
+        raise OSError(f"no thread of process {pid} could be resumed")
+
+    monkeypatch.setattr(llamacpp_server, "_WindowsJob", BrokenJob)
+    if failure == "resume":
+        monkeypatch.setattr(commands, "_resume", no_resume, raising=False)
+    # A launcher that starts a detached program and exits at once: without a job,
+    # nothing that ends the launcher's process tree afterwards would reach it.
+    try:
+        with pytest.raises(ToolError, match=r"^Not run: .*job object"):
+            await run(root, ["python", "-c", DETACH["session"]])
+        time.sleep(0.5)
+        assert not (root / "beat.txt").exists()
+    finally:
+        stop_strays(root)
+
+
+async def test_a_command_is_not_run_where_what_it_starts_could_not_be_stopped(
+    root: Path, python_on_path: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Linux without PR_SET_CHILD_SUBREAPER, e.g. under a seccomp filter.
+    class NoSubreaper:
+        def __init__(self, name: object, use_errno: bool = False) -> None:
+            pass
+
+        def prctl(self, *args: object) -> int:
+            ctypes.set_errno(errno.EPERM)
+            return -1
+
+    monkeypatch.setattr(ctypes, "CDLL", NoSubreaper)
+    monkeypatch.setattr(commands, "_ADOPTS", True)
+    monkeypatch.setattr(commands, "_adopted", False)
+    with pytest.raises(ToolError) as refused:
+        await run(root, ["python", "-c", "open('ran.txt', 'w').close()"])
+    assert str(refused.value) == (
+        "Not run: Kumaru could not set itself up to stop the programs this command starts "
+        "(prctl: Operation not permitted), so ones that detach themselves could outlive it."
+    )
+    assert not (root / "ran.txt").exists()
+    assert commands._adopted is False
+
+
+@pytest.mark.parametrize(
+    ("stops_detached", "starts", "started"),
+    [
+        (True, "with every program it starts", "with every program it started"),
+        (
+            False,
+            "with the programs it starts (but not ones that detach themselves)",
+            "with the programs it started (but not ones that detached themselves)",
+        ),
+    ],
+    ids=["windows-and-linux", "elsewhere"],
+)
+async def test_the_prompt_and_the_report_say_which_programs_stop_with_the_command(
+    root: Path,
+    python_on_path: None,
+    monkeypatch: pytest.MonkeyPatch,
+    stops_detached: bool,
+    starts: str,
+    started: str,
+) -> None:
+    monkeypatch.setattr(commands, "_STOPS_DETACHED", stops_detached)
+    tool = make_tool(root)
+    assert f"Each run stops after 300s (sooner with timeout_s), {starts}, so a dev server " in tool.description
+    action = await tool.prepare(command=["python", "-V"], timeout_s=5)
+    assert action.summary.splitlines()[-1] == f"stops after 5s, {starts}"
+    timeout = commands._report(commands._Outcome("timeout", None, 5.0, ""), "python -V", ".", 5)
+    cancelled = commands._report(commands._Outcome("cancelled", None, 0.2, ""), "python -V", ".", 5)
+    assert timeout.splitlines()[0] == f"Command timed out after 5s and was stopped, {started}."
+    assert cancelled.splitlines()[0] == f"Command was cancelled and stopped, {started}."
 
 
 # -- output ----------------------------------------------------------------------------

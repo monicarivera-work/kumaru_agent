@@ -143,7 +143,7 @@ agent:
   workspace:
     root: null                # project folder; kumaru chat --workspace DIR sets it
     allowed_commands: [python, node, npm, npx, dotnet]  # bare names; shells are refused
-    command_timeout_s: 300    # per command, including every program it starts
+    command_timeout_s: 300    # seconds per command (1-3600); the model may ask for less
     max_output_chars: 16000   # tool output the model reads, per call
     max_file_bytes: 262144    # largest file it reads or writes (256 KB)
     max_list_entries: 500     # entries per list_files call

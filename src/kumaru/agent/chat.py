@@ -270,8 +270,15 @@ class ChatAgent:
                     usage = _add_usage(usage, round_usage)
                 content = "".join(text)
 
-                # Calls cut off by the token limit are incomplete: never run them.
-                if not calls or finish == "length":
+                # A reply cut off by the token limit, or that failed or was cancelled
+                # upstream, did not finish: its calls may be incomplete. Never run them.
+                if not calls or finish in _UNFINISHED:
+                    if calls:
+                        logger.warning(
+                            "the reply ended with finish reason %r: its %d tool call(s) were not run",
+                            finish,
+                            len(calls),
+                        )
                     record(Message.assistant(content))
                     yield StreamChunk(finish_reason=finish or "stop", usage=usage)
                     break
@@ -380,6 +387,8 @@ _NOT_RUN = (
     "NOT RUN: this request already used its {rounds} (agent.max_tool_iterations), "
     "so nothing was done. The user can reply 'continue' to allow more."
 )
+# How a reply ends when it did not finish: its tool calls are never run.
+_UNFINISHED: frozenset[FinishReason] = frozenset({"length", "error", "cancelled"})
 # Each change asks you first, so a reply with hundreds of calls would mean
 # hundreds of prompts; the calls past this many get _TOO_MANY instead.
 _MAX_CALLS_PER_REPLY = 16

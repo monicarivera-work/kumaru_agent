@@ -273,10 +273,13 @@ def test_parse_arguments_reads_one_json_object(raw: str, expected: dict) -> None
 
 UNREADABLE = "could not be read: a number in them is too long, or they nest too deeply. Nothing was run."
 HUGE_NUMBER = '{"path": ' + "9" * 5000 + "}"  # past Python's 4300-digit limit: ValueError
+# Past the JSON reader's nesting limit everywhere (CPython 3.12 allows 3,000 levels
+# on Windows and 10,000 on Linux), so json.loads raises RecursionError.
+TOO_DEEP = "[" * 20_000
 
 
 @pytest.mark.parametrize(
-    "raw", [HUGE_NUMBER, "[" * 3000, json.dumps("[" * 3000)], ids=["long-number", "deep", "deep-encoded-twice"]
+    "raw", [HUGE_NUMBER, TOO_DEEP, json.dumps(TOO_DEEP)], ids=["long-number", "deep", "deep-encoded-twice"]
 )
 def test_arguments_python_cannot_read_become_an_error_not_a_crash(raw: str) -> None:
     # json.loads raises ValueError or RecursionError here, not JSONDecodeError.
@@ -286,8 +289,10 @@ def test_arguments_python_cannot_read_become_an_error_not_a_crash(raw: str) -> N
 
 
 async def test_a_turn_with_unreadable_arguments_still_ends_with_an_answer(scratch_dir: Path) -> None:
-    script = f"/tool read_file {HUGE_NUMBER}\n/tool list_files {'[' * 3000}"
-    _, transcript = await run_turn(make_agent(make_config(scratch_dir), FakeApprover()), script)
+    config = make_config(scratch_dir, max_history_tokens=32_768)
+    config.backend.max_context_length = 65_536  # room for the deep arguments, sent twice
+    script = f"/tool read_file {HUGE_NUMBER}\n/tool list_files {TOO_DEEP}"
+    _, transcript = await run_turn(make_agent(config, FakeApprover()), script)
     assert [m.role for m in transcript] == [A, T, A, T, A]
     assert all(UNREADABLE in m.content for m in transcript if m.role == T)
 
@@ -517,11 +522,13 @@ class NoToolsBackend(ScriptedBackend):
     supports_tools = False
 
 
-async def test_calls_cut_off_by_the_token_limit_are_never_run() -> None:
-    backend = ScriptedBackend([[StreamChunk(tool_calls=[call("c1")], finish_reason="length")]])
+@pytest.mark.parametrize("reason", ["length", "error", "cancelled"])
+async def test_calls_in_a_reply_that_did_not_finish_are_never_run(reason: str) -> None:
+    # Cut off by the token limit, or failed or cancelled upstream: the calls may be incomplete.
+    backend = ScriptedBackend([[StreamChunk(tool_calls=[call("c1")], finish_reason=reason)]])
     chunks, transcript = await run_turn(ChatAgent(backend, make_config(tools=["current_time"])), "time?")
     assert transcript == [Message.assistant("")]
-    assert finishes(chunks) == ["length"]
+    assert finishes(chunks) == [reason]
     assert len(backend.requests) == 1
 
 
@@ -650,17 +657,19 @@ async def test_streamed_calls_are_reassembled_beside_the_text_and_usage() -> Non
 
 
 @pytest.mark.parametrize(
-    ("upstream", "with_call", "expected"),
+    ("upstream", "with_call", "expected", "kept"),
     [
-        ("stop", True, "tool_calls"),  # some servers say "stop" even after a call
-        (None, True, "tool_calls"),
-        ("function_call", True, "tool_calls"),
-        ("length", True, "length"),  # cut off: the call may be incomplete
-        ("stop", False, "stop"),
+        ("stop", True, "tool_calls", True),  # some servers say "stop" even after a call
+        (None, True, "tool_calls", True),
+        ("function_call", True, "tool_calls", True),
+        ("length", True, "length", True),  # cut off: the call may be incomplete, so it never runs
+        ("error", True, "error", False),  # failed or cancelled mid-reply: the calls are dropped
+        ("cancelled", True, "cancelled", False),
+        ("stop", False, "stop", False),
     ],
 )
-async def test_a_turn_with_calls_finishes_with_tool_calls_unless_it_was_cut_off(
-    upstream: str | None, with_call: bool, expected: str
+async def test_a_turn_with_calls_finishes_with_tool_calls_unless_it_did_not_finish(
+    upstream: str | None, with_call: bool, expected: str, kept: bool
 ) -> None:
     delta: dict[str, Any] = {"content": "x"}
     if with_call:
@@ -671,7 +680,7 @@ async def test_a_turn_with_calls_finishes_with_tool_calls_unless_it_was_cut_off(
     finally:
         await backend.aclose()
     assert chunks[-1].finish_reason == expected
-    assert bool(chunks[-1].tool_calls) is with_call
+    assert bool(chunks[-1].tool_calls) is kept
 
 
 def test_merge_tool_call_delta_accepts_every_way_servers_stream_calls() -> None:
@@ -730,6 +739,30 @@ async def test_the_agent_loop_over_the_openai_protocol(scratch_dir: Path) -> Non
         {"role": "tool", "content": read, "name": "read_file", "tool_call_id": "c1"},
     ]
     assert "".join(c.delta for c in chunks) == "It says hi."
+
+
+@pytest.mark.parametrize("reason", ["error", "cancelled"])
+async def test_a_reply_that_fails_after_a_call_runs_nothing_over_the_openai_protocol(
+    scratch_dir: Path, reason: str
+) -> None:
+    backend, seen = sse_backend([
+        [
+            {"choices": [{"delta": {"content": "Writing it. "}}]},
+            tool_delta(index=0, id="c1", type="function",
+                       function={"name": "write_file", "arguments": '{"path": "a.txt", "content": "hi"}'}),
+            {"choices": [{"delta": {}, "finish_reason": reason}]},
+        ],
+        [{"choices": [{"delta": {"content": "Done."}, "finish_reason": "stop"}]}],  # asked for only if it ran
+    ])  # fmt: skip
+    approver = FakeApprover(True)
+    try:
+        chunks, transcript = await run_turn(ChatAgent(backend, make_config(scratch_dir), approver=approver), "Write a.txt")
+    finally:
+        await backend.aclose()
+    assert not (scratch_dir / "a.txt").exists()
+    assert (approver.requests, len(seen)) == ([], 1)
+    assert transcript == [Message.assistant("Writing it. ")]
+    assert finishes(chunks) == [reason]
 
 
 # -- echo's scripted calls ---------------------------------------------------------------

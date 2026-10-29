@@ -323,8 +323,18 @@ class OpenAICompatBackend(Backend):
         tail = (tracker.push(text) if text else "") + tracker.flush()
         if thought or tail:
             yield StreamChunk(delta=tail, reasoning=thought)
-        if calls and finish_reason != "length":
-            # Some servers report "stop" even when the turn ends in tool calls.
+        if calls and finish_reason in ("error", "cancelled"):
+            # The reply failed or was stopped before it finished: its calls may be
+            # incomplete, so drop them and keep the reason.
+            logger.warning(
+                "the reply ended with finish reason %r: dropping its %d tool call(s)",
+                finish_reason,
+                len(calls),
+            )
+            calls = []
+        elif calls and finish_reason != "length":
+            # Some servers report "stop" even when the turn ends in tool calls. A
+            # reply cut off by the token limit keeps "length", so its calls never run.
             finish_reason = "tool_calls"
         yield StreamChunk(
             finish_reason=finish_reason,

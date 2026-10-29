@@ -173,7 +173,7 @@ The loop runs only when tools are offered: `agent.enabled_tools` is not empty, a
 flowchart TD
     A["_fit(messages + turn so far)"] --> B["backend.stream(prepared, params, tools=specs)"]
     B -->|"text and thoughts: yielded as they arrive"| C{"tool calls in the reply?"}
-    C -->|"no, or finish was 'length'"| D["record the answer, yield one finish chunk"]
+    C -->|"no, or the reply did not finish ('length', 'error', 'cancelled')"| D["record the answer, yield one finish chunk"]
     C -->|yes| E{"rounds < agent.max_tool_iterations?"}
     E -->|no| F["NOT RUN result for every call, a notice, finish 'tool_calls'"]
     E -->|yes| G["for each of the first 16 calls: parse the arguments, ToolBelt.invoke (asks the approver before any change), escape control tokens, clip the result"]
@@ -182,7 +182,7 @@ flowchart TD
 
 - **One round.**
   - The model's reply is streamed; its text and thoughts reach the caller as they arrive. Tool calls are collected, and none runs until the reply is complete.
-  - A reply that stopped with `finish_reason: "length"` may hold calls whose arguments were cut off, so its calls are never run.
+  - A reply that did not finish is never acted on (`_UNFINISHED`). With `finish_reason` `length` its calls' arguments may be cut off; with `error` or `cancelled` the server failed or was stopped mid-reply. Its calls are never run, and a warning is logged.
   - The calls are normalized (`_normalize_calls()`: a unique `id`, a name, the arguments as a JSON string) and recorded as one assistant message with `tool_calls`. Then they run one at a time, in order.
   - At most 16 calls of one reply run (`_MAX_CALLS_PER_REPLY`): each change asks first, so a reply with hundreds of calls would mean hundreds of prompts. Every call after the 16th gets the result `NOT RUN: at most 16 tool calls run per reply, so nothing was done for this one. ...` instead, since every call needs a result. The round counts once, as usual.
 - **Running a call (`_run_call()`).**
