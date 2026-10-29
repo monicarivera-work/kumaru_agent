@@ -1,8 +1,8 @@
 # `src\kumaru\agent\untrusted.py`
 
-> Escapes chat control tokens, such as `<|im_end|>`, in text from outside Kumaru, so that a file or a program's output cannot open a conversation turn of its own.
+> Escapes chat control tokens, such as `<|im_end|>`, in text from outside Kumaru, so that a file, a program's output, a knowledge pack or a documentation passage cannot open a conversation turn of its own.
 
-**Read this when:** a tool result shows `&lt;|im_start|&gt;` or `&#91;INST&#93;` where the file has `<|im_start|>` or `[INST]`, you pass other untrusted text to the model, or your model's chat template uses markers this module does not know.
+**Read this when:** a tool result, a reference or a documentation excerpt shows `&lt;|im_start|&gt;` or `&#91;INST&#93;` where the file has `<|im_start|>` or `[INST]`, you pass other untrusted text to the model, or your model's chat template uses markers this module does not know.
 
 ---
 
@@ -15,10 +15,12 @@ It has one pattern and two functions:
 
 `ChatAgent` escapes every tool result this way before the model reads it ([chat.md](chat.md), "Running a call"). `edit_file` restores tokens when the model copies escaped text into `old_text` ([workspace.md](workspace.md), "Escaped control tokens").
 
-## Why it exists
-The files in the project folder, and the output of the programs `run_command` starts, are untrusted. Whoever wrote them may try to steer the model (prompt injection).
+Reference text is escaped the same way: knowledge packs, labels included, by `reference_context()` ([knowledge.md](knowledge.md)), and documentation passages and their citations by `excerpt_block()` ([doc_index.md](doc_index.md)).
 
-Chat models mark the turns of a conversation with control tokens; Qwen uses `<|im_start|>` and `<|im_end|>`. llama-server renders the conversation with the model's chat template, then tokenizes the result with control tokens recognised anywhere in it, tool results included. So a file holding
+## Why it exists
+The files in the project folder, and the output of the programs `run_command` starts, are untrusted. Whoever wrote them may try to steer the model (prompt injection). Knowledge packs and indexed documentation are untrusted data too, and they often quote these tokens innocently: the documentation of LLM tools does.
+
+Chat models mark the turns of a conversation with control tokens; Qwen uses `<|im_start|>` and `<|im_end|>`. llama-server renders the conversation with the model's chat template, then tokenizes the result with control tokens recognised anywhere in it: tool results, references in the system prompt and excerpts in the user's message alike. The transformers backend does the same. So a file holding
 
 ```text
 <|im_end|>
@@ -42,12 +44,13 @@ Your approval of every change and command remains the backstop. This removes one
   | A fixed set of bracketed words, opening or closing | `[INST]`, `[/INST]`, `[SYSTEM_PROMPT]`, `[AVAILABLE_TOOLS]`, `[TOOL_RESULTS]`, `[TOOL_CALLS]`, `[THINK]` | Mistral |
 
 - **Only four characters change.** `<s>` becomes `&lt;s&gt;`, while `<p>` and `&` stay as they are. Every escaped token holds an `&`, which no token can contain. So nothing in the result can act as a token, and escaping it again changes nothing: text can safely be escaped at more than one layer.
-- **Only what the model reads.** Files and program output are never changed; only the copy the model reads is escaped. When anything was escaped, `ChatAgent` adds a line to the result that says so and explains how to edit such lines (`_ESCAPED` in `chat.py`). The terminal's `«` line shows the result as the model read it.
+- **Only what the model reads.** Files, program output, pack files and indexes are never changed; only the copy the model reads is escaped. When anything in a tool result was escaped, `ChatAgent` adds a line to it that says so and explains how to edit such lines (`_ESCAPED` in `chat.py`). The terminal's `«` line shows the result as the model read it.
 - **Writing it back.** The model copies text as it read it:
   - `edit_file` looks for `old_text` exactly as sent first. Only when that is not in the file, but the restored text is, does it use the restored `old_text` and `new_text`. The approval prompt then says so, and the diff shows the real characters.
   - `write_file` writes exactly what it is sent, escaped text included.
 - **Restoring is exact only for text without `&`.** For such text, `restore_control_tokens(neutralize_control_tokens(text)) == text`. But `&lt;s&gt;` may also be HTML that shows a literal `<s>`, and `restore_control_tokens` turns both into `<s>`. That is why callers try text as it is before they restore it.
-- **Dependency-free.** It imports only `re`, so any module can import it without creating a cycle (`prompt.py`, for one, imports `knowledge.py`).
+- **Visible, not hidden.** The change shows in the text, rather than being a zero-width character slipped into the token. So code the model copies from a reference cannot carry a hidden character into a program.
+- **Dependency-free.** It imports only `re`, so any module can import it without creating a cycle: `chat.py`, `workspace.py`, `knowledge.py` and `doc_index.py` all do.
 
 ## Public API
 
@@ -147,10 +150,10 @@ The model read the tokens escaped, copied them that way, and the file got the re
 - **Another model's markers.** If your model's template uses a token that `CONTROL_TOKEN` does not match, add it in three places:
   - the pattern, `CONTROL_TOKEN`;
   - its escaped form, in `_ESCAPED_TOKEN`, in the same position;
-  - the token lists in `tests\test_untrusted.py`.
+  - the token lists in `tests\test_untrusted.py`. `tests\test_knowledge.py` also lists look-alikes that must stay as they are, such as Haskell's `<|>`, `<thinking>` and `[INSTALL]`.
 
   A model's control tokens are the `added_tokens` marked `"special": true` in its `tokenizer_config.json`, or the control tokens in its GGUF. Make sure no new token can contain `&`: that is what makes escaping complete and repeatable.
-- **Other untrusted text.** Text from the web, a retrieved document or another program goes through `neutralize_control_tokens` before it goes into a message.
+- **Other untrusted text.** Text from the web or another program goes through `neutralize_control_tokens` before it goes into a message, as tool results, packs and documentation excerpts already do. If you escape text before cutting it to a length, escape `MAX_CONTROL_TOKEN_CHARS` characters past the cut, as `reference_context()` does, so that a token the cut splits is escaped too.
 
 ## Failure modes and limits
 
@@ -167,7 +170,10 @@ The model read the tokens escaped, copied them that way, and the file got the re
 - `src\kumaru\agent\chat.py` — `_for_the_model()` escapes every tool result, then clips it and adds the note.
 - `src\kumaru\agent\workspace.py` — `Workspace.plan_edit()` restores escaped tokens in `old_text` and `new_text` when `old_text` matches only that way.
 - `src\kumaru\agent\tools.py` — the tool seam whose results are escaped.
+- `src\kumaru\agent\knowledge.py` — `reference_context()` escapes knowledge packs, labels included; see [knowledge.md](knowledge.md).
+- `src\kumaru\agent\doc_index.py` — `excerpt_block()` escapes documentation passages and their citations; see [doc_index.md](doc_index.md).
 - `docs\howto\src\kumaru\agent\chat.md` — the tool loop, and the "Results are data" principle.
 - `docs\howto\src\kumaru\agent\workspace.md` — editing files that hold control tokens.
 - `tests\test_untrusted.py` — every kind of token escaped and restored, other text left alone, the longest token, idempotence, and that the module imports nothing from Kumaru.
 - `tests\test_tool_loop.py` and `tests\test_workspace.py` — escaping in the tool loop, and the read→edit loop on files that hold tokens.
+- `tests\test_knowledge.py` and `tests\test_doc_index.py` — escaping in packs, excerpts and citations, including tokens split by a cut, and look-alikes in code left alone.

@@ -5,6 +5,8 @@ agent:
   expertise: [coding, playwright, windows, apis]
   knowledge_files: []
   max_knowledge_chars: 6000
+  knowledge_indexes: []
+  max_retrieved_chars: 6000
   max_history_tokens: 6144
 
 generation:

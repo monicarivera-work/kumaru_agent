@@ -16,6 +16,7 @@ import pytest
 from rich.console import Console
 
 from kumaru.agent import prompt
+from kumaru.agent.doc_index import build_index
 from kumaru.backends.echo import EchoBackend
 from kumaru.core.config import KumaruConfig
 from kumaru.core.errors import ConfigError, KumaruError
@@ -295,6 +296,47 @@ async def test_agent_prompt_runs_resume_the_next_day_without_asking_again(
     echo_config.agent.system_prompt = "You are terse."
     with pytest.raises(ConfigError, match="different settings"):
         await bench(echo_config, [golden], out, use_agent_prompt=True)
+
+
+def fingerprint(cfg: KumaruConfig, spec: str, **settings) -> str:
+    """The fingerprint a run of `spec` would get, without running it."""
+    benchmark = runner.resolve_benchmark(spec)
+    return runner.BenchRunner(cfg, BenchSettings(**settings))._fingerprint(
+        benchmark, "echo", GenerationParams()
+    )
+
+
+def test_documentation_indexes_join_the_fingerprint_by_content_when_used(
+    echo_config: KumaruConfig, golden: str, scratch_dir: Path
+) -> None:
+    docs = scratch_dir / "docs"
+    docs.mkdir()
+    page = docs / "math.md"
+    page.write_text("# Arithmetic\n\nTwo plus two is four.\n", encoding="utf-8")
+    index, moved = scratch_dir / "math.sqlite", scratch_dir / "moved.sqlite"
+    build_index(docs, index, topic="Math", version="1")
+    agent = echo_config.agent
+
+    bare, plain = fingerprint(echo_config, golden), fingerprint(echo_config, golden, use_agent_prompt=True)
+    agent.max_retrieved_chars = 1234
+    # Unused without an index: runs saved before indexes existed keep their fingerprints.
+    assert fingerprint(echo_config, golden, use_agent_prompt=True) == plain
+
+    agent.knowledge_indexes = [str(index)]
+    assert fingerprint(echo_config, golden) == bare  # only the agent prompt retrieves
+    with_index = fingerprint(echo_config, golden, use_agent_prompt=True)
+    assert with_index != plain
+    moved.write_bytes(index.read_bytes())
+    agent.knowledge_indexes = [str(moved)]
+    assert fingerprint(echo_config, golden, use_agent_prompt=True) == with_index  # same content
+    agent.max_retrieved_chars = 4321
+    assert fingerprint(echo_config, golden, use_agent_prompt=True) != with_index
+
+    agent.max_retrieved_chars = 1234
+    page.write_text("# Arithmetic\n\nTwo plus two is four, not five.\n", encoding="utf-8")
+    moved.unlink()
+    build_index(docs, moved, topic="Math", version="1")  # rebuilt where it was
+    assert fingerprint(echo_config, golden, use_agent_prompt=True) != with_index
 
 
 # -- comparing two runs ----------------------------------------------------------------

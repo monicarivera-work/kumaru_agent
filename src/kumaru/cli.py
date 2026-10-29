@@ -10,7 +10,7 @@ One binary, eight commands::
     kumaru eval      # quick check: speed and a few known answers
     kumaru bench     # public benchmarks with confidence intervals; compare runs
     kumaru distill   # turn a teacher model's graded answers into training data
-    kumaru learn     # build a reviewed local reference pack
+    kumaru learn     # build a reference pack, or index a documentation folder
 
 Two rules keep the CLI fast and debuggable:
 
@@ -450,12 +450,30 @@ def show_config(
 
 @app.command()
 def learn(
-    topic: str = typer.Argument(..., help="Language or platform to learn."),
-    source: Path = typer.Option(..., "--source", help="Reviewed UTF-8 reference file."),
+    topic: str = typer.Argument(..., help="Language, framework or platform to learn."),
+    source: Path = typer.Option(
+        ...,
+        "--source",
+        help="Reviewed UTF-8 reference file, or a documentation folder to index "
+        "(Markdown, MDX, reStructuredText, HTML or plain text).",
+    ),
     version: str = typer.Option(..., "--version", help="Language/platform version."),
-    output: Path = typer.Option(..., "--output", "-o", help="New knowledge pack JSON file."),
+    output: Path = typer.Option(
+        ...,
+        "--output",
+        "-o",
+        help="New knowledge pack JSON file; for a folder, a new index file such as godot.sqlite.",
+    ),
 ) -> None:
-    """Learn from local references without downloads, execution, or fine-tuning."""
+    """Learn from local references without downloads, execution, or fine-tuning.
+
+    A file becomes a knowledge pack, added whole to every prompt. A folder
+    becomes a documentation index: each question gets only its best passages.
+    """
+    if source.expanduser().is_dir():
+        _learn_folder(topic, source, version, output)
+        return
+
     from pydantic import ValidationError
 
     from kumaru.agent.knowledge import KnowledgePack, describe_errors, read_local_text, save_pack
@@ -474,6 +492,33 @@ def learn(
     save_pack(pack, output)
     console.print(f"Saved reference pack: {output}", markup=False)
     console.print("Add its absolute path to agent.knowledge_files and restart chat/server.")
+
+
+def _learn_folder(topic: str, folder: Path, version: str, output: Path) -> None:
+    """`kumaru learn` for a folder: index it and report what was left out."""
+    from collections import Counter
+
+    from kumaru.agent.doc_index import build_index, format_types
+
+    with console.status("Indexing documentation...") as status:
+
+        def progress(done: int, total: int) -> None:
+            status.update(f"Indexing {done:,}/{total:,} files...")
+
+        report = build_index(folder, output, topic=topic, version=version, progress=progress)
+    console.print(f"Saved documentation index: {report.output}", markup=False)
+    size = f"{report.bytes / 1e6:.1f} MB" if report.bytes >= 100_000 else f"{report.bytes / 1e3:.0f} kB"
+    console.print(f"{report.files:,} files, {report.chunks:,} passages, {size}.")
+    if report.empty:
+        console.print(f"{report.empty:,} files had no new text (empty, redirect or duplicate pages).")
+    reasons = Counter(skipped.reason for skipped in report.skipped)
+    for reason, count in reasons.most_common():
+        examples = [skipped.path for skipped in report.skipped if skipped.reason == reason]
+        more = f" and {count - 3:,} more" if count > 3 else ""
+        console.print(f"Skipped {count:,} ({reason}): {', '.join(examples[:3])}{more}", markup=False)
+    if report.other_types:
+        console.print(f"Ignored file types: {format_types(report.other_types)}", markup=False)
+    console.print("Add its absolute path to agent.knowledge_indexes and restart chat/server.")
 
 
 @app.command()
