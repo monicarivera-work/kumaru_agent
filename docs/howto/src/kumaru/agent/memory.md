@@ -28,18 +28,20 @@ Centralising that decision gives every backend the same trimming behaviour. It a
 - **The budget, computed in `prepare()`:**
 
   ```
-  budget = min(agent.max_history_tokens, max(512, context_length - reserved - 128))
+  budget = min(agent.max_history_tokens, max(512, context_length - reserved - 128 - tool_tokens))
   ```
 
   - `reserved` is the request's *resolved* `max_tokens`. With thinking on, that is `thinking_mode.max_tokens`, which is often much larger than `generation.max_tokens`.
   - `128` is a safety margin.
+  - `tool_tokens` is the estimated size of the tool declarations sent with the request, 0 when no tools are offered.
   - `512` is a floor, so the budget never reaches zero. When the reply reservation eats the window, the floor lets prompt plus reply exceed the window. See `docs\howto\src\kumaru\agent\chat.md`.
+- **After the policy.** In a tool conversation the cut can fall between a call and its results, or drop the user's request. `prepare()` then repairs the policy's output: it drops tool results that answer no call, and puts the latest user message back (`chat.md`, "The history budget").
 - **The counter comes from the backend**, because tokenizer accuracy is backend-specific:
   - `transformers` renders the real chat template, so its count is exact.
   - `llamacpp` (in-process) tokenizes a `role: content` blob, then adds 8.
-  - `echo`, `openai_compat` and `llamacpp_server` use the base heuristic `int(sum(len(content) + len(role) + 4) / 3.6) + 8`. This can be wrong in either direction, so leave headroom.
+  - `echo`, `openai_compat` and `llamacpp_server` use the base heuristic `int(sum(len(content) + len(role) + 4 + len(json.dumps(tool_calls))) / 3.6) + 8`, where `tool_calls` counts only on assistant messages that call tools. This can be wrong in either direction, so leave headroom.
 - **Reasoning is invisible to memory.** A `Message.reasoning` field survives `apply()`, because policies return the same `Message` objects. But:
-  - No counter counts it. The base heuristic reads `content` and `role` only, and `transformers` counts `to_openai()` output, which omits reasoning by default.
+  - No counter counts it. The base heuristic reads `content`, `role` and `tool_calls` only, and `transformers` counts `to_openai()` output, which omits reasoning by default.
   - No backend sends it.
 
   Old thoughts therefore cost nothing here. The design reasons for dropping them, and how chat histories avoid storing them, are in `docs\howto\src\kumaru\agent\chat.md`.

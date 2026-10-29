@@ -71,7 +71,7 @@ Full walkthrough with troubleshooting: [`docs/QUICKSTART.md`](docs/QUICKSTART.md
 | Command | What it does |
 |---|---|
 | `kumaru serve` | Web UI + OpenAI-compatible API |
-| `kumaru chat` | Terminal REPL, no server in between |
+| `kumaru chat` | Terminal REPL, no server in between. `--workspace DIR` lets it create and edit files and run builds and tests in that folder, with your yes for each change and command |
 | `kumaru info` | Versions, GPU, which optional components are installed |
 | `kumaru config` | Print the fully merged configuration — run this when something ignores your settings |
 | `kumaru train` | LoRA fine-tune or from-scratch pretrain |
@@ -113,9 +113,23 @@ kumaru serve -c qwen36
 
 Guidance covers idiomatic code, testing, Playwright locators/fixtures/traces,
 Windows shell/version differences, remoting, and secure HTTP/HTTPS/API integration.
-It does **not** install browsers, grant shell/remote access, execute code, or make a
-model an expert in every technology. Kumaru remains chat-only; generated code and
-commands need review and execution in your own authorized environment.
+It does **not** install browsers, grant shell or remote access, or make a model an
+expert in every technology.
+
+To let the agent write the code and run it, give it a project folder in the terminal
+chat. It needs a backend that calls tools, such as `qwen36`; the transformers
+profiles, `coder` included, cannot:
+
+```powershell
+kumaru chat -c qwen36 --workspace C:\projects\my-app
+```
+
+It can then list, read, create and edit files in that folder, and run `python`,
+`node`, `npm`, `npx` and `dotnet` there, never a shell. It shows you each change as a
+diff and each command line first, and does it only if you answer `y`. Paths outside
+the folder are refused, but approved commands run with your permissions, so read them.
+The server and web UI never offer these tools, because they cannot ask
+([details](docs/howto/src/kumaru/cli.md#let-it-work-in-a-project-folder-kumaru-chat---workspace)).
 
 To add a new language or platform, save reviewed, version-specific documentation,
 examples and test results in a UTF-8 text file, then import it:
@@ -207,7 +221,7 @@ Start here, in this order:
 src/kumaru/
   core/        config, types, errors, logging, plugin registry
   backends/    inference engines behind one interface
-  agent/       prompt assembly, memory budgeting, tool seam
+  agent/       prompt assembly, memory budgeting, tool loop, project-folder tools
   server/      FastAPI, OpenAI-compatible, SSE streaming
   train/       LoRA fine-tuning + from-scratch transformer
   eval/        speed and quality measurement; public benchmarks (eval/benchmarks/)
@@ -217,7 +231,7 @@ data/          sample training data and the golden benchmark questions
 scripts/       setup.ps1 (install), verify.ps1 (layered self-check),
                get-llama-server.ps1 (inference engine), check_graders.py (grader proof)
 docs/howto/    a page for every source file
-tests/         pytest suite (537 tests), runs with no GPU in under a minute
+tests/         pytest suite (863 tests), runs with no GPU in under a minute
 ```
 
 ## Requirements

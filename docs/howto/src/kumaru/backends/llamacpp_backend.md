@@ -85,7 +85,7 @@ Since v0.2, the GPU profiles that use GGUF (`qwen36`, `qwen25-7b-gguf`) run on [
 | `LlamaCppBackend.aclose` | `async def aclose(self) -> None` | Sets `llm = None` and marks the backend unloaded. It does not call `Llama.close()`; memory is freed when the object is garbage-collected. A generation that is still running keeps its own reference until it ends. |
 | `LlamaCppBackend.info` | `def info(self) -> BackendInfo` | `model_id` = `model_path or model`; `device` = `"cuda+cpu"` if `n_gpu_layers != 0`, else `"cpu"`; `dtype` = `quantization` = `"gguf"`; `context_length` = `max_context_length`; `extra` = `{"n_gpu_layers": ...}`. Derived from config, not from the loaded build. |
 | `LlamaCppBackend.count_tokens` | `def count_tokens(self, messages: Sequence[Message]) -> int` | Before load, the base heuristic. After load, `len(llm.tokenize(...)) + 8` over `role: content` lines. Takes no lock, on purpose: the agent calls it synchronously on the event loop, where waiting for a running generation would stall the server, and tokenizing only reads the vocabulary. |
-| `LlamaCppBackend.stream` | `async def stream(self, messages: Sequence[Message], params: GenerationParams) -> AsyncIterator[StreamChunk]` | Loads if needed, waits for `_generate_lock`, streams reasoning and answer chunks, then one final chunk with `finish_reason` and `usage`. |
+| `LlamaCppBackend.stream` | `async def stream(self, messages: Sequence[Message], params: GenerationParams, *, tools: Sequence[dict[str, Any]] \| None = None) -> AsyncIterator[StreamChunk]` | Loads if needed, waits for `_generate_lock`, streams reasoning and answer chunks, then one final chunk with `finish_reason` and `usage`. Non-empty `tools` raise `ConfigError` (`check_tools`): this backend cannot call tools. |
 
 `load()`, `generate()` and `is_loaded` are inherited from `Backend`; see [`base.md`](base.md).
 
@@ -286,12 +286,14 @@ Under `kumaru serve`, load errors appear in `/healthz` (`status: "error"`, with 
 | `/healthz` reports `loading` for minutes at startup; a chat request fails after 600 s with `Backend is still loading.` | The first run downloads the GGUF, then loads it. | Wait, or pre-download the file and use `model_path`. |
 | The CPU/GPU works briefly on a request whose client already left | The request was cancelled while it waited for the lock. When its turn comes it still evaluates its prompt and decodes until its first chunk, then stops. | `server.max_concurrent_requests: 1` keeps waiting requests in the server's queue, where giving up costs nothing. |
 | `The llamacpp backend cannot attach a LoRA adapter (backend.adapter_path is '<path>').` | `--adapter` or `adapter_path` is set. LoRA adapters are supported by the transformers backend only, and `load()` refuses them elsewhere rather than serve the base model under the adapter's name. | Serve the adapter with `backend.name: transformers` and its base model. GGUF models need the adapter converted first (`docs\TRAINING.md`). |
+| `The llamacpp backend cannot call tools, and tools are enabled (agent.enabled_tools, or kumaru chat --workspace).` | Tools are enabled. This backend does not pass tool declarations to llama-cpp-python or read calls out of the output, so it refuses them instead of dropping them silently. `ChatAgent` checks when it is built, before the GGUF loads. | Use `llamacpp_server` with the same GGUF: llama-server parses tool calls with the model's own template. |
 
 ## Known limitations
 
 - **Repo-id downloads fetch exactly one file.** `extra.gguf_filename` (default `*Q4_K_M.gguf`) is matched case-sensitively outside Windows, and split shards never match a quant-name pattern, so a split GGUF cannot be loaded by repo id. Workaround: the exact file name; for split models, `model_path` at the first shard, with all shards in one folder.
 - **`aclose()` does not call `Llama.close()`.** VRAM and RAM come back only when Python collects the `Llama` object, which a running generation keeps alive until it ends. If a backend swap then fails to load for lack of memory, restart `kumaru serve`.
 - **Thinking settings are ignored.** `thinking`, `--think`/`--no-think`, the UI toggle and `thinking_budget` never reach the engine. Workaround: `llamacpp_server`.
+- **No tool calling.** `supports_tools` is `False`, so `kumaru chat --workspace` and `agent.enabled_tools` fail with `ConfigError`. Workaround: `llamacpp_server`.
 - **A cancelled request still waiting for the lock still runs.** When its turn comes it evaluates its whole prompt and decodes to its first chunk (a token or a few) before it notices. Workaround: `server.max_concurrent_requests: 1`, so waiting requests queue in the server instead.
 
 ## Related files
