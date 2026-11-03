@@ -302,6 +302,7 @@ def inspect_source(catalog: Catalog, id_: str, web: PublicWeb) -> Source:
 
 def collect_source(catalog: Catalog, id_: str, web: PublicWeb) -> Source:
     source = catalog.get(id_)
+    catalog.require_current_review(id_)
     if source.kind == "sources_of_sources":
         raise RequestError("Sources of Sources are catalogues; collect individual child works instead")
     if source.origin != "human_verified" or source.permission != "text_permitted":

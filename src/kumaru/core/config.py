@@ -284,6 +284,8 @@ class AcademicConfig(_Base):
         default_factory=lambda: str(Path.home() / ".local" / "share" / "kumaru" / "academic.sqlite")
     )
     brave_api_key: str | None = None
+    monitor_interval_s: int = Field(default=0, ge=0, le=604800)
+    monitor_batch_size: int = Field(default=10, ge=1, le=20)
 
 
 class KumaruConfig(_Base):

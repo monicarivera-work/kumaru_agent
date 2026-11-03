@@ -145,6 +145,7 @@ class Review(Record):
     permission: Literal["unknown", "metadata_only", "text_permitted"] | None = None
     access: Access | None = None
     topic_ids: list[str] | None = Field(default=None, max_length=100)
+    topic_reviewed: bool | None = None
     evidence: list[Evidence] = Field(default_factory=list, max_length=100)
 
 

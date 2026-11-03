@@ -185,9 +185,14 @@ def create_app(config: KumaruConfig | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         state: AppState = app.state.kumaru
         state.start_loading()  # background: does not delay the port opening
+        monitor = getattr(app.state, "academic_monitor", None)
+        if monitor is not None:
+            monitor.start()
         try:
             yield
         finally:
+            if monitor is not None:
+                await monitor.close()
             await state.shutdown()
 
     app = FastAPI(
@@ -234,6 +239,13 @@ def create_app(config: KumaruConfig | None = None) -> FastAPI:
         app.state.academic = Catalog(config.academic.database)
         app.state.academic_network = BoundedSemaphore(2)
         app.include_router(academic_router)
+        if config.academic.monitor_interval_s:
+            from kumaru.academic.monitor import UpdateMonitor
+
+            app.state.academic_monitor = UpdateMonitor(
+                app.state.academic, app.state.academic_network,
+                config.academic.monitor_interval_s, config.academic.monitor_batch_size,
+            )
 
     if config.server.serve_ui and UI_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(UI_DIR)), name="static")
@@ -241,6 +253,11 @@ def create_app(config: KumaruConfig | None = None) -> FastAPI:
         @app.get("/", include_in_schema=False)
         async def index() -> FileResponse:
             return FileResponse(str(UI_DIR / "index.html"))
+
+        if config.academic.enabled:
+            @app.get("/academic", include_in_schema=False)
+            async def academic_dashboard() -> FileResponse:
+                return FileResponse(str(UI_DIR / "academic.html"))
 
     return app
 

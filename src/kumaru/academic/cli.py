@@ -167,6 +167,7 @@ def export(
     output: Annotated[Path, typer.Option("--output", "-o")],
 ) -> None:
     """Export one permitted, reviewed source to a NEW UTF-8 reference text file."""
+    ctx.obj[0].require_current_review(source_id)
     source = ctx.obj[0].get(source_id)
     if (
         not source.text or source.origin != "human_verified"
@@ -184,3 +185,92 @@ def export(
     except OSError as exc:
         raise ConfigError(f"Cannot export academic text (existing files are not overwritten): {exc}") from exc
     emit(dict(output=str(output), source_id=source.id))
+
+
+@app.command("claim-add")
+def claim_add(ctx: typer.Context, file: Path) -> None:
+    """Record a located assertion and assumptions from a ClaimCreate JSON."""
+    from kumaru.academic.reliability import ClaimCreate
+
+    record = ClaimCreate.model_validate(read_record(file, ClaimCreate).model_dump())
+    emit(ctx.obj[0].claim_details(ctx.obj[0].add_claim(record).id))
+
+
+@app.command("claims")
+def claims(
+    ctx: typer.Context, source_id: str | None = typer.Option(None, "--source"),
+    limit: int = typer.Option(100, "--limit", min=1, max=500),
+    offset: int = typer.Option(0, "--offset", min=0),
+) -> None:
+    """List claims and their independently scoped evidence assessments."""
+    db = ctx.obj[0]
+    emit([
+        db.claim_details(claim.id)
+        for claim in db.claims(source_id=source_id, limit=limit, offset=offset)
+    ])
+
+
+@app.command("claim-show")
+def claim_show(ctx: typer.Context, claim_id: str) -> None:
+    """Show claim findings and review history."""
+    emit(ctx.obj[0].claim_details(claim_id))
+
+
+@app.command("claim-review")
+def claim_review(ctx: typer.Context, claim_id: str, file: Path) -> None:
+    """Review a claim and its linked findings from ClaimReview JSON."""
+    from kumaru.academic.reliability import ClaimReview
+
+    record = ClaimReview.model_validate(read_record(file, ClaimReview).model_dump())
+    ctx.obj[0].review_claim(claim_id, record)
+    emit(ctx.obj[0].claim_details(claim_id))
+
+
+@app.command("notices")
+def notices(
+    ctx: typer.Context, source_id: str | None = typer.Option(None, "--source"),
+    state: str | None = typer.Option(None, "--state"),
+    limit: int = typer.Option(100, "--limit", min=1, max=500),
+    offset: int = typer.Option(0, "--offset", min=0),
+) -> None:
+    """List editorial reports and the claims/references they affect."""
+    db = ctx.obj[0]
+    emit([
+        db.notice_details(notice.id)
+        for notice in db.notices(source_id=source_id, state=state, limit=limit, offset=offset)
+    ])
+
+
+@app.command("notice-add")
+def notice_add(ctx: typer.Context, file: Path) -> None:
+    """Report a manually found editorial notice from NoticeCreate JSON."""
+    from kumaru.academic.reliability import NoticeCreate
+
+    record = NoticeCreate.model_validate(read_record(file, NoticeCreate).model_dump())
+    emit(ctx.obj[0].notice_details(ctx.obj[0].report_notice(record).id))
+
+
+@app.command("notice-review")
+def notice_review(ctx: typer.Context, notice_id: str, file: Path) -> None:
+    """Confirm, dismiss or reopen a notice with explicit impact and explanation."""
+    from kumaru.academic.reliability import NoticeReview
+
+    record = NoticeReview.model_validate(read_record(file, NoticeReview).model_dump())
+    ctx.obj[0].review_notice(notice_id, record)
+    emit(ctx.obj[0].notice_details(notice_id))
+
+
+@app.command("check-updates")
+def check_updates(ctx: typer.Context, source_id: str) -> None:
+    """Check Crossref for editorial updates to one DOI work."""
+    from kumaru.academic.monitor import check_updates as check
+
+    emit(check(ctx.obj[0], source_id))
+
+
+@app.command("monitor")
+def monitor(ctx: typer.Context, limit: int = typer.Option(10, "--limit", min=1, max=20)) -> None:
+    """Check a bounded batch of never/least-recently checked DOI sources."""
+    from kumaru.academic.monitor import check_batch
+
+    emit(check_batch(ctx.obj[0], limit))

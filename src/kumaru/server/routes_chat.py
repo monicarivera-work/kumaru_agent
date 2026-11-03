@@ -227,6 +227,7 @@ async def info(request: Request) -> dict:
     state = get_state(request)
     payload: dict[str, Any] = {
         "version": __version__,
+        "academic_enabled": state.config.academic.enabled,
         "ready": state.ready,
         "loading": not state.ready and state.load_error is None,
         "error": state.load_error,

@@ -25,6 +25,11 @@
 
 `run(config)` serves that app with uvicorn; `kumaru serve` calls it.
 
+When enabled, `/academic` serves the separate review workspace. The lifespan also
+starts optional periodic editorial checks and stops/joins their worker before
+backend shutdown. Default `monitor_interval_s: 0` performs no automatic network
+requests; the academic API remains independent of model readiness.
+
 Importing the module pins two MIME types, process-wide:
 
 ```python

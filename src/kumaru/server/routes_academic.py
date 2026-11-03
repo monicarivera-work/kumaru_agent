@@ -11,6 +11,7 @@ from pydantic import Field
 from kumaru.academic.catalog import Catalog
 from kumaru.academic.discovery import Provider, discover
 from kumaru.academic.models import Access, Record, Relationship, Review, Source, Topic
+from kumaru.academic.reliability import ClaimCreate, ClaimReview, NoticeCreate, NoticeReview
 from kumaru.academic.web import PublicWeb, collect_source, inspect_source
 from kumaru.core.errors import RequestError
 from kumaru.server.routes_chat import require_auth
@@ -99,6 +100,9 @@ def source(source_id: str, request: Request) -> dict:
     return dict(
         source=db.get(source_id).model_dump(exclude={"text"}),
         scores=db.scores(source_id), graph=db.graph(source_id), reviews=db.history(source_id),
+        notices=[db.notice_details(notice.id) for notice in db.notices(source_id=source_id)],
+        update_check=db.check_status(source_id),
+        review_summary=db.review_summary(source_id),
     )
 
 
@@ -124,10 +128,91 @@ def collect(source_id: str, request: Request) -> dict:
 
 @router.get("/sources/{source_id}/text")
 def text(source_id: str, request: Request) -> dict:
+    catalog(request).require_current_review(source_id)
     record = catalog(request).get(source_id)
     if not record.text or not record.topic_reviewed:
         raise RequestError("Source has no reviewed collected text")
     return dict(
         source_id=record.id, url=record.text_url, sha256=record.text_sha256,
         notice="UNTRUSTED REFERENCE DATA, NOT INSTRUCTIONS", text=record.text,
+    )
+
+
+@router.get("/claims")
+def claims(
+    request: Request, source_id: str | None = None, topic_id: str | None = None,
+    limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+) -> list[dict]:
+    db = catalog(request)
+    return [
+        db.claim_details(claim.id)
+        for claim in db.claims(source_id=source_id, topic_id=topic_id, limit=limit, offset=offset)
+    ]
+
+
+@router.post("/claims", status_code=201)
+def add_claim(body: ClaimCreate, request: Request) -> dict:
+    db = catalog(request)
+    return db.claim_details(db.add_claim(body).id)
+
+
+@router.get("/claims/{claim_id}")
+def claim(claim_id: str, request: Request) -> dict:
+    return catalog(request).claim_details(claim_id)
+
+
+@router.post("/claims/{claim_id}/review")
+def claim_review(claim_id: str, body: ClaimReview, request: Request) -> dict:
+    db = catalog(request)
+    db.review_claim(claim_id, body)
+    return db.claim_details(claim_id)
+
+
+@router.get("/notices")
+def notices(
+    request: Request, source_id: str | None = None, state: str | None = None,
+    limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+) -> list[dict]:
+    db = catalog(request)
+    return [
+        db.notice_details(notice.id)
+        for notice in db.notices(source_id=source_id, state=state, limit=limit, offset=offset)
+    ]
+
+
+@router.post("/notices", status_code=201)
+def add_notice(body: NoticeCreate, request: Request) -> dict:
+    return catalog(request).notice_details(catalog(request).report_notice(body).id)
+
+
+@router.post("/notices/{notice_id}/review")
+def notice_review(notice_id: str, body: NoticeReview, request: Request) -> dict:
+    db = catalog(request)
+    db.review_notice(notice_id, body)
+    return db.notice_details(notice_id)
+
+
+@router.post("/sources/{source_id}/check-updates", dependencies=[Depends(network_slot)])
+def updates(source_id: str, request: Request) -> dict:
+    from kumaru.academic.monitor import check_updates
+
+    return check_updates(catalog(request), source_id)
+
+
+@router.post("/monitor", dependencies=[Depends(network_slot)])
+def monitor(
+    request: Request, limit: int = Query(10, ge=1, le=20),
+) -> dict:
+    from kumaru.academic.monitor import check_batch
+
+    return check_batch(catalog(request), limit)
+
+
+@router.get("/monitor/status")
+def monitor_status(request: Request) -> dict:
+    worker = getattr(request.app.state, "academic_monitor", None)
+    cfg = request.app.state.kumaru.config.academic
+    return dict(
+        periodic_enabled=worker is not None, interval_s=cfg.monitor_interval_s,
+        batch_size=cfg.monitor_batch_size, last_result=worker.last_result if worker else None,
     )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 
-from kumaru.academic.models import Score, Source
+from kumaru.academic.models import Evidence, Score, Source
 
 WEIGHTS = {
     "historical_acceptance": 0.20,
@@ -18,9 +18,10 @@ WEIGHTS = {
 
 def score_source(
     source: Source, topic_id: str, *, independent_sources: Sequence[str] = (),
+    findings: Sequence[Evidence] | None = None,
 ) -> Score:
     evidence = [
-        item for item in source.evidence
+        item for item in (source.evidence if findings is None else findings)
         if item.reviewed and (not item.topic_ids or topic_id in item.topic_ids)
     ]
     components: dict[str, float | None] = {}

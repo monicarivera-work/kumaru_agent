@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<!--
+THESIS: Review the evidence before relying on a source; source reputation is not a theorem's proof.
+OWN-WORLD: Kumaru's dark neutral panels, blue actions and system typography; rows and readable forms, no decorative metrics.
+STORY: Select a subject and source, examine findings, review attribution and rights, then resolve editorial notices.
+FIRST VIEWPORT: Compact connection/navigation header; subject/search and source rows at left; selected evidence workspace at right.
+FORM: A task-specific extension of Kumaru's existing operator interface, with stacked panes on narrow screens.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Academic review · Kumaru</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/academic.css" />
+</head>
+<body class="academic">
+  <a class="skip-link" href="#review-workspace">Skip to review workspace</a>
+  <header class="academic-header">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">◈</span>
+      <div><h1>Academic review</h1><p>Kumaru · evidence before confidence</p></div>
+    </div>
+    <nav aria-label="Workspace">
+      <a href="/">Chat</a>
+      <a href="/docs" target="_blank" rel="noopener">API docs</a>
+      <button id="queue-button" class="secondary" type="button">Pending notices</button>
+      <button id="monitor-button" class="secondary" type="button">Check next 10 DOI sources</button>
+    </nav>
+  </header>
+  <section class="connection" aria-label="API connection">
+    <form id="connection-form">
+      <label for="api-key">API key, if configured</label>
+      <input id="api-key" type="password" autocomplete="off" spellcheck="false" />
+      <button type="submit">Connect / refresh</button>
+    </form>
+    <p>Reviews stay in your local catalogue. Searches and update checks contact external providers. The key is not saved.</p>
+  </section>
+  <div id="feedback" role="status" aria-live="polite" tabindex="-1">Connecting to the academic catalogue…</div>
+  <main id="academic-workspace">
+    <section class="source-panel" aria-labelledby="sources-heading">
+      <div class="panel-heading"><h2 id="sources-heading">Sources</h2><button id="sources-button" class="secondary" type="button" hidden>Back to sources</button></div>
+      <form id="discovery-form">
+        <label for="topic-filter">Academic topic</label>
+        <select id="topic-filter" required><option value="">Loading topics…</option></select>
+        <label for="discovery-query">Narrow your search</label>
+        <input id="discovery-query" type="text" maxlength="500" placeholder="For example: fundamental theorem" />
+        <div class="inline-controls">
+          <label class="provider-label" for="search-provider">Provider
+            <select id="search-provider"><option value="crossref">Crossref scholarly metadata</option><option value="brave">Brave web search (key required)</option></select>
+          </label>
+          <button type="submit">Discover sources</button>
+        </div>
+      </form>
+      <label for="access-filter">Access category</label>
+      <select id="access-filter">
+        <option value="">All access categories</option><option value="unknown">Unknown</option>
+        <option value="open">Immediately accessible</option><option value="account">Account required</option>
+        <option value="paywall">Paywall</option><option value="inaccessible">Application inaccessible</option>
+      </select>
+      <div id="source-list" aria-live="polite"><p class="empty-copy">Loading the catalogue…</p></div>
+      <div class="pagination" aria-label="Source pages">
+        <button id="previous-page" class="secondary" type="button" disabled>Previous</button>
+        <span id="page-label">Page 1</span>
+        <button id="next-page" class="secondary" type="button" disabled>Next</button>
+      </div>
+      <details class="add-source">
+        <summary>Add a source by URL</summary>
+        <form id="add-source-form">
+          <label for="new-source-url">Source URL</label><input id="new-source-url" name="url" type="url" required />
+          <label for="new-source-title">Title</label><input id="new-source-title" name="title" type="text" maxlength="2000" required />
+          <label for="new-source-kind">Source kind</label>
+          <select id="new-source-kind" name="kind">
+            <option value="website">Website</option><option value="article">Article</option><option value="book">Book</option>
+            <option value="study">Study</option><option value="sources_of_sources">Sources of Sources</option>
+          </select>
+          <label for="new-source-doi">DOI (optional)</label><input id="new-source-doi" name="doi" type="text" />
+          <button type="submit">Catalogue candidate</button>
+        </form>
+      </details>
+    </section>
+    <section id="review-workspace" class="review-panel" aria-labelledby="review-heading" tabindex="-1">
+      <div id="source-detail">
+        <h2 id="review-heading">Select a source to review</h2>
+        <p class="empty-copy">Choose an academic topic and discover sources, or add a known URL. Discovery does not verify authorship, accuracy or copying permission.</p>
+        <div class="review-guide">
+          <h3>What you can review here</h3>
+          <p><strong>Source evidence:</strong> authorship, copying rights and academic findings, with traceable links.</p>
+          <p><strong>Individual claims:</strong> located assertions, assumptions, supporting proofs and factual challenges.</p>
+          <p><strong>Editorial notices:</strong> corrections, concerns and retractions, with affected claims and references.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="/static/academic.js" defer></script>
+</body>
+</html>

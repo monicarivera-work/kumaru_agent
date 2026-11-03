@@ -11,3 +11,9 @@ Use the `academic` section in `/docs`. Request models reject unknown fields and
 invalid bounds. Domain errors use the existing JSON handler. Extend this router
 alongside the standalone CLI and offline endpoint tests.
 [Endpoint table](../../../../ACADEMIC.md#http-api).
+
+Claim and notice endpoints expose independent findings, audit trails, dependency
+impact and human review. `/sources/{id}/check-updates` and `/monitor` share network
+admission; `/monitor/status` reports optional scheduler configuration/results
+without secrets. Source details include counts/quarantine state across all pages.
+Text retrieval refuses pending editorial notices or reviewed retractions.

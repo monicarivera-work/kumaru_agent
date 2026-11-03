@@ -24,6 +24,11 @@ broad-web discovery. The standalone `kumaru academic` CLI works without enabling
 server routes or loading a model. See [the academic guide](../../../../ACADEMIC.md).
 Configuration dumps include `academic.brave_api_key`; redact it before sharing.
 
+`academic.monitor_interval_s` defaults to zero (manual-only). A positive value
+enables periodic DOI editorial checks while the server runs.
+`academic.monitor_batch_size` is 1–20 (default 10), not a promise that the whole
+catalogue is checked each interval. Configure only one process to poll.
+
 v0.2 adds:
 
 - `backend.llama_server` (`LlamaServerOptions`), the knobs for the managed llama.cpp `llama-server` process.

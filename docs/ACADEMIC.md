@@ -4,7 +4,8 @@
 organizes their academic subjects and relationships, and collects **reviewed,
 permitted human-authored text**. It does not use an LLM to generate references,
 detect AI, review mathematics, or approve sources. Its HTTP API is opt-in.
-The existing chat UI is unchanged; use the CLI or the API's `/docs` interface.
+The existing chat workflow is preserved. Enable the academic API to use the
+separate `/academic` review dashboard, linked from the chat sidebar.
 
 ## Start with Mathematics
 
@@ -198,6 +199,15 @@ of the respective kind at value 1. Revoking the sole supporting approval also
 requires changing its decision to `unknown`/`metadata_only`/`ai`; it cannot leave
 an unsupported approval behind.
 
+Each source and claim stores up to 500 findings, with up to 100 per review.
+Updates to existing IDs do not consume another slot. Capacity failures leave the
+record unchanged; a notice impact that would exceed source capacity is not saved
+and remains pending.
+
+An explicit `"topic_reviewed": false` revokes topic-coverage approval and clears
+cached text. Passing `topic_ids` without that field still confirms coverage, for
+compatibility with existing review files.
+
 Changing origin away from `human_verified` or permission away from
 `text_permitted` removes stored text and its content metadata.
 Explicit AI disclosure discovered on recollection also revokes trust.
@@ -320,3 +330,199 @@ thread pool with two admitted jobs per process; extra jobs get HTTP 429 instead
 of blocking inference. Robots/bytes/time limits apply to CLI and API alike.
 Disabled academic mode registers no routes and creates no catalogue on startup.
 SQLite is suitable for a local application, not an unbounded multi-worker crawler.
+
+## Review dashboard
+
+With `academic.enabled: true` and UI serving enabled, open
+**http://127.0.0.1:8080/academic**, or follow **Academic source review** from the
+chat sidebar. Use the existing configured `server.api_key` if required; the
+dashboard holds it in page memory only, never local/session storage.
+The static page contains no catalogue data; all data and mutations use the
+authenticated academic API.
+
+Select a subject, discover or add a source, and choose a source row. The workspace
+has **Source evidence**, **Claims**, and **Editorial notices** sections. Review
+authorship, permissions and topic coverage explicitly; attach academic evidence
+or edit an existing finding by its stable ID. Source score components and
+source/editorial review history are inspectable.
+
+Claims have their own assumptions, precise locations, findings and history.
+Editorial notices show affected claim/reference IDs and link to affected claims.
+The pending-notice queue shows reports across the catalogue. Sources, claims and
+notices are paginated; totals on the selected source remain accurate across pages.
+Unsaved review edits are protected against source/tab switching and page exit.
+Errors retain form input and explain why the operation failed.
+
+The dashboard works on desktop and mobile without a build step or additional
+frontend dependencies. It does not use an AI detector or let a discovered URL
+silently become approved training material.
+
+## Claim-level evidence
+
+A source score cannot establish every theorem or assertion inside it. Record
+individual claims and keep their evidence separate:
+
+```powershell
+kumaru academic claim-add C:\references\claim.json
+kumaru academic claims --source SOURCE_ID --limit 100 --offset 0
+kumaru academic claim-show CLAIM_ID
+kumaru academic claim-review CLAIM_ID C:\references\claim-review.json
+```
+
+A `ClaimCreate` file looks like:
+
+```json
+{
+  "source_id": "SOURCE_ID",
+  "topic_id": "calculus",
+  "statement": "The assertion you actually located and are assessing.",
+  "locator": "Chapter 2, theorem 1, page 42",
+  "assumptions": ["The domain and conditions under which the assertion holds."]
+}
+```
+
+The source must be an individual work/website tagged with the claim topic, not a
+Sources of Sources container. The assertion, location and assumptions remain
+immutable: a different or revised assertion is a new claim, not a silent rewrite
+with an old proof attached.
+
+Review attribution separately from proof. `ClaimReview` includes `reviewed`,
+an audit `note` and optional findings:
+
+```json
+{
+  "reviewed": true,
+  "note": "Describe your actual attribution and evidence review.",
+  "evidence": [
+    {
+      "id": "stable-finding-id",
+      "source_id": "EVIDENCE_SOURCE_ID",
+      "stance": "supports",
+      "kind": "proof",
+      "value": 0.9,
+      "url": "https://example.org/actual-evidence",
+      "locator": "Proof of theorem 1, paragraph 3",
+      "note": "The checked reasoning and its limitations.",
+      "topic_ids": ["calculus"],
+      "reviewed": true
+    }
+  ]
+}
+```
+
+This is a record-shape example, not evidence for a real source. Replace the URLs,
+IDs and findings with your actual reviewed evidence. Finding source IDs must
+exist in the catalogue. Their human provenance and topic coverage must be
+reviewed before they contribute credit. Findings from containers, unverified
+sources, sources with pending notices or retracted sources are excluded. External
+references with reviewed factual flaws on the topic are also excluded until the
+source evidence is resolved or a different reliable reference is supplied.
+
+Stances are `supports`, `challenges`, and `context`; contextual findings are
+visible but do not score. Challenges must be `factual_criticism` or `retraction`,
+not a vague disagreement. Every scoped finding must match this claim's exact
+topic. Origin/permission findings belong on sources, never claims.
+Stable IDs update findings; setting their `reviewed` flag false withdraws credit.
+Every claim review is retained in its audit trail.
+
+Assessments expose the existing dimension weights and `claim-v1` eligibility
+rules, with states `unreviewed`, `insufficient_evidence`, `evidence_supported`,
+`disputed` and `withdrawn`. Whole-source proof, credentials and peer-review scores
+are **not inherited**. Credentials/process evidence alone or zero-strength proof
+does not earn an `evidence_supported` state. Positive, applicable reviewed proof,
+historical acceptance or replication is required. These states still do not
+certify truth. Source-wide confirmed withdrawals and topic-specific reviewed
+factual flaws can limit claims attributed to that source.
+
+## Corrections, concerns and retractions
+
+```powershell
+kumaru academic check-updates SOURCE_ID
+kumaru academic monitor --limit 10
+kumaru academic notices --state reported --limit 100 --offset 0
+kumaru academic notice-add C:\references\notice.json
+kumaru academic notice-review NOTICE_ID C:\references\notice-review.json
+```
+
+For DOI works, monitoring uses Crossref's documented `updates:DOI` filter to find
+**editorial notices for that work**, not merely the work's own record.
+Notice DOI, target match, type, date, provider and request URL are retained.
+Errata/corrigenda become corrections; withdrawals become retractions; concerns
+and unrecognized editorial update types remain distinct. A record that does not
+identify the requested DOI fails visibly rather than being attributed to the
+wrong source.
+
+Automatically discovered notices start as **reported**, with no invented
+numeric impact. They warn about unresolved updates and quarantine trusted text
+collection, export and API retrieval until human review. Claim evidence using
+the affected source is held back; affected direct citations/corroborating
+references and primary/evidence-linked claims are listed. Container membership
+alone does not make a database's other contents flawed. These dependency lists
+are direct, not a claim to have proved every transitive impact.
+
+Manual reports use a `NoticeCreate` record with `source_id`, `kind`, `url`,
+`title` and optional `event_date`; kinds are `correction`, `retraction`,
+`expression_of_concern`, `update`. Non-DOI websites can therefore still be
+reviewed. They are not automatically monitored by Crossref.
+
+A `NoticeReview` contains:
+
+```json
+{
+  "state": "confirmed",
+  "note": "Your checked factual impact and evidence.",
+  "impact": 0.5,
+  "affected_topic_ids": ["calculus"]
+}
+```
+
+States are `confirmed`, `dismissed` and `reported` (reopen). Confirmation requires
+an explicit impact from 0 to 1. Non-retraction factual impacts above zero require
+specific source topic IDs. A confirmed retraction requires impact **1**; dismiss
+a mistaken identity instead of confirming it with a zero penalty.
+Zero can acknowledge a typographical/non-factual correction without inventing
+a flaw. Confirming clears cached text so an obsolete capture is not reused.
+Positive confirmed impacts become reviewed topic-scoped factual criticism or
+source-wide retraction evidence and affect scores. Confirmed retractions remain
+excluded from trusted text, including manually entered reviewed retraction
+evidence. Dismissing/reopening removes that notice's assessed penalty but retains
+the audit history; rediscovery preserves the human decision. Revised claims
+should be recorded and reviewed as new assertions.
+
+Each check persists its time, error and partial-scan state. Provider/DNS/schema
+failures are not recorded as clean results. A bounded batch reports errors per
+source and scans never/least-recently checked works first. Each source query is
+limited to the first 100 editorial records; a larger result count is explicitly
+reported as partial. Crossref metadata is not comprehensive; no reported notice
+does not prove that no correction exists.
+
+Periodic checks are optional and run only while the Kumaru server is alive:
+
+```yaml
+academic:
+  enabled: true
+  monitor_interval_s: 3600
+  monitor_batch_size: 10
+```
+
+`monitor_interval_s: 0` (default) means **manual only**. Positive values wait that
+interval between batches; the configured batch does not mean every catalogue
+source is checked each hour. Each process has one scheduler using the same
+two-slot network limit as manual actions. Shutdown stops further sources and
+joins an in-progress worker. Multi-process deployments should enable the
+scheduler in only one process to avoid duplicate polling.
+
+Additional authenticated API endpoints:
+
+| Method/path under `/v1/academic` | Operation |
+|---|---|
+| `GET /claims`, `POST /claims` | Filter/paginate or record located assertions. |
+| `GET /claims/{id}`, `POST /claims/{id}/review` | Findings, assessments and human review. |
+| `GET /notices`, `POST /notices` | Editorial queue or manual report. |
+| `POST /notices/{id}/review` | Confirm, dismiss or reopen with an audit note. |
+| `POST /sources/{id}/check-updates` | Check one DOI work. |
+| `POST /monitor?limit=10`, `GET /monitor/status` | Bounded batch and optional scheduler status. |
+
+New tables are added with `CREATE TABLE IF NOT EXISTS`; existing catalogue
+sources, reviews and collected content are preserved. Back up the SQLite file
+before upgrading. No new optional packages are required.

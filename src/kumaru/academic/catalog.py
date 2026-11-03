@@ -17,6 +17,15 @@ from kumaru.academic.models import (
     mathematics_topics,
     now,
 )
+from kumaru.academic.reliability import (
+    Claim,
+    ClaimCreate,
+    ClaimReview,
+    Notice,
+    NoticeCreate,
+    NoticeReview,
+    claim_score,
+)
 from kumaru.academic.scoring import score_source
 from kumaru.core.errors import ConfigError, RequestError
 
@@ -52,6 +61,29 @@ class Catalog:
                 CREATE INDEX IF NOT EXISTS links_target ON links(target_id, kind);
                 CREATE INDEX IF NOT EXISTS topics_sources ON source_topics(topic_id);
                 CREATE INDEX IF NOT EXISTS source_doi ON sources(json_extract(payload, '$.doi'));
+                CREATE TABLE IF NOT EXISTS claims (
+                    id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(id),
+                    topic_id TEXT NOT NULL REFERENCES topics(id), payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS claim_refs (
+                    claim_id TEXT REFERENCES claims(id), source_id TEXT REFERENCES sources(id),
+                    PRIMARY KEY(claim_id, source_id)
+                );
+                CREATE TABLE IF NOT EXISTS claim_reviews (
+                    id INTEGER PRIMARY KEY, claim_id TEXT REFERENCES claims(id),
+                    recorded_at TEXT NOT NULL, payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS notices (
+                    id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(id),
+                    payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS update_checks (
+                    source_id TEXT PRIMARY KEY REFERENCES sources(id), checked_at TEXT NOT NULL,
+                    error TEXT, partial INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS claims_source ON claims(source_id);
+                CREATE INDEX IF NOT EXISTS claim_refs_source ON claim_refs(source_id);
+                CREATE INDEX IF NOT EXISTS notices_source ON notices(source_id);
             """)
             for topic in mathematics_topics():
                 db.execute(
@@ -190,10 +222,12 @@ class Catalog:
             source = self._get(db, id_)
             evidence = {item.id: item for item in source.evidence}
             evidence.update({item.id: item for item in review.evidence})
+            if len(evidence) > 500:
+                raise RequestError("Sources support at most 500 findings; update an existing evidence ID")
             updates = review.model_dump(exclude_none=True, exclude={"evidence"})
             updates["evidence"] = [item.model_dump() for item in evidence.values()]
             if review.topic_ids is not None:
-                updates["topic_reviewed"] = True
+                updates["topic_reviewed"] = review.topic_reviewed if review.topic_reviewed is not None else True
             for field, kind, affirmative in (
                 ("origin", "origin", "human_verified"),
                 ("permission", "permission", "text_permitted"),
@@ -206,6 +240,7 @@ class Catalog:
             if (
                 updates.get("origin", source.origin) != "human_verified"
                 or updates.get("permission", source.permission) != "text_permitted"
+                or not updates.get("topic_reviewed", source.topic_reviewed)
             ):
                 updates.update(
                     text=None, text_url=None, text_sha256=None, collected_at=None,
@@ -345,11 +380,20 @@ class Catalog:
                 )
             ]
             peers = [self._get(db, peer) for peer in ids]
-        return [
+        blocked_peers = self.pending_notice_sources({peer.id for peer in peers})
+        results = [
             score_source(source, topic, independent_sources=[
                 peer.id for peer in peers
                 if peer.origin == "human_verified" and peer.topic_reviewed
+                and peer.kind != "sources_of_sources"
                 and topic in peer.topic_ids
+                and peer.id not in blocked_peers
+                and not any(
+                    item.reviewed and item.value > 0
+                    and (item.kind == "retraction" or (
+                        item.kind == "factual_criticism" and (not item.topic_ids or topic in item.topic_ids)
+                    )) for item in peer.evidence
+                )
                 and peer.publisher and source.publisher
                 and peer.publisher.strip().casefold() != source.publisher.strip().casefold()
                 and peer.authors and source.authors
@@ -359,6 +403,286 @@ class Catalog:
             ]).model_dump()
             for topic in source.topic_ids
         ]
+        if id_ in self.pending_notice_sources({id_}):
+            for result in results:
+                result["warnings"].append("Editorial updates have been reported and require human review.")
+        return results
+
+    def add_claim(self, record: ClaimCreate) -> Claim:
+        claim = Claim(**record.model_dump())
+        with self.connection() as db:
+            source = self._get(db, claim.source_id)
+            if source.kind == "sources_of_sources" or claim.topic_id not in source.topic_ids:
+                raise RequestError("Claims require an individual source tagged with the claim topic")
+            db.execute(
+                "INSERT INTO claims VALUES (?, ?, ?, ?)",
+                (claim.id, claim.source_id, claim.topic_id, claim.model_dump_json()),
+            )
+        return claim
+
+    @staticmethod
+    def _claim(db: sqlite3.Connection, id_: str) -> Claim:
+        row = db.execute("SELECT payload FROM claims WHERE id=?", (id_,)).fetchone()
+        if row is None:
+            raise RequestError(f"Unknown academic claim: {id_}")
+        return Claim.model_validate_json(row[0])
+
+    def get_claim(self, id_: str) -> Claim:
+        with self.connection() as db:
+            return self._claim(db, id_)
+
+    def claims(
+        self, *, source_id: str | None = None, topic_id: str | None = None,
+        limit: int = 100, offset: int = 0,
+    ) -> list[Claim]:
+        if not 1 <= limit <= 500 or offset < 0:
+            raise RequestError("Claim page requires limit 1..500 and nonnegative offset")
+        clauses, args = [], []
+        if source_id:
+            self.get(source_id)
+            clauses.append("source_id=?")
+            args.append(source_id)
+        if topic_id:
+            ids = sorted(self.descendants(topic_id))
+            clauses.append("topic_id IN (" + ",".join("?" for _ in ids) + ")")
+            args.extend(ids)
+        with self.connection() as db:
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            rows = db.execute(
+                "SELECT payload FROM claims" + where + " ORDER BY id LIMIT ? OFFSET ?",
+                [*args, limit, offset],
+            )
+            return [Claim.model_validate_json(row[0]) for row in rows]
+
+    def review_claim(self, id_: str, review: ClaimReview) -> Claim:
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            claim = self._claim(db, id_)
+            findings = {item.id: item for item in claim.evidence}
+            findings.update({item.id: item for item in review.evidence})
+            if len(findings) > 500:
+                raise RequestError("Claims support at most 500 findings; update an existing evidence ID")
+            for item in findings.values():
+                self._get(db, item.source_id)
+                if item.topic_ids and set(item.topic_ids) != {claim.topic_id}:
+                    raise RequestError("Claim findings must address only this claim's topic")
+            claim = Claim.model_validate({
+                **claim.model_dump(), "reviewed": review.reviewed,
+                "evidence": [item.model_dump() for item in findings.values()], "updated_at": now(),
+            })
+            db.execute("UPDATE claims SET payload=? WHERE id=?", (claim.model_dump_json(), id_))
+            db.execute("DELETE FROM claim_refs WHERE claim_id=?", (id_,))
+            db.executemany(
+                "INSERT INTO claim_refs VALUES (?, ?)",
+                [(id_, source_id) for source_id in {item.source_id for item in claim.evidence}],
+            )
+            db.execute(
+                "INSERT INTO claim_reviews(claim_id,recorded_at,payload) VALUES(?,?,?)",
+                (id_, now(), review.model_dump_json()),
+            )
+        return claim
+
+    def claim_details(self, id_: str) -> dict:
+        claim = self.get_claim(id_)
+        source = self.get(claim.source_id)
+        references = {item.source_id: self.get(item.source_id) for item in claim.evidence}
+        blocked = self.pending_notice_sources({source.id, *references})
+        with self.connection() as db:
+            history = [
+                {"recorded_at": row[0], "review": json.loads(row[1])}
+                for row in db.execute(
+                    "SELECT recorded_at,payload FROM claim_reviews WHERE claim_id=? ORDER BY id",
+                    (id_,),
+                )
+            ]
+        return dict(
+            claim=claim.model_dump(), assessment=claim_score(
+                claim, source, references, blocked_sources=blocked,
+            ), reviews=history,
+        )
+
+    @staticmethod
+    def _notice(db: sqlite3.Connection, id_: str) -> Notice:
+        row = db.execute("SELECT payload FROM notices WHERE id=?", (id_,)).fetchone()
+        if row is None:
+            raise RequestError(f"Unknown editorial notice: {id_}")
+        return Notice.model_validate_json(row[0])
+
+    def report_notice(self, record: NoticeCreate) -> Notice:
+        notice = Notice(**record.model_dump())
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._get(db, notice.source_id)
+            row = db.execute("SELECT payload FROM notices WHERE id=?", (notice.id,)).fetchone()
+            if row:
+                current = Notice.model_validate_json(row[0])
+                notice = Notice.model_validate({
+                    **current.model_dump(), "last_seen_at": now(),
+                    "title": notice.title, "metadata_url": notice.metadata_url,
+                })
+            db.execute(
+                "INSERT INTO notices VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+                (notice.id, notice.source_id, notice.model_dump_json()),
+            )
+        return notice
+
+    def notices(
+        self, *, source_id: str | None = None, state: str | None = None,
+        limit: int = 100, offset: int = 0,
+    ) -> list[Notice]:
+        if not 1 <= limit <= 500 or offset < 0:
+            raise RequestError("Notice page requires limit 1..500 and nonnegative offset")
+        if state not in {None, "reported", "confirmed", "dismissed"}:
+            raise RequestError("Unknown notice state")
+        clauses, args = [], []
+        if source_id:
+            self.get(source_id)
+            clauses.append("source_id=?")
+            args.append(source_id)
+        if state:
+            clauses.append("json_extract(payload,'$.state')=?")
+            args.append(state)
+        with self.connection() as db:
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            rows = db.execute(
+                "SELECT payload FROM notices" + where + " ORDER BY rowid DESC LIMIT ? OFFSET ?",
+                [*args, limit, offset],
+            )
+            return [Notice.model_validate_json(row[0]) for row in rows]
+
+    def notice_details(self, id_: str) -> dict:
+        with self.connection() as db:
+            notice = self._notice(db, id_)
+            claims = [
+                row[0] for row in db.execute(
+                    """SELECT id FROM claims WHERE source_id=?
+                       UNION SELECT claim_id FROM claim_refs WHERE source_id=?""",
+                    (notice.source_id, notice.source_id),
+                )
+            ]
+            dependents = [
+                row[0] for row in db.execute(
+                    """SELECT source_id FROM links WHERE target_id=? AND kind='cites'
+                       UNION SELECT target_id FROM links WHERE source_id=? AND kind='corroborates'""",
+                    (notice.source_id, notice.source_id),
+                )
+            ]
+        if notice.affected_topic_ids:
+            claims = [
+                id_ for id_ in claims if self.get_claim(id_).topic_id in notice.affected_topic_ids
+            ]
+        return dict(notice=notice.model_dump(), affected_claim_ids=claims, dependent_source_ids=dependents)
+
+    def review_notice(self, id_: str, review: NoticeReview) -> Notice:
+        from kumaru.academic.models import Evidence
+
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            notice = self._notice(db, id_)
+            source = self._get(db, notice.source_id)
+            if review.state == "confirmed" and notice.kind == "retraction" and review.impact != 1:
+                raise RequestError("A confirmed retraction requires impact 1; dismiss an incorrect report instead")
+            if not set(review.affected_topic_ids) <= set(source.topic_ids):
+                raise RequestError("Notice impact topics must be tagged on the source")
+            if (
+                review.state == "confirmed" and review.impact and notice.kind != "retraction"
+                and not review.affected_topic_ids
+            ):
+                raise RequestError("Factual impacts require specific affected topic IDs")
+            notice = Notice.model_validate({
+                **notice.model_dump(), "state": review.state, "impact": review.impact,
+                "review_note": review.note, "affected_topic_ids": review.affected_topic_ids,
+                "reviewed_at": now(),
+            })
+            evidence_id = f"notice:{id_}"
+            findings = [item for item in source.evidence if item.id != evidence_id]
+            if review.state == "confirmed" and review.impact:
+                if len(findings) >= 500:
+                    raise RequestError("Source evidence is full (500 findings); notice confirmation was not saved")
+                findings.append(Evidence(
+                    id=evidence_id, kind="retraction" if notice.kind == "retraction" else "factual_criticism",
+                    value=review.impact, url=notice.url, note=review.note,
+                    topic_ids=[] if notice.kind == "retraction" else review.affected_topic_ids,
+                    reviewed=True,
+                ))
+            updates: dict = {"evidence": [item.model_dump() for item in findings]}
+            if review.state == "confirmed":
+                updates.update(
+                    text=None, text_url=None, text_sha256=None, collected_at=None,
+                    content_type=None, word_count=0, topic_word_counts={}, truncated=False,
+                )
+            self._save(db, Source.model_validate({**source.model_dump(), **updates}))
+            db.execute("UPDATE notices SET payload=? WHERE id=?", (notice.model_dump_json(), id_))
+            db.execute(
+                "INSERT INTO reviews(source_id,recorded_at,payload) VALUES(?,?,?)",
+                (source.id, now(), json.dumps({"notice_id": id_, **review.model_dump()})),
+            )
+        return notice
+
+    def pending_notice_sources(self, ids: set[str]) -> set[str]:
+        if not ids:
+            return set()
+        with self.connection() as db:
+            rows = db.execute(
+                "SELECT DISTINCT source_id FROM notices WHERE "
+                "json_extract(payload,'$.state')='reported' AND source_id IN ("
+                + ",".join("?" for _ in ids) + ")", sorted(ids),
+            )
+            return {row[0] for row in rows}
+
+    def require_current_review(self, id_: str) -> None:
+        source = self.get(id_)
+        if any(item.kind == "retraction" and item.reviewed and item.value > 0 for item in source.evidence):
+            raise RequestError("Retracted material is not eligible trusted text")
+        with self.connection() as db:
+            rows = db.execute("SELECT payload FROM notices WHERE source_id=?", (id_,))
+            for row in rows:
+                notice = Notice.model_validate_json(row[0])
+                if notice.state == "reported" or (
+                    notice.state == "confirmed" and notice.kind == "retraction" and notice.impact
+                ):
+                    raise RequestError("Editorial notices require review; retracted material is not trusted text")
+
+    def review_summary(self, id_: str) -> dict:
+        source = self.get(id_)
+        with self.connection() as db:
+            claim_count = db.execute("SELECT count(*) FROM claims WHERE source_id=?", (id_,)).fetchone()[0]
+            notice_count = db.execute("SELECT count(*) FROM notices WHERE source_id=?", (id_,)).fetchone()[0]
+        pending = id_ in self.pending_notice_sources({id_})
+        withdrawn = any(
+            item.kind == "retraction" and item.reviewed and item.value > 0 for item in source.evidence
+        )
+        return dict(
+            claim_count=claim_count, notice_count=notice_count,
+            pending_notices=pending, withdrawn=withdrawn, trusted_text_blocked=pending or withdrawn,
+        )
+
+    def record_check(self, id_: str, *, error: str | None = None, partial: bool = False) -> None:
+        with self.connection() as db:
+            self._get(db, id_)
+            db.execute(
+                "INSERT INTO update_checks VALUES(?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET "
+                "checked_at=excluded.checked_at,error=excluded.error,partial=excluded.partial",
+                (id_, now(), error, int(partial)),
+            )
+
+    def check_status(self, id_: str) -> dict:
+        with self.connection() as db:
+            self._get(db, id_)
+            row = db.execute("SELECT * FROM update_checks WHERE source_id=?", (id_,)).fetchone()
+            return dict(row) if row else dict(source_id=id_, checked_at=None, error=None, partial=False)
+
+    def due_sources(self, limit: int = 10) -> list[Source]:
+        if not 1 <= limit <= 20:
+            raise RequestError("Monitor batches are limited to 1..20 sources")
+        with self.connection() as db:
+            rows = db.execute(
+                """SELECT s.payload FROM sources s LEFT JOIN update_checks c ON s.id=c.source_id
+                   WHERE json_extract(s.payload,'$.doi') IS NOT NULL
+                   AND json_extract(s.payload,'$.kind') != 'sources_of_sources'
+                   ORDER BY c.checked_at, s.id LIMIT ?""", (limit,),
+            )
+            return [Source.model_validate_json(row[0]) for row in rows]
 
     def history(self, id_: str) -> list[dict]:
         self.get(id_)

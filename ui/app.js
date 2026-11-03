@@ -488,6 +488,7 @@ async function refreshInfo() {
     const res = await fetch("/v1/info");
     const info = await res.json();
     state.info = info;
+    $("academic-link").hidden = !info.academic_enabled;
 
     const dot = $("status-dot");
     const txt = $("status-text");

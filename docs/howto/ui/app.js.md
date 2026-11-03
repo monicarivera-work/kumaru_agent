@@ -23,6 +23,10 @@
 
 It only ever talks to its own origin, through absolute paths (`/v1/…`).
 
+The status poll also reads `academic_enabled` to reveal the opt-in academic
+review link. The separate dashboard has its own in-memory authorization state;
+chat storage is not used for catalogue data or academic API keys.
+
 ## Why it exists
 
 The Python server serves the UI straight from the repo's `ui\` folder, and the UI must work offline. So it is zero-build vanilla JS: no npm, no bundler, nothing to download; edit the file and reload. The header comment (lines 3–24) states four rules; it says "Three things" but lists four:
