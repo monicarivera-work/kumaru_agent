@@ -225,6 +225,16 @@ def create_app(config: KumaruConfig | None = None) -> FastAPI:
 
     app.include_router(chat_router)
 
+    if config.academic.enabled:
+        from threading import BoundedSemaphore
+
+        from kumaru.academic.catalog import Catalog
+        from kumaru.server.routes_academic import router as academic_router
+
+        app.state.academic = Catalog(config.academic.database)
+        app.state.academic_network = BoundedSemaphore(2)
+        app.include_router(academic_router)
+
     if config.server.serve_ui and UI_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(UI_DIR)), name="static")
 

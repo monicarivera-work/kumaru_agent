@@ -16,7 +16,13 @@
 
 This file defines the configuration models and the merge that builds one `KumaruConfig`. The top-level sections, in order, are:
 
-`backend`, `generation`, `thinking_mode`, `agent`, `server`, `telemetry`
+`backend`, `generation`, `thinking_mode`, `agent`, `server`, `telemetry`, `academic`
+
+`academic` enables the optional academic HTTP catalogue (`enabled`, default false),
+sets its persistent SQLite `database`, and supplies optional `brave_api_key` for
+broad-web discovery. The standalone `kumaru academic` CLI works without enabling
+server routes or loading a model. See [the academic guide](../../../../ACADEMIC.md).
+Configuration dumps include `academic.brave_api_key`; redact it before sharing.
 
 v0.2 adds:
 

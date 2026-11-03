@@ -80,6 +80,7 @@ Full walkthrough with troubleshooting: [`docs/QUICKSTART.md`](docs/QUICKSTART.md
 | `kumaru bench` | Public benchmarks with error bars; compares two runs with significance tests |
 | `kumaru distill` | Turns a large model's graded answers into training data for a small, fast one ([how](docs/TRAINING.md#part-3--distillation)) |
 | `kumaru learn` | Create a versioned local reference pack, or index a documentation folder, for a language or platform |
+| `kumaru academic` | Discover academic sources, review provenance/rights/evidence, navigate subject/source hierarchies, and collect permitted human-authored text ([guide](docs/ACADEMIC.md)) |
 
 ---
 

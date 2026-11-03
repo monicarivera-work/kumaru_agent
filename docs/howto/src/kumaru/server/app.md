@@ -20,7 +20,8 @@
 4. CORS middleware.
 5. The `KumaruError` exception handler.
 6. The router from `src\kumaru\server\routes_chat.py`.
-7. If `server.serve_ui` is true and `UI_DIR` exists: the UI, with `ui\` mounted at `/static` and `GET /` serving `ui\index.html`.
+7. If `academic.enabled` is true: create the persistent source catalogue, a two-slot network semaphore, and register the authenticated `/v1/academic` router. Disabled mode creates neither routes nor database.
+8. If `server.serve_ui` is true and `UI_DIR` exists: the UI, with `ui\` mounted at `/static` and `GET /` serving `ui\index.html`.
 
 `run(config)` serves that app with uvicorn; `kumaru serve` calls it.
 
