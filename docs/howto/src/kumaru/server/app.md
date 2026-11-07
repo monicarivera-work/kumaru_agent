@@ -30,10 +30,11 @@ starts optional periodic editorial checks and stops/joins their worker before
 backend shutdown. Default `monitor_interval_s: 0` performs no automatic network
 requests; the academic API remains independent of model readiness.
 
-Importing the module pins two MIME types, process-wide:
+Importing the module pins three MIME types, process-wide:
 
 ```python
 mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("text/css", ".css")
 ```
 
@@ -50,7 +51,7 @@ If loading ran inside a synchronous startup hook, the port would stay closed and
 
 **One error contract.** Domain errors carry their own `http_status` and `hint`, so a single handler maps every one to `{"error": {"message", "type", "hint"}}` without leaking stack traces. The full table is in `docs\howto\src\kumaru\core\errors.md`.
 
-**Pinned MIME types.** On Windows, Python's `mimetypes` reads the registry (`HKEY_CLASSES_ROOT\.css` and `HKEY_CLASSES_ROOT\.js`, value `Content Type`). Some installers set those to `text/plain` or a legacy type. `StaticFiles` would then serve `styles.css` as `text/plain`, and browsers refuse to apply a stylesheet with a non-CSS MIME type, so the UI renders unstyled on that machine only. Scripts get the same strict check when loaded as modules or with `X-Content-Type-Options: nosniff`. `add_type` overrides the registry, so every machine serves the same headers.
+**Pinned MIME types.** On Windows, Python's `mimetypes` reads the registry (`HKEY_CLASSES_ROOT\.css` and `HKEY_CLASSES_ROOT\.js`, value `Content Type`). Some installers set those to `text/plain` or a legacy type. `StaticFiles` would then serve `styles.css` as `text/plain`, and browsers refuse to apply a stylesheet with a non-CSS MIME type, so the UI renders unstyled on that machine only. Scripts get the same strict check when loaded as modules or with `X-Content-Type-Options: nosniff`, which matters for the academic dashboard's native ES modules under `/static/academic/`. `add_type` overrides the registry, so every machine serves the same headers.
 
 ## Mental model
 
@@ -104,7 +105,7 @@ If the new backend fails:
 | Name | Signature | What it's for |
 |---|---|---|
 | `UI_DIR` | `Path` = `REPO_ROOT / "ui"` | Static UI directory. Exists only in a source checkout or editable install. |
-| *(import side effect)* | `mimetypes.add_type("text/javascript", ".js")`; `mimetypes.add_type("text/css", ".css")` | Browser-safe content types regardless of the Windows registry. |
+| *(import side effect)* | `mimetypes.add_type("text/javascript", ".js")`; `".mjs"`; `mimetypes.add_type("text/css", ".css")` | Browser-safe content types regardless of the Windows registry. |
 | `Metrics` | `Metrics()` | Counters `requests`, `errors`, `prompt_tokens`, `completion_tokens`, `total_latency_ms`, `started_at`. |
 | `Metrics.record` | `record(self, *, prompt: int, completion: int, latency_ms: float) -> None` | Add one **successful** generation. |
 | `Metrics.snapshot` | `snapshot(self) -> dict[str, Any]` | `uptime_s`, `requests`, `errors`, `prompt_tokens`, `completion_tokens`, `avg_latency_ms`, `avg_tokens_per_second`; served at `/metrics` and inside `/v1/info`. |
@@ -202,7 +203,7 @@ curl.exe -sI http://127.0.0.1:8080/static/app.js        # content-type: text/jav
   When you outgrow it, swap in `prometheus_client`; the call sites stay the same.
 - **A route module.** Create an `APIRouter` in `src\kumaru\server\routes_<name>.py`, then add `app.include_router(...)` next to the chat router in `create_app()`. Import it inside the function, as the chat router is, because `routes_chat` imports `AppState` from this module.
 - **A new error status.** Subclass `KumaruError` with an `http_status` (`docs\howto\src\kumaru\core\errors.md`); the existing handler picks it up. Add an `@app.exception_handler` only for exception types outside the `KumaruError` tree.
-- **A new UI asset type.** Pin it next to the existing two, for example `mimetypes.add_type("application/wasm", ".wasm")`.
+- **A new UI asset type.** Pin it next to the existing three, for example `mimetypes.add_type("application/wasm", ".wasm")`.
 
 ## Failure modes
 

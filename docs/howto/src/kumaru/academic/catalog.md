@@ -19,3 +19,11 @@ Summary counts/quarantine state scan the catalogue, not just a display page.
 Database failures raise `ConfigError`, invalid operations raise `RequestError`.
 Back up the SQLite file before schema changes. This is local storage, not a
 distributed crawler. [Workflow and schema concepts](../../../../ACADEMIC.md).
+
+Dashboard read models avoid N+1 reads: `overview(topic_id)` aggregates counts and
+per-topic totals in SQL, `library(...)` returns a filtered, sorted, paged summary
+(text and evidence are never loaded into items; `q` is a literal Unicode-casefolded
+substring match with `%`/`_`/`\` escaped), and `source_cards(ids)` resolves titles in
+one query. `claim_details`, `notice_details` and the source route use them so clients
+show titles instead of IDs. `claims(reviewed=)` filters in SQL, and
+`notice_details` filters affected claims by topic in SQL.

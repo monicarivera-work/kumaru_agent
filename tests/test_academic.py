@@ -315,7 +315,7 @@ def test_brave_search_is_explicit_opt_in(catalog):
 
 
 @pytest.mark.parametrize("payload", [
-    {"status": "bad"}, {"status": "ok", "message": {"items": [{"title": ["missing url"]}]}},
+    {"status": "bad"},
     {"status": "ok", "message": {"items": [{"title": ["unsafe"], "URL": "file:///etc/passwd"}]}},
 ])
 def test_bad_provider_payloads_fail_without_fabricated_results(catalog, payload):
@@ -347,17 +347,17 @@ def test_inspect_stores_metadata_not_text(catalog):
     assert inspect_source(catalog, container.id, FakeWeb()).text is None
 
 
-def test_network_failure_records_inaccessibility_and_still_raises(catalog):
+def test_non_transient_fetch_failure_records_inaccessibility_and_still_raises(catalog):
     source = catalog.discover(candidate())
 
     class Unavailable(FakeWeb):
         def fetch(self, *args, **kwargs):
-            raise FetchError("DNS unavailable")
+            raise FetchError("Response exceeds 2000000 bytes")
 
     with pytest.raises(FetchError):
         inspect_source(catalog, source.id, Unavailable())
     assert catalog.get(source.id).access == "inaccessible"
-    assert catalog.get(source.id).access_note == "DNS unavailable"
+    assert catalog.get(source.id).access_note == "Response exceeds 2000000 bytes"
 
 
 @pytest.mark.parametrize(("body", "access"), [

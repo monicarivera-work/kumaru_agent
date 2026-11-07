@@ -41,9 +41,10 @@ logger = get_logger(__name__)
 UI_DIR = REPO_ROOT / "ui"
 
 # Python takes MIME types from the Windows registry, where some installers map
-# .js or .css to text/plain, and browsers refuse a stylesheet served that way.
-# Pin the types the UI depends on so it loads the same on every machine.
+# .js or .css to text/plain, and browsers refuse a stylesheet or ES module served
+# that way. Pin the types the UI depends on so it loads the same on every machine.
 mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("text/css", ".css")
 
 

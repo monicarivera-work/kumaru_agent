@@ -32,6 +32,12 @@ class FetchError(RequestError):
     http_status = 502
 
 
+class TransientFetchError(FetchError):
+    """A network or provider outage that says nothing about the source itself."""
+
+    http_status = 503
+
+
 class AccessBlocked(RequestError):
     http_status = 403
 
@@ -63,7 +69,7 @@ def public_addresses(host: str, port: int) -> list[str]:
             str(info[4][0]) for info in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         ))
     except socket.gaierror as exc:
-        raise FetchError(f"Cannot resolve academic source host: {host}") from exc
+        raise TransientFetchError(f"Cannot resolve academic source host: {host}") from exc
     if not addresses:
         raise FetchError("Academic source host has no addresses")
     for address in addresses:
@@ -135,6 +141,10 @@ class PublicWeb:
                 return Page(
                     url, response.status_code, response.headers.get("content-type", ""), bytes(body),
                 )
+        except httpx.TransportError as exc:
+            raise TransientFetchError(
+                f"Academic retrieval failed for {target.host}: {type(exc).__name__}",
+            ) from exc
         except httpx.HTTPError as exc:
             raise FetchError(f"Academic retrieval failed for {target.host}: {type(exc).__name__}") from exc
 
@@ -149,6 +159,8 @@ class PublicWeb:
                 parser.parse(["User-agent: *", "Allow: /"])
             elif page.status in {401, 403}:
                 raise AccessBlocked("robots.txt disallows automated access")
+            elif page.status == 429 or page.status >= 500:
+                raise TransientFetchError(f"Cannot establish robots policy (HTTP {page.status})")
             elif page.status != 200:
                 raise FetchError(f"Cannot establish robots policy (HTTP {page.status})")
             else:
@@ -183,6 +195,8 @@ class PublicWeb:
 
     def json(self, url: str, *, headers: dict[str, str] | None = None) -> dict:
         page = self.fetch(url, robots=False, headers=headers)
+        if page.status == 429 or page.status >= 500:
+            raise TransientFetchError(f"Search provider returned HTTP {page.status}")
         if page.status != 200:
             raise FetchError(f"Search provider returned HTTP {page.status}")
         try:
@@ -223,7 +237,9 @@ class Metadata(HTMLParser):
 
 
 def analyze_page(page: Page) -> tuple[dict, str]:
-    if page.status in {401, 402, 403, 404, 429, 451}:
+    if page.status == 429 or page.status >= 500:
+        raise TransientFetchError(f"Source returned HTTP {page.status}; retry later")
+    if page.status in {401, 402, 403, 404, 451}:
         access: Access = "account" if page.status == 401 else "paywall" if page.status == 402 else "inaccessible"
         raise AccessBlocked(f"Source returned HTTP {page.status}; no text collected", access)
     if page.status != 200:
@@ -290,6 +306,9 @@ def inspect_source(catalog: Catalog, id_: str, web: PublicWeb) -> Source:
         updates, _ = analyze_page(page)
     except AccessBlocked as exc:
         updates = dict(access=exc.access, access_note=str(exc))
+    except TransientFetchError:
+        # An outage on our side is not evidence about the source's access.
+        raise
     except FetchError as exc:
         catalog.save_metadata(id_, dict(access="inaccessible", access_note=str(exc)))
         raise
@@ -316,6 +335,8 @@ def collect_source(catalog: Catalog, id_: str, web: PublicWeb) -> Source:
         updates, text = analyze_page(page)
     except AccessBlocked as exc:
         catalog.save_collection(id_, dict(access=exc.access, access_note=str(exc)))
+        raise
+    except TransientFetchError:
         raise
     except FetchError as exc:
         catalog.save_metadata(id_, dict(access="inaccessible", access_note=str(exc)))

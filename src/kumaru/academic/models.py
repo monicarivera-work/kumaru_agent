@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 TopicLevel = Literal["area", "subfield", "unit", "chapter", "subchapter"]
 Access = Literal["unknown", "open", "account", "paywall", "inaccessible"]
 Origin = Literal["unknown", "human_verified", "ai"]
+SourceKind = Literal["article", "book", "study", "website", "sources_of_sources"]
 EvidenceKind = Literal[
     "historical_acceptance", "credentials", "proof", "peer_review", "replication",
     "factual_criticism", "retraction", "corroboration", "origin", "permission",
@@ -80,7 +81,7 @@ class Source(Record):
     id: str = ""
     url: str
     title: str = Field(min_length=1, max_length=2000)
-    kind: Literal["article", "book", "study", "website", "sources_of_sources"] = "website"
+    kind: SourceKind = "website"
     authors: list[str] = Field(default_factory=list, max_length=500)
     publisher: str | None = None
     doi: str | None = None
@@ -144,6 +145,8 @@ class Review(Record):
     origin: Origin | None = None
     permission: Literal["unknown", "metadata_only", "text_permitted"] | None = None
     access: Access | None = None
+    # Why the source is walled off or reachable, recorded with the decision.
+    access_note: str | None = Field(default=None, max_length=2000)
     topic_ids: list[str] | None = Field(default=None, max_length=100)
     topic_reviewed: bool | None = None
     evidence: list[Evidence] = Field(default_factory=list, max_length=100)

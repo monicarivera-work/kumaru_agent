@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Collection, Iterable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
+from typing import get_args
 
 from kumaru.academic.models import (
     Access,
+    Origin,
     Relationship,
     Review,
+    Score,
     Source,
+    SourceKind,
     Topic,
     mathematics_topics,
     now,
@@ -26,8 +30,39 @@ from kumaru.academic.reliability import (
     NoticeReview,
     claim_score,
 )
-from kumaru.academic.scoring import score_source
+from kumaru.academic.scoring import USEFULNESS_POINTS, WEIGHTS, score_source
 from kumaru.core.errors import ConfigError, RequestError
+
+LIBRARY_SORTS = {
+    "updated": "json_extract(payload, '$.updated_at') DESC, id",
+    "title": "casefold(json_extract(payload, '$.title')), id",
+    "cited": (
+        "(json_extract(payload, '$.citation_count') IS NULL), "
+        "json_extract(payload, '$.citation_count') DESC, id"
+    ),
+    "year": (
+        "(json_extract(payload, '$.published_year') IS NULL), "
+        "json_extract(payload, '$.published_year') DESC, id"
+    ),
+}
+LIBRARY_STATUSES = ("needs_review", "human_verified", "ai")
+NEEDS_REVIEW = (
+    "(json_extract(payload, '$.origin') = 'unknown' "
+    "OR COALESCE(json_extract(payload, '$.topic_reviewed'), 0) = 0)"
+)
+
+
+def _in(values: Collection[object]) -> str:
+    return "(" + ",".join("?" for _ in values) + ")"
+
+
+def _casefold(value: object) -> str:
+    return value.casefold() if isinstance(value, str) else ""
+
+
+def _like(text: str) -> str:
+    escaped = text.casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
 
 
 class Catalog:
@@ -308,6 +343,209 @@ class Catalog:
             )
             return [Source.model_validate_json(row[0]) for row in rows]
 
+    def source_cards(self, ids: Iterable[str]) -> dict[str, dict]:
+        """Titles for source IDs, so clients never have to show raw identifiers."""
+        unique = sorted(set(ids))
+        cards: dict[str, dict] = {}
+        with self.connection() as db:
+            for start in range(0, len(unique), 500):
+                chunk = unique[start:start + 500]
+                rows = db.execute(
+                    "SELECT id, json_extract(payload, '$.title'), json_extract(payload, '$.kind'), "
+                    "json_extract(payload, '$.access'), json_extract(payload, '$.origin') "
+                    "FROM sources WHERE id IN " + _in(chunk), chunk,
+                )
+                for row in rows:
+                    cards[row[0]] = dict(
+                        id=row[0], title=row[1], kind=row[2], access=row[3], origin=row[4],
+                    )
+        return cards
+
+    def overview(self, topic_id: str | None = None) -> dict:
+        """Aggregate counts for the sources tagged with a topic or any descendant."""
+        ids = sorted(self.descendants(topic_id)) if topic_id else None
+
+        def scoped(column: str) -> str:
+            if ids is None:
+                return "1"
+            return (
+                f"{column} IN (SELECT source_id FROM source_topics WHERE topic_id IN "
+                + _in(ids) + ")"
+            )
+
+        args = ids or []
+        by_access = dict.fromkeys(get_args(Access), 0)
+        by_kind = dict.fromkeys(get_args(SourceKind), 0)
+        by_origin = dict.fromkeys(get_args(Origin), 0)
+        total = needs_review = 0
+        with self.connection() as db:
+            groups = db.execute(
+                "SELECT json_extract(payload, '$.access'), json_extract(payload, '$.kind'), "
+                "json_extract(payload, '$.origin'), "
+                "COALESCE(json_extract(payload, '$.topic_reviewed'), 0), count(*) "
+                "FROM sources WHERE " + scoped("id") + " GROUP BY 1, 2, 3, 4", args,
+            )
+            for access, kind, origin, topics_reviewed, count in groups:
+                total += count
+                by_access[access] += count
+                by_kind[kind] += count
+                by_origin[origin] += count
+                if origin == "unknown" or not topics_reviewed:
+                    needs_review += count
+            pending = db.execute(
+                "SELECT count(*) FROM notices WHERE json_extract(payload, '$.state') = 'reported' "
+                "AND " + scoped("source_id"), args,
+            ).fetchone()[0]
+            claims, unreviewed = db.execute(
+                "SELECT count(*), COALESCE(sum(CASE WHEN json_extract(payload, '$.reviewed') "
+                "THEN 0 ELSE 1 END), 0) FROM claims WHERE " + scoped("source_id"), args,
+            ).fetchone()
+            topic_counts = {row[0]: 0 for row in db.execute("SELECT id FROM topics ORDER BY id")}
+            for topic, count in db.execute(
+                "SELECT topic_id, count(*) FROM source_topics GROUP BY topic_id",
+            ):
+                topic_counts[topic] = count
+            # A source tagged with several topics of one subtree still counts once there.
+            topic_totals = dict.fromkeys(topic_counts, 0)
+            for topic, count in db.execute(
+                """WITH RECURSIVE closure(ancestor, descendant) AS (
+                    SELECT id, id FROM topics
+                    UNION SELECT c.ancestor, t.id FROM closure c JOIN topics t ON t.parent_id = c.descendant
+                ) SELECT c.ancestor, count(DISTINCT st.source_id) FROM closure c
+                  JOIN source_topics st ON st.topic_id = c.descendant GROUP BY c.ancestor""",
+            ):
+                topic_totals[topic] = count
+        return dict(
+            topic_id=topic_id, total=total, by_access=by_access, by_kind=by_kind,
+            by_origin=by_origin, needs_review=needs_review, pending_notices=pending,
+            claims=claims, unreviewed_claims=unreviewed, topic_counts=topic_counts,
+            topic_totals=topic_totals,
+            formula=dict(
+                version=Score.model_fields["version"].default,
+                legitimacy_weights=dict(WEIGHTS), usefulness_points=dict(USEFULNESS_POINTS),
+            ),
+        )
+
+    def library(
+        self, *, topic_id: str | None = None, access: str | None = None, kind: str | None = None,
+        status: str | None = None, q: str | None = None, container_id: str | None = None,
+        sort: str = "updated", limit: int = 30, offset: int = 0,
+    ) -> dict:
+        """One filtered, sorted page of source summaries; never text or evidence."""
+        if not 1 <= limit <= 100 or offset < 0:
+            raise RequestError("Library page requires limit 1..100 and nonnegative offset")
+        topic_id, access, kind, status, container_id = (
+            value or None for value in (topic_id, access, kind, status, container_id)
+        )
+        if access is not None and access not in get_args(Access):
+            raise RequestError("Access must be unknown, open, account, paywall or inaccessible")
+        if kind not in {None, "works", "containers"}:
+            raise RequestError("Library kind must be works or containers")
+        if status is not None and status not in LIBRARY_STATUSES:
+            raise RequestError("Library status must be needs_review, human_verified or ai")
+        if sort not in LIBRARY_SORTS:
+            raise RequestError("Library sort must be updated, title, cited or year")
+        if q is not None and len(q) > 200:
+            raise RequestError("Library search is limited to 200 characters")
+        scope = self.descendants(topic_id) if topic_id else None
+        clauses: list[str] = []
+        args: list[str | int] = []
+        if scope is not None:
+            ids = sorted(scope)
+            clauses.append(
+                "id IN (SELECT source_id FROM source_topics WHERE topic_id IN " + _in(ids) + ")"
+            )
+            args.extend(ids)
+        if access:
+            clauses.append("json_extract(payload, '$.access') = ?")
+            args.append(access)
+        if kind:
+            clauses.append(
+                "json_extract(payload, '$.kind') "
+                + ("!=" if kind == "works" else "=") + " 'sources_of_sources'"
+            )
+        if status == "needs_review":
+            clauses.append(NEEDS_REVIEW)
+        elif status:
+            clauses.append("json_extract(payload, '$.origin') = ?")
+            args.append(status)
+        if q and q.strip():
+            clauses.append(
+                "(casefold(json_extract(payload, '$.title')) LIKE ? ESCAPE '\\' "
+                "OR casefold(json_extract(payload, '$.doi')) LIKE ? ESCAPE '\\' "
+                "OR casefold(json_extract(payload, '$.publisher')) LIKE ? ESCAPE '\\' "
+                "OR EXISTS (SELECT 1 FROM json_each(payload, '$.authors') "
+                "WHERE casefold(value) LIKE ? ESCAPE '\\'))"
+            )
+            args.extend([_like(q.strip())] * 4)
+        if container_id:
+            clauses.append(
+                "id IN (SELECT target_id FROM links WHERE source_id = ? AND kind = 'contains')"
+            )
+            args.append(container_id)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self.connection() as db:
+            db.create_function("casefold", 1, _casefold, deterministic=True)
+            if container_id:
+                self._get(db, container_id)
+            total = db.execute("SELECT count(*) FROM sources" + where, args).fetchone()[0]
+            # The stored text can be megabytes; a listing never needs it.
+            rows = db.execute(
+                "SELECT json_remove(payload, '$.text') FROM sources" + where
+                + " ORDER BY " + LIBRARY_SORTS[sort] + " LIMIT ? OFFSET ?",
+                [*args, limit, offset],
+            ).fetchall()
+            sources = [Source.model_validate_json(row[0]) for row in rows]
+            page = [source.id for source in sources]
+            counts: dict[str, dict[str, int]] = {"claims": {}, "children": {}, "pending": {}}
+            if page:
+                for name, query in (
+                    ("claims", "SELECT source_id, count(*) FROM claims WHERE source_id IN "),
+                    ("children", "SELECT source_id, count(*) FROM links "
+                                 "WHERE kind = 'contains' AND source_id IN "),
+                    ("pending", "SELECT source_id, count(*) FROM notices WHERE "
+                                "json_extract(payload, '$.state') = 'reported' AND source_id IN "),
+                ):
+                    counts[name] = {
+                        row[0]: row[1]
+                        for row in db.execute(query + _in(page) + " GROUP BY source_id", page)
+                    }
+        items = [
+            dict(
+                id=source.id, url=source.url, title=source.title, kind=source.kind,
+                access=source.access, access_note=source.access_note, origin=source.origin,
+                permission=source.permission, topic_ids=source.topic_ids,
+                topic_reviewed=source.topic_reviewed, doi=source.doi, publisher=source.publisher,
+                published_year=source.published_year, citation_count=source.citation_count,
+                reference_count=source.reference_count, authors=source.authors[:3],
+                author_count=len(source.authors), discovered_at=source.discovered_at,
+                updated_at=source.updated_at, collected_at=source.collected_at,
+                word_count=source.word_count, evidence_count=len(source.evidence),
+                claim_count=counts["claims"].get(source.id, 0),
+                child_count=counts["children"].get(source.id, 0),
+                pending_notices=counts["pending"].get(source.id, 0),
+                withdrawn=any(
+                    item.kind == "retraction" and item.reviewed and item.value > 0
+                    for item in source.evidence
+                ),
+                score=self._listed_score(source.id, scope),
+            )
+            for source in sources
+        ]
+        return dict(items=items, total=total, limit=limit, offset=offset)
+
+    def _listed_score(self, id_: str, scope: set[str] | None) -> dict | None:
+        """The most useful in-scope topic score, so one row never hides a better one."""
+        scores = [item for item in self.scores(id_) if scope is None or item["topic_id"] in scope]
+        if not scores:
+            return None
+        scored = [item for item in scores if item["usefulness"] is not None]
+        best = max(scored, key=lambda item: item["usefulness"]) if scored else scores[0]
+        return {
+            name: best[name]
+            for name in ("topic_id", "legitimacy", "usefulness", "evidence_coverage")
+        }
+
     def link(self, relation: Relationship) -> Relationship:
         if relation.source_id == relation.target_id:
             raise RequestError("A source cannot link to itself")
@@ -433,11 +671,12 @@ class Catalog:
 
     def claims(
         self, *, source_id: str | None = None, topic_id: str | None = None,
-        limit: int = 100, offset: int = 0,
+        reviewed: bool | None = None, limit: int = 100, offset: int = 0,
     ) -> list[Claim]:
         if not 1 <= limit <= 500 or offset < 0:
             raise RequestError("Claim page requires limit 1..500 and nonnegative offset")
-        clauses, args = [], []
+        clauses: list[str] = []
+        args: list[str | int] = []
         if source_id:
             self.get(source_id)
             clauses.append("source_id=?")
@@ -446,6 +685,9 @@ class Catalog:
             ids = sorted(self.descendants(topic_id))
             clauses.append("topic_id IN (" + ",".join("?" for _ in ids) + ")")
             args.extend(ids)
+        if reviewed is not None:
+            clauses.append("json_extract(payload, '$.reviewed') = ?")
+            args.append(int(reviewed))
         with self.connection() as db:
             where = " WHERE " + " AND ".join(clauses) if clauses else ""
             rows = db.execute(
@@ -495,10 +737,12 @@ class Catalog:
                     (id_,),
                 )
             ]
+        cards = self.source_cards({claim.source_id, *references})
         return dict(
             claim=claim.model_dump(), assessment=claim_score(
                 claim, source, references, blocked_sources=blocked,
-            ), reviews=history,
+            ), reviews=history, source=cards.get(claim.source_id),
+            references={ref: cards[ref] for ref in references if ref in cards},
         )
 
     @staticmethod
@@ -553,11 +797,15 @@ class Catalog:
     def notice_details(self, id_: str) -> dict:
         with self.connection() as db:
             notice = self._notice(db, id_)
+            topics = list(notice.affected_topic_ids)
             claims = [
-                row[0] for row in db.execute(
-                    """SELECT id FROM claims WHERE source_id=?
-                       UNION SELECT claim_id FROM claim_refs WHERE source_id=?""",
-                    (notice.source_id, notice.source_id),
+                dict(id=row[0], source_id=row[1], topic_id=row[2], statement=row[3])
+                for row in db.execute(
+                    "SELECT id, source_id, topic_id, json_extract(payload, '$.statement') "
+                    "FROM claims WHERE (source_id=? OR id IN "
+                    "(SELECT claim_id FROM claim_refs WHERE source_id=?))"
+                    + (" AND topic_id IN " + _in(topics) if topics else "") + " ORDER BY id",
+                    [notice.source_id, notice.source_id, *topics],
                 )
             ]
             dependents = [
@@ -567,11 +815,13 @@ class Catalog:
                     (notice.source_id, notice.source_id),
                 )
             ]
-        if notice.affected_topic_ids:
-            claims = [
-                id_ for id_ in claims if self.get_claim(id_).topic_id in notice.affected_topic_ids
-            ]
-        return dict(notice=notice.model_dump(), affected_claim_ids=claims, dependent_source_ids=dependents)
+        cards = self.source_cards({notice.source_id, *dependents})
+        return dict(
+            notice=notice.model_dump(), affected_claim_ids=[claim["id"] for claim in claims],
+            dependent_source_ids=dependents, source=cards.get(notice.source_id),
+            dependent_sources={dep: cards[dep] for dep in dependents if dep in cards},
+            affected_claims=claims,
+        )
 
     def review_notice(self, id_: str, review: NoticeReview) -> Notice:
         from kumaru.academic.models import Evidence

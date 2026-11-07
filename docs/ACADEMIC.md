@@ -106,7 +106,12 @@ Every source independently records one access category:
 | `open` | The landing page is immediately reachable; not a reuse license. |
 | `account` | Account/login wall. |
 | `paywall` | Paid gate. |
-| `inaccessible` | Application cannot retrieve/analyze it, including robots refusal, browser challenges, unsupported formats or network failure. |
+| `inaccessible` | Application cannot retrieve/analyze it: robots refusal, browser challenges, unsupported formats, oversized responses or redirect loops. |
+
+A DNS failure, timeout, connection error, or a `429`/`5xx` answer from robots, a provider
+or the source page itself is not evidence about the source's access. Those requests fail with **HTTP 503** and leave the
+stored access category and note untouched, so a local network outage cannot relabel
+good sources.
 
 ```powershell
 kumaru academic list --containers --access paywall
@@ -212,6 +217,11 @@ Changing origin away from `human_verified` or permission away from
 `text_permitted` removes stored text and its content metadata.
 Explicit AI disclosure discovered on recollection also revokes trust.
 
+A review can also set `access` and a free-text `access_note` (up to 2000 characters)
+so a human can record why a source is walled off or how it was reached. Omitting
+`access_note` keeps the recorded note; sending an empty string clears it. Both are
+part of the review audit history.
+
 ## Scores and their limitations
 
 Scores are **explainable heuristics, not calibrated probabilities of truth**.
@@ -245,7 +255,9 @@ changing discipline-specific weights requires code and a new formula version.
 
 Usefulness combines **65% legitimacy**, up to **15 points for citations**,
 **5 for outgoing references**, **13 for independent corroborating sources**, and
-only **2 for topic text length**. Counts/length have logarithmic saturation
+only **2 for topic text length**. These points live in `scoring.USEFULNESS_POINTS`
+next to the legitimacy `WEIGHTS`, and `GET /overview` returns both, so clients never
+hard-code the formula. Counts/length have logarithmic saturation
 (1000 citations, 100 references, 5000 topic words); corroboration saturates at five
 unique works. Retractions cap usefulness at 10. Reported citation/reference counts
 are not proof of correctness and include criticism/self-citation where the
@@ -296,7 +308,8 @@ page links or bulk-downloads a repository. For large catalogues, paginate `list`
 with `--limit` (up to 500) and `--offset`.
 
 Provider, network, policy and parsing errors are explicit. Inaccessible inspection/
-collection updates its source access note; network failures still raise an error.
+collection updates its source access note; a transient network failure (HTTP 503)
+raises an error without changing the access category.
 Internet DNS/HTTPS access is required for real search. Offline tests use fixtures,
 not fictional references masquerading as discovered works.
 
@@ -315,11 +328,13 @@ readiness; the example uses echo to avoid loading a model.
 
 | Method/path under `/v1/academic` | Operation |
 |---|---|
-| `GET /topics`, `PUT /topics/{id}` | Select/edit the hierarchy. |
-| `POST /search` | `{topic_id, query, provider, limit}` -> candidate source IDs. |
-| `GET /sources`, `POST /sources` | Filter/paginate metadata or add a source. |
-| `GET /sources/{id}` | Metadata, topic scores, graph and reviews. |
-| `POST /sources/{id}/review` | Apply an evidence-backed human review. |
+| `GET /topics`, `PUT /topics/{id}` | Select/edit the hierarchy. `PUT` upserts, so check the ID is new before adding. |
+| `POST /search` | `{topic_id, query, provider, limit}` -> `{source_ids, skipped, ...}`. Crossref works without a title or DOI/URL are skipped and counted in `skipped`; a malformed response envelope still fails. |
+| `GET /sources`, `POST /sources` | Filter/paginate full metadata (arbitrary order, no total) or add a source. |
+| `GET /overview?topic_id=` | Aggregate counts for a subject subtree (`by_access`, `by_kind`, `by_origin`, `needs_review`, `pending_notices`, `claims`, `unreviewed_claims`), direct `topic_counts`, distinct rolled-up `topic_totals`, the scoring `formula` and `brave_configured`. |
+| `GET /library` | One page of source summaries with a server `total`. Filters: `topic_id` (subtree), `access`, `kind` (`works`/`containers`), `status` (`needs_review`/`human_verified`/`ai`), `q` (literal, case-insensitive substring of title, DOI, publisher and authors), `container_id`. `sort` is `updated`, `title`, `cited` or `year`; `limit` 1..100. Items include counts, the best in-scope `score` and never text or evidence. Invalid parameters are HTTP 400. |
+| `GET /sources/{id}` | Metadata, topic scores, graph, reviews, notices, and `related`: id, title, kind, access and origin for every source in the graph. |
+| `POST /sources/{id}/review` | Apply an evidence-backed human review (origin, permission, access and `access_note`, topics, findings). |
 | `POST /relationships` | Add a directed graph edge. |
 | `POST /sources/{id}/inspect` | Inspect page metadata/access without retaining text. |
 | `POST /sources/{id}/collect` | Collect permitted text. |
@@ -335,27 +350,56 @@ SQLite is suitable for a local application, not an unbounded multi-worker crawle
 
 With `academic.enabled: true` and UI serving enabled, open
 **http://127.0.0.1:8080/academic**, or follow **Academic source review** from the
-chat sidebar. Use the existing configured `server.api_key` if required; the
-dashboard holds it in page memory only, never local/session storage.
-The static page contains no catalogue data; all data and mutations use the
-authenticated academic API.
+chat sidebar. Use the existing configured `server.api_key` if required: the
+connection pill in the header opens a dialog for it. The key is held in page
+memory only, never in local/session storage, cookies or the address bar, so a reload
+forgets it. The static page contains no catalogue data and loads nothing from other
+sites; all data and mutations use the authenticated academic API.
 
-Select a subject, discover or add a source, and choose a source row. The workspace
-has **Source evidence**, **Claims**, and **Editorial notices** sections. Review
-authorship, permissions and topic coverage explicitly; attach academic evidence
-or edit an existing finding by its stable ID. Source score components and
-source/editorial review history are inspectable.
+**Library** (`#/library`) is a three-pane workbench: a *Subjects* tree with rolled-up
+source counts and Access/Type/Review filters, the source list (search, sort, 30 rows
+per page, score meters), and the *Inspector*. With nothing selected the inspector
+shows the library at a glance for the selected subject. Add a topic under the
+selected node, add an area, or edit a topic from the rail; topics tag sources and
+never approve them. **Discover sources** asks Crossref (or Brave, when configured)
+for unreviewed candidates and reports how many incomplete records were skipped.
 
-Claims have their own assumptions, precise locations, findings and history.
-Editorial notices show affected claim/reference IDs and link to affected claims.
-The pending-notice queue shows reports across the catalogue. Sources, claims and
-notices are paginated; totals on the selected source remain accurate across pages.
-Unsaved review edits are protected against source/tab switching and page exit.
-Errors retain form input and explain why the operation failed.
+The inspector for a source has **Overview**, **Evidence**, **Claims**, **Notices**,
+**Relations** and **History** tabs. Overview lists what to check before relying on
+the source (authorship, permission, access, topic coverage, editorial status, trusted
+text) and shows one *score card* per subject. The score anatomy shows the legitimacy
+and usefulness bars split by the formula's weights: reviewed dimensions are filled,
+missing ones are hatched, and factual-criticism or retraction penalties are named.
+The headline numbers are always the server's; unknown scores read "Unknown" or "—",
+never 0. Relations shows ancestors, parents, children, descendants and siblings by
+title, plus citation, corroboration and criticism links, and adds a relationship in a
+plain sentence ("this source is cited by…") with a source picker instead of IDs.
+History is a timeline of the append-only review records with the raw record one
+disclosure away.
 
-The dashboard works on desktop and mobile without a build step or additional
-frontend dependencies. It does not use an AI detector or let a discovered URL
-silently become approved training material.
+**Sources of Sources** (`#/containers`) groups catalogues by access and opens a
+container's contents in the library. **Review queue** (`#/queue`) pages through
+sources awaiting human review, pending editorial notices and unreviewed claims; a
+quiet queue is not proof that every source is current.
+
+Every decision is a native dialog: review source, add finding, record claim,
+claim attribution, claim finding, report/review notice, add relationship, add source,
+discover, topic and connection. Dialogs keep the user's input when a save fails,
+show the error inline, ask before discarding changes, and return focus to the control
+that opened them. Provenance and permission approvals need an evidence URL and note;
+topic coverage needs its own checkbox (and is un-ticked when the subjects change);
+confirming a notice needs an explicit impact (a retraction requires 1). Nothing is
+approved automatically.
+
+Routes are hash-based, so Back/Forward and links work:
+`#/library`, `#/containers`, `#/queue` and `#/source/<id>[/<tab>[/<claimId>]]`.
+Unsaved dialog edits are protected on navigation and page exit. The layout uses
+three panes from 1280px, a subjects drawer below that, and one column below 760px
+(Library and Inspector screens). Trees, tabs, comboboxes and dialogs have keyboard
+support, text meets contrast guidelines, and motion respects reduced-motion.
+
+The dashboard needs no build step or frontend dependency and does not use an AI
+detector or let a discovered URL silently become approved training material.
 
 ## Claim-level evidence
 
@@ -516,11 +560,11 @@ Additional authenticated API endpoints:
 
 | Method/path under `/v1/academic` | Operation |
 |---|---|
-| `GET /claims`, `POST /claims` | Filter/paginate or record located assertions. |
-| `GET /claims/{id}`, `POST /claims/{id}/review` | Findings, assessments and human review. |
-| `GET /notices`, `POST /notices` | Editorial queue or manual report. |
+| `GET /claims`, `POST /claims` | Filter (`source_id`, `topic_id`, `reviewed`) and paginate, or record located assertions. |
+| `GET /claims/{id}`, `POST /claims/{id}/review` | Findings, assessments and human review. Details add `source` and `references` (id, title, kind, access, origin) for the claim's source and each finding's source. |
+| `GET /notices`, `POST /notices` | Editorial queue or manual report. Details add `source`, `dependent_sources` and `affected_claims` (id, source_id, topic_id, statement) so clients show titles, not IDs. |
 | `POST /notices/{id}/review` | Confirm, dismiss or reopen with an audit note. |
-| `POST /sources/{id}/check-updates` | Check one DOI work. |
+| `POST /sources/{id}/check-updates` | Check one DOI work. A DNS/provider outage is HTTP 503 and is recorded as a failed check, never as a clean one. |
 | `POST /monitor?limit=10`, `GET /monitor/status` | Bounded batch and optional scheduler status. |
 
 New tables are added with `CREATE TABLE IF NOT EXISTS`; existing catalogue

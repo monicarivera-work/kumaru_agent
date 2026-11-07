@@ -1,18 +1,18 @@
 # `ui/academic.js`
 
-Plain-JavaScript authenticated catalogue/review client. DOM nodes and text are
-created directly; untrusted source titles, evidence notes and histories are never
-inserted as HTML. External links require HTTP(S). The optional API key remains
-in page memory only, never browser storage.
+Entry module of the dashboard (native ES modules, no build step). It wires the page
+shell to the modules in [`ui/academic/`](academic/): bootstrap, the hash router and
+view switching, the header (queue badge, editorial-check button, tools menu),
+the subjects drawer and the unsaved-changes guard.
 
-Fetches real topic, source, claim, notice and monitor APIs. Human approvals require
-explicit form decisions and supporting evidence. Claim findings do not silently
-approve claim attribution. Notice confirmations explain their content/score
-effects. Read generations reject stale responses; unsaved edits are protected.
-Errors preserve entered form data.
+Routes: `#/library`, `#/containers`, `#/queue`, `#/source/<id>[/<tab>[/<claimId>]]`.
+Back/Forward work; if a dialog has unsaved edits, a navigation asks first and restores
+the hash when the user cancels; `beforeunload` is guarded the same way. Bootstrap loads
+topics, the scoped and catalogue-wide overview and monitor status, then applies the
+route. A 401 shows "API key needed", a network failure "Server unreachable".
 
-Sources, claims and notices are paginated. Source-wide counts/quarantine flags
-come from the server, not just currently visible rows. All screenshots/demo data
-used during development are synthetic fixtures, not production discoveries.
-Validate actual form saves and keyboard/mobile behavior, not merely static markup.
-[API/workflow](../../ACADEMIC.md#review-dashboard).
+Safety invariants live in the modules: DOM is built with `el()`/text nodes (never
+`innerHTML`), links are http(s) only, the API key stays in `api.js` memory, and
+stale responses are dropped with generation counters. Add a view by creating a
+section in the HTML, a module and a branch in `applyRoute`.
+[HTML](academic.html.md), [styles](academic.css.md), [workflow](../../ACADEMIC.md#review-dashboard).

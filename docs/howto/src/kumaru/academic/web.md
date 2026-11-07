@@ -16,3 +16,9 @@ Test both mocked DNS/transport and live HTTPS when the environment permits.
 Do not replace DNS pinning with a check followed by a second hostname resolution,
 enable proxy forwarding, or assume a public abstract licenses full text.
 [Limitations](../../../../ACADEMIC.md#collect-and-integrate-with-kumaru-learning).
+
+`TransientFetchError` (a `FetchError` with HTTP 503) marks outages that say nothing
+about the source: DNS failure, `httpx` transport errors and timeouts, robots
+`429`/`5xx`, provider `429`/`5xx`, and source pages answering `429`/`5xx`. `inspect_source` and `collect_source` re-raise
+it without touching the stored access category; every other `FetchError` still
+records `inaccessible`. Raise it only for conditions that could pass on retry.

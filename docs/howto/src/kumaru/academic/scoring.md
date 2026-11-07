@@ -15,3 +15,8 @@ combined assessment. Omitting it preserves whole-source scoring.
 Changing weights requires updating formula version, [documented
 weights](../../../../ACADEMIC.md#scores-and-their-limitations) and numeric regression
 tests. Never describe the output as a scientifically calibrated probability.
+
+The legitimacy `WEIGHTS` and the usefulness `USEFULNESS_POINTS` (65/15/5/13/2) are
+module constants, returned by `GET /overview` so the dashboard draws its score
+anatomy from them instead of hard-coding the formula. Keep the two in step with
+`score_source` and its tests.

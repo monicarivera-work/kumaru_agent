@@ -84,6 +84,27 @@ def sources(
     ]
 
 
+@router.get("/overview")
+def overview(request: Request, topic_id: str | None = None) -> dict:
+    result = catalog(request).overview(topic_id or None)
+    result["brave_configured"] = bool(request.app.state.kumaru.config.academic.brave_api_key)
+    return result
+
+
+# Filters are validated by the catalogue so every invalid value is a 400, like the rest
+# of the domain errors, instead of a framework-specific 422.
+@router.get("/library")
+def library(
+    request: Request, topic_id: str | None = None, access: str | None = None,
+    kind: str | None = None, status: str | None = None, q: str | None = None,
+    container_id: str | None = None, sort: str = "updated", limit: int = 30, offset: int = 0,
+) -> dict:
+    return catalog(request).library(
+        topic_id=topic_id, access=access, kind=kind, status=status, q=q,
+        container_id=container_id, sort=sort, limit=limit, offset=offset,
+    )
+
+
 @router.post("/sources", status_code=201)
 def add(body: Source, request: Request) -> dict:
     if (
@@ -97,12 +118,17 @@ def add(body: Source, request: Request) -> dict:
 @router.get("/sources/{source_id}")
 def source(source_id: str, request: Request) -> dict:
     db = catalog(request)
+    graph = db.graph(source_id)
+    linked = {*graph["ancestors"], *graph["descendants"], *graph["siblings"]}
+    for edge in graph["links"]:
+        linked.update((edge["source_id"], edge["target_id"]))
     return dict(
         source=db.get(source_id).model_dump(exclude={"text"}),
-        scores=db.scores(source_id), graph=db.graph(source_id), reviews=db.history(source_id),
+        scores=db.scores(source_id), graph=graph, reviews=db.history(source_id),
         notices=[db.notice_details(notice.id) for notice in db.notices(source_id=source_id)],
         update_check=db.check_status(source_id),
         review_summary=db.review_summary(source_id),
+        related=db.source_cards(linked),
     )
 
 
@@ -141,12 +167,15 @@ def text(source_id: str, request: Request) -> dict:
 @router.get("/claims")
 def claims(
     request: Request, source_id: str | None = None, topic_id: str | None = None,
+    reviewed: bool | None = None,
     limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
 ) -> list[dict]:
     db = catalog(request)
     return [
         db.claim_details(claim.id)
-        for claim in db.claims(source_id=source_id, topic_id=topic_id, limit=limit, offset=offset)
+        for claim in db.claims(
+            source_id=source_id, topic_id=topic_id, reviewed=reviewed, limit=limit, offset=offset,
+        )
     ]
 
 

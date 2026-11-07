@@ -10,3 +10,8 @@ Add providers with typed response models, explicit errors, provenance request
 URLs and offline fixtures. Never fabricate authors, counts, licenses, human
 authorship or credentials from a search rank/domain. Queries are sent externally,
 not stored text/reviews. [Provider setup](../../../../ACADEMIC.md#start-with-mathematics).
+
+Crossref works that lack a title or any URL/DOI (components, peer-review records)
+are skipped and counted: `discover` returns `skipped` next to `source_ids`. The
+response envelope and records with unsafe values are still validated strictly, so a
+malformed response writes nothing. Provider outages raise `TransientFetchError`.

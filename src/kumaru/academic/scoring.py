@@ -14,6 +14,14 @@ WEIGHTS = {
     "peer_review": 0.20,
     "replication": 0.15,
 }
+# Usefulness out of 100: legitimacy share plus capped, saturating add-ons.
+USEFULNESS_POINTS = {
+    "legitimacy": 65,
+    "citations": 15,
+    "references": 5,
+    "independent_sources": 13,
+    "content_length": 2,
+}
 
 
 def score_source(
@@ -72,8 +80,11 @@ def score_source(
         # Length gets at most two points, and is zero without reviewed topic text.
         topic_words = source.topic_word_counts.get(topic_id, 0)
         length = min(1.0, math.log1p(topic_words) / math.log1p(5000)) if source.text else 0
+        points = USEFULNESS_POINTS
         usefulness = (
-            0.65 * legitimacy + 15 * cited + 5 * references + 13 * independent + 2 * length
+            points["legitimacy"] / 100 * legitimacy + points["citations"] * cited
+            + points["references"] * references + points["independent_sources"] * independent
+            + points["content_length"] * length
         )
         if retraction:
             usefulness = min(usefulness, 10)

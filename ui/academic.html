@@ -1,10 +1,10 @@
 <!DOCTYPE html>
 <!--
-THESIS: Review the evidence before relying on a source; source reputation is not a theorem's proof.
-OWN-WORLD: Kumaru's dark neutral panels, blue actions and system typography; rows and readable forms, no decorative metrics.
-STORY: Select a subject and source, examine findings, review attribution and rights, then resolve editorial notices.
-FIRST VIEWPORT: Compact connection/navigation header; subject/search and source rows at left; selected evidence workspace at right.
-FORM: A task-specific extension of Kumaru's existing operator interface, with stacked panes on narrow screens.
+THESIS: An evidence ledger for a research library: who wrote it, may it be copied, can it be read, how well is it supported.
+OWN-WORLD: Kumaru's dark neutral panels, blue accent and system type. Colour only carries meaning: access, provenance, status.
+STORY: Pick a subject, triage sources, review authorship and rights, weigh the evidence, resolve editorial notices.
+FIRST VIEWPORT: subjects and filters at left, the source list in the middle, the selected source's score anatomy at right.
+FORM: Operate mode. A three-pane workbench with native dialogs for every decision; no decorative metrics.
 -->
 <html lang="en">
 <head>
@@ -14,84 +14,100 @@ FORM: A task-specific extension of Kumaru's existing operator interface, with st
   <link rel="stylesheet" href="/static/styles.css" />
   <link rel="stylesheet" href="/static/academic.css" />
 </head>
-<body class="academic">
-  <a class="skip-link" href="#review-workspace">Skip to review workspace</a>
-  <header class="academic-header">
-    <div class="brand">
-      <span class="mark" aria-hidden="true">◈</span>
-      <div><h1>Academic review</h1><p>Kumaru · evidence before confidence</p></div>
+<body class="academic" data-view="library" data-screen="list">
+  <a id="skip-link" class="skip-link" href="#/library">Skip to the workspace</a>
+
+  <header class="ac-header">
+    <div class="ac-brand">
+      <span class="ac-mark" aria-hidden="true">◈</span>
+      <h1 class="ac-title">Academic review</h1>
+      <span class="ac-sub">Kumaru</span>
     </div>
-    <nav aria-label="Workspace">
-      <a href="/">Chat</a>
-      <a href="/docs" target="_blank" rel="noopener">API docs</a>
-      <button id="queue-button" class="secondary" type="button">Pending notices</button>
-      <button id="monitor-button" class="secondary" type="button">Check next 10 DOI sources</button>
+
+    <nav class="ac-nav" aria-label="Views">
+      <a href="#/library" data-nav="library">Library</a>
+      <a href="#/containers" data-nav="containers">Sources of Sources</a>
+      <a href="#/queue" data-nav="queue">Review queue <span id="queue-count" class="count-badge" hidden>0</span></a>
     </nav>
+
+    <div class="ac-header-end">
+      <button id="tools-toggle" class="btn btn-secondary tools-toggle" type="button" aria-expanded="false" aria-controls="header-tools"><span>Tools</span></button>
+      <div id="header-tools" class="header-tools">
+        <span id="monitor-chip" class="monitor-chip">Editorial checks: manual</span>
+        <button id="monitor-button" class="btn btn-secondary" type="button"><span>Check next 10 DOI sources</span></button>
+        <a class="tool-link" href="/">Chat</a>
+        <a class="tool-link" href="/docs" target="_blank" rel="noopener noreferrer">API docs
+          <svg class="icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6.5 3H3v10h10V9.5"/><path d="M9.5 2.5h4v4"/><path d="M13.5 2.5l-6 6"/></svg>
+          <span class="sr-only">(opens in a new tab)</span></a>
+      </div>
+      <button id="connection-pill" class="status-pill" type="button" aria-haspopup="dialog"><span class="pill-dot" aria-hidden="true"></span><span>Connecting…</span></button>
+    </div>
   </header>
-  <section class="connection" aria-label="API connection">
-    <form id="connection-form">
-      <label for="api-key">API key, if configured</label>
-      <input id="api-key" type="password" autocomplete="off" spellcheck="false" />
-      <button type="submit">Connect / refresh</button>
-    </form>
-    <p>Reviews stay in your local catalogue. Searches and update checks contact external providers. The key is not saved.</p>
-  </section>
-  <div id="feedback" role="status" aria-live="polite" tabindex="-1">Connecting to the academic catalogue…</div>
-  <main id="academic-workspace">
-    <section class="source-panel" aria-labelledby="sources-heading">
-      <div class="panel-heading"><h2 id="sources-heading">Sources</h2><button id="sources-button" class="secondary" type="button" hidden>Back to sources</button></div>
-      <form id="discovery-form">
-        <label for="topic-filter">Academic topic</label>
-        <select id="topic-filter" required><option value="">Loading topics…</option></select>
-        <label for="discovery-query">Narrow your search</label>
-        <input id="discovery-query" type="text" maxlength="500" placeholder="For example: fundamental theorem" />
-        <div class="inline-controls">
-          <label class="provider-label" for="search-provider">Provider
-            <select id="search-provider"><option value="crossref">Crossref scholarly metadata</option><option value="brave">Brave web search (key required)</option></select>
-          </label>
-          <button type="submit">Discover sources</button>
+
+  <main id="workspace" class="ac-main">
+    <noscript><p class="page-lede">The academic review dashboard needs JavaScript. Nothing is loaded from other sites.</p></noscript>
+
+    <div id="view-library" class="workbench">
+      <aside id="subjects" class="pane pane-rail" aria-label="Subjects and filters">
+        <div class="drawer-head">
+          <span class="drawer-title">Subjects &amp; filters</span>
+          <button id="drawer-close" class="btn btn-icon" type="button" aria-label="Close subjects and filters"><svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg></button>
         </div>
-      </form>
-      <label for="access-filter">Access category</label>
-      <select id="access-filter">
-        <option value="">All access categories</option><option value="unknown">Unknown</option>
-        <option value="open">Immediately accessible</option><option value="account">Account required</option>
-        <option value="paywall">Paywall</option><option value="inaccessible">Application inaccessible</option>
-      </select>
-      <div id="source-list" aria-live="polite"><p class="empty-copy">Loading the catalogue…</p></div>
-      <div class="pagination" aria-label="Source pages">
-        <button id="previous-page" class="secondary" type="button" disabled>Previous</button>
-        <span id="page-label">Page 1</span>
-        <button id="next-page" class="secondary" type="button" disabled>Next</button>
-      </div>
-      <details class="add-source">
-        <summary>Add a source by URL</summary>
-        <form id="add-source-form">
-          <label for="new-source-url">Source URL</label><input id="new-source-url" name="url" type="url" required />
-          <label for="new-source-title">Title</label><input id="new-source-title" name="title" type="text" maxlength="2000" required />
-          <label for="new-source-kind">Source kind</label>
-          <select id="new-source-kind" name="kind">
-            <option value="website">Website</option><option value="article">Article</option><option value="book">Book</option>
-            <option value="study">Study</option><option value="sources_of_sources">Sources of Sources</option>
-          </select>
-          <label for="new-source-doi">DOI (optional)</label><input id="new-source-doi" name="doi" type="text" />
-          <button type="submit">Catalogue candidate</button>
-        </form>
-      </details>
-    </section>
-    <section id="review-workspace" class="review-panel" aria-labelledby="review-heading" tabindex="-1">
-      <div id="source-detail">
-        <h2 id="review-heading">Select a source to review</h2>
-        <p class="empty-copy">Choose an academic topic and discover sources, or add a known URL. Discovery does not verify authorship, accuracy or copying permission.</p>
-        <div class="review-guide">
-          <h3>What you can review here</h3>
-          <p><strong>Source evidence:</strong> authorship, copying rights and academic findings, with traceable links.</p>
-          <p><strong>Individual claims:</strong> located assertions, assumptions, supporting proofs and factual challenges.</p>
-          <p><strong>Editorial notices:</strong> corrections, concerns and retractions, with affected claims and references.</p>
+        <div id="subjects-host" class="rail-section"></div>
+        <div id="filters-host" class="rail-section"></div>
+      </aside>
+      <div id="drawer-scrim" class="drawer-scrim" hidden></div>
+
+      <section id="library" class="pane pane-library" aria-labelledby="library-title">
+        <div class="pane-head">
+          <h2 id="library-title" class="sr-only" tabindex="-1">Library</h2>
+          <div class="toolbar">
+            <button id="drawer-toggle" class="btn btn-secondary drawer-toggle" type="button" aria-expanded="false" aria-controls="subjects"><span>Subjects &amp; filters</span></button>
+            <div class="search-box">
+              <label class="sr-only" for="library-search">Filter by title, author, DOI</label>
+              <svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
+              <input id="library-search" class="input" type="search" placeholder="Title, author or DOI" maxlength="200" autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="sort-box">
+              <label class="sr-only" for="library-sort">Sort sources</label>
+              <select id="library-sort" class="input select">
+                <option value="updated">Sort: Recently updated</option>
+                <option value="title">Sort: Title A–Z</option>
+                <option value="cited">Sort: Most cited</option>
+                <option value="year">Sort: Newest publication</option>
+              </select>
+            </div>
+            <button id="discover-button" class="btn btn-primary" type="button"><span>Discover sources</span></button>
+          </div>
+          <div id="library-context" class="context"></div>
         </div>
+        <div id="library-list" class="pane-scroll"></div>
+        <div id="library-footer" class="pane-foot"></div>
+      </section>
+
+      <section id="inspector" class="pane pane-inspector" aria-labelledby="inspector-title">
+        <div id="inspector-body" class="inspector-body"></div>
+      </section>
+    </div>
+
+    <div id="view-containers" class="page" hidden>
+      <div class="page-inner">
+        <h2 id="containers-title" class="page-title" tabindex="-1">Sources of Sources</h2>
+        <p class="page-lede">Libraries, journals, indexes and repositories that list individual works, grouped by how you can reach them. A container is a catalogue: its reputation does not establish the accuracy of what it lists.</p>
+        <div id="containers-body"></div>
       </div>
-    </section>
+    </div>
+
+    <div id="view-queue" class="page" hidden>
+      <div class="page-inner">
+        <h2 id="queue-title" class="page-title" tabindex="-1">Review queue</h2>
+        <p class="page-lede">Everything that waits for a human decision. Nothing here is approved automatically, and a quiet queue is not proof that every source is current.</p>
+        <div id="queue-body"></div>
+      </div>
+    </div>
   </main>
-  <script src="/static/academic.js" defer></script>
+
+  <div id="toasts" class="toasts"></div>
+  <script type="module" src="/static/academic.js"></script>
 </body>
 </html>

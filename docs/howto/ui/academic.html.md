@@ -1,11 +1,13 @@
 # `ui/academic.html`
 
-Static academic review workspace served at `/academic` when both
-`academic.enabled` and UI serving are enabled. It extends Kumaru's incumbent
-operator interface without replacing chat. Contains connection, subject/search,
-source-list and evidence-review regions, with semantic headings and a skip link.
-The static shell includes no private catalogue content or API keys.
+Static shell of the academic review dashboard, served at `/academic` when both
+`academic.enabled` and UI serving are on. It holds only structure: the header
+(navigation, editorial-check chip, connection pill), the Library workbench
+(`aside#subjects`, `section#library`, `section#inspector`), the Sources of Sources
+and Review queue pages, a toast region and `<script type="module" src="/static/academic.js">`.
+There is no inline script, style, handler, catalogue data or remote resource.
 
-Styles and behavior are in `academic.css` and `academic.js`.
-All data operations require the existing academic API authorization.
-[User workflow](../../ACADEMIC.md#review-dashboard).
+Landmarks, a skip link and one `h1` are static; everything dynamic is built by the
+modules with DOM nodes and text. The page keeps the words "Academic review" because
+a test asserts them. Add a new region here, then give it a module and a CSS block.
+[Behavior](academic.js.md), [styles](academic.css.md), [workflow](../../ACADEMIC.md#review-dashboard).

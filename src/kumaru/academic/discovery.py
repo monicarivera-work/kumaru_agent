@@ -72,6 +72,7 @@ def discover(
     terms = " ".join([*context, query.strip()]).strip()
     web = web or PublicWeb()
     candidates: list[Source] = []
+    skipped = 0
     if provider == "crossref":
         metadata_url = "https://api.crossref.org/works?" + urlencode({
             "query.bibliographic": terms, "rows": limit,
@@ -79,8 +80,12 @@ def discover(
         try:
             result = CrossrefResult.model_validate(web.json(metadata_url))
             for work in result.message.items:
-                if not work.title or not (work.url or work.doi):
-                    raise FetchError("Crossref returned a work without title or identifier")
+                title = next((text.strip() for text in work.title if text.strip()), "")
+                # Components and peer-review records often lack these; they are
+                # not candidates, but they must not discard the valid works.
+                if not title or not (work.url or work.doi):
+                    skipped += 1
+                    continue
                 kind: Literal["book", "article"] = (
                     "book" if work.type in {"book", "monograph", "book-chapter", "textbook"} else "article"
                 )
@@ -89,7 +94,7 @@ def discover(
                     year = work.published.date_parts[0][0]
                 candidates.append(Source(
                     url=work.url or f"https://doi.org/{work.doi}",
-                    title=work.title[0][:2000], kind=kind,
+                    title=title[:2000], kind=kind,
                     doi=work.doi, publisher=work.publisher, published_year=year,
                     authors=[
                         author.name or " ".join(p for p in [author.given, author.family] if p)
@@ -141,4 +146,6 @@ def discover(
             ))
         if source.id not in sources:
             sources.append(source.id)
-    return dict(provider=provider, query=terms, topic_id=topic_id, source_ids=sources)
+    return dict(
+        provider=provider, query=terms, topic_id=topic_id, source_ids=sources, skipped=skipped,
+    )
