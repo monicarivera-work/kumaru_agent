@@ -12,6 +12,10 @@
 
 ## What it does
 
+The sidebar includes a hidden-by-default **Academic source review** link to
+`/academic`. `app.js` reveals it only when `/v1/info` reports academic mode enabled.
+The dashboard is a separate static shell and does not replace chat.
+
 `ui\index.html` is the whole DOM of the UI. `src\kumaru\server\app.py` mounts the `ui\` folder at `/static` and returns this file for `GET /` (lines 226–231). Both happen only when `server.serve_ui` is true (the default, `src\kumaru\core\config.py:178`) and `ui\` exists. The page:
 
 - loads `/static/styles.css` in `<head>` (line 7) and `/static/app.js` as a classic script at the end of `<body>` (line 140);

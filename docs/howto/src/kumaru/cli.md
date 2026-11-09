@@ -1,5 +1,11 @@
 # `src\kumaru\cli.py`
 
+`kumaru academic` is registered from `academic/cli.py`. It discovers scholarly and
+web metadata, edits topic/source relationships, applies explicit human reviews,
+collects permitted text and exports references for `kumaru learn`, without loading
+an inference backend. Group flags `--database`/`--config` precede subcommands.
+See [the academic guide](../../../ACADEMIC.md).
+
 > The `kumaru` binary. Its Typer commands turn flags into config overrides and hand off to the server, the agent, the trainer, the eval harness, the benchmark runner or the distillation data builder. Every deliberate failure prints as `error:` plus `hint:` and exits 1.
 
 **Read this when:**

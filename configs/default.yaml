@@ -167,3 +167,12 @@ telemetry:
   log_format: console         # console | json (use json when aggregating logs)
   metrics_enabled: true
   trace_file: null            # JSONL of every request, for offline analysis
+
+academic:
+  enabled: false             # opt-in /v1/academic API; standalone CLI always available
+  database: ~/.local/share/kumaru/academic.sqlite
+  brave_api_key: null        # optional broad-web search; prefer KUMARU_ACADEMIC__BRAVE_API_KEY
+  openalex_api_key: null     # optional; your own OpenAlex budget; prefer KUMARU_ACADEMIC__OPENALEX_API_KEY
+  contact_email: null        # your own address, required only by Unpaywall lookups
+  monitor_interval_s: 0      # 0 = manual only; positive = periodic checks while the server runs
+  monitor_batch_size: 10     # never/least-recently checked DOI works per tick (1-20)

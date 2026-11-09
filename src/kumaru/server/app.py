@@ -41,9 +41,10 @@ logger = get_logger(__name__)
 UI_DIR = REPO_ROOT / "ui"
 
 # Python takes MIME types from the Windows registry, where some installers map
-# .js or .css to text/plain, and browsers refuse a stylesheet served that way.
-# Pin the types the UI depends on so it loads the same on every machine.
+# .js or .css to text/plain, and browsers refuse a stylesheet or ES module served
+# that way. Pin the types the UI depends on so it loads the same on every machine.
 mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("text/css", ".css")
 
 
@@ -185,9 +186,14 @@ def create_app(config: KumaruConfig | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         state: AppState = app.state.kumaru
         state.start_loading()  # background: does not delay the port opening
+        monitor = getattr(app.state, "academic_monitor", None)
+        if monitor is not None:
+            monitor.start()
         try:
             yield
         finally:
+            if monitor is not None:
+                await monitor.close()
             await state.shutdown()
 
     app = FastAPI(
@@ -225,12 +231,34 @@ def create_app(config: KumaruConfig | None = None) -> FastAPI:
 
     app.include_router(chat_router)
 
+    if config.academic.enabled:
+        from threading import BoundedSemaphore
+
+        from kumaru.academic.catalog import Catalog
+        from kumaru.server.routes_academic import router as academic_router
+
+        app.state.academic = Catalog(config.academic.database)
+        app.state.academic_network = BoundedSemaphore(2)
+        app.include_router(academic_router)
+        if config.academic.monitor_interval_s:
+            from kumaru.academic.monitor import UpdateMonitor
+
+            app.state.academic_monitor = UpdateMonitor(
+                app.state.academic, app.state.academic_network,
+                config.academic.monitor_interval_s, config.academic.monitor_batch_size,
+            )
+
     if config.server.serve_ui and UI_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(UI_DIR)), name="static")
 
         @app.get("/", include_in_schema=False)
         async def index() -> FileResponse:
             return FileResponse(str(UI_DIR / "index.html"))
+
+        if config.academic.enabled:
+            @app.get("/academic", include_in_schema=False)
+            async def academic_dashboard() -> FileResponse:
+                return FileResponse(str(UI_DIR / "academic.html"))
 
     return app
 

@@ -10,6 +10,9 @@
 
 `create_app()` in `src\kumaru\server\app.py` mounts this file's `router`.
 
+`GET /v1/info` includes the safe boolean `academic_enabled` so chat can reveal
+the separate review workspace; it does not expose catalogue content or keys.
+
 | Method | Path | Auth | Purpose | Statuses |
 |---|---|---|---|---|
 | `POST` | `/v1/chat/completions` | Yes, when `server.api_key` is set | One chat turn. Body: `ChatCompletionRequest` (`docs\howto\src\kumaru\server\schemas.md`). Returns a `chat.completion` JSON, or with `"stream": true` an SSE stream of `chat.completion.chunk` frames. | 200, 400, 401, 413, 422, 500, 503 |

@@ -16,7 +16,23 @@
 
 This file defines the configuration models and the merge that builds one `KumaruConfig`. The top-level sections, in order, are:
 
-`backend`, `generation`, `thinking_mode`, `agent`, `server`, `telemetry`
+`backend`, `generation`, `thinking_mode`, `agent`, `server`, `telemetry`, `academic`
+
+`academic` enables the optional academic HTTP catalogue (`enabled`, default false),
+sets its persistent SQLite `database`, and supplies optional `brave_api_key` for
+broad-web discovery. The standalone `kumaru academic` CLI works without enabling
+server routes or loading a model. See [the academic guide](../../../../ACADEMIC.md).
+Configuration dumps include `academic.brave_api_key`; redact it before sharing.
+
+`academic.openalex_api_key` (optional) gives OpenAlex lookups and searches your own
+daily budget instead of the small keyless one shared by your network.
+`academic.contact_email` is your own address, required only by Unpaywall; it must look
+like an email address. Both appear in configuration dumps, so redact them too.
+
+`academic.monitor_interval_s` defaults to zero (manual-only). A positive value
+enables periodic DOI editorial checks while the server runs.
+`academic.monitor_batch_size` is 1–20 (default 10), not a promise that the whole
+catalogue is checked each interval. Configure only one process to poll.
 
 v0.2 adds:
 

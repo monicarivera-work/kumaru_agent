@@ -38,6 +38,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from kumaru import __version__
+from kumaru.academic.cli import app as academic_app
 from kumaru.core.errors import KumaruError
 
 app = typer.Typer(
@@ -47,6 +48,8 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+
+app.add_typer(academic_app, name="academic")
 
 CONTEXT_HELP = (
     "Context window in tokens. With llama-server it sizes the KV cache, the main "
