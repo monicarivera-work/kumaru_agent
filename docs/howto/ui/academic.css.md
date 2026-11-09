@@ -12,6 +12,14 @@ below, a 340px list from 1023px and one column below 760px, with 40px touch targ
 and full-screen dialogs. Motion is limited to ~150ms transitions and is disabled for
 `prefers-reduced-motion`.
 
+Open-access additions are deliberately small: `.badge.is-free` tints only the icon
+of a neutral chip green ("free to read"), so library rows stay calm next to the
+access badge; `.check-status.is-caution` draws a checklist caution (a preprint can
+differ from the publication) in the warning colour; `.check-field.is-disabled` dims a
+checkbox that is unavailable (the Discover filter outside OpenAlex). The toolbar's
+`order` rules place "Find free copies" after "Discover sources", and below 760px
+beside the subjects toggle, with sort on its own row.
+
 `styles.css` styles bare elements (`button`, `input`) and some classes (`.chip`,
 `.check`, `.slider`, `.pill`). The resets at the top use `:where()` to stay at that
 specificity, and academic components use their own class names (`tag`, `checkbox`,

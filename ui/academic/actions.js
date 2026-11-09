@@ -1,8 +1,9 @@
-// The network actions on a source (inspect, collect, check for editorial updates), with the
-// requirements that gate them. The server enforces the same rules; this explains them.
+// The network actions on a source (inspect, collect, check for editorial updates, find free
+// copies), with the requirements that gate them. The server enforces the same rules; this
+// explains them.
 import { api } from "./api.js";
 import { toast, toastError } from "./dialogs.js";
-import { ACCESS, plural } from "./dom.js";
+import { ACCESS, OA_PROVIDERS, OA_STATUS, plural } from "./dom.js";
 import { emit } from "./state.js";
 
 export function collectBlockers(source, summary) {
@@ -18,6 +19,19 @@ export function collectBlockers(source, summary) {
 }
 
 export const checkBlockers = (source) => (source.doi && source.kind !== "sources_of_sources" ? [] : ["a DOI on an individual work"]);
+// Free-copy lookups follow the same rule as editorial checks.
+export const openAccessBlockers = checkBlockers;
+
+function freeCopyMessage(result) {
+  if (!result.indexed) return result.warning;
+  const status = OA_STATUS[result.status];
+  const copies = result.copy_ids.length;
+  return [
+    status ? `${status.label}.` : `${OA_PROVIDERS[result.provider] || "The index"} reports no open-access status.`,
+    copies ? `${plural(copies, "free copy", "free copies")} catalogued for review.` : result.status !== "closed" && "No separate free copy catalogued.",
+    result.warning,
+  ].filter(Boolean).join(" ");
+}
 
 const ACTIONS = {
   inspect: {
@@ -34,6 +48,11 @@ const ACTIONS = {
       message: `${result.notice_ids.length ? `${plural(result.notice_ids.length, "notice")} reported for review. ` : "No notices reported. "}${result.warning}`,
     }),
   },
+  openAccess: {
+    // A lookup never touches the access category, so an outage needs no reassurance about it.
+    path: "open-access", busy: "Searching…", failure: "Free-copy search failed", outage: "",
+    done: (result) => ({ message: freeCopyMessage(result) }),
+  },
 };
 
 export async function runSourceAction(kind, source, trigger) {
@@ -45,7 +64,7 @@ export async function runSourceAction(kind, source, trigger) {
     toast({ message: action.done(result).message });
     emit("data-changed", { sourceId: source.id });
   } catch (error) {
-    const outage = error.status === 503 ? " The source’s recorded access category was not changed." : "";
+    const outage = error.status === 503 ? (action.outage ?? " The source’s recorded access category was not changed.") : "";
     toastError({ message: `${error.message}${outage}`, hint: error.hint }, action.failure);
   } finally {
     if (trigger?.isConnected) {

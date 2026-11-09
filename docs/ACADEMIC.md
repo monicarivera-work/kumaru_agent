@@ -42,6 +42,11 @@ search terms. Keys stay in request headers and are never forwarded on redirects.
 `kumaru config` prints configuration secrets, including this key; do not share its
 output unredacted.
 
+OpenAlex (`--provider openalex`) searches a CC0 scholarly index and also records each
+work's open-access status and catalogues its free copies. `--open-access-only` keeps
+just the works that have one. See [Find legal open-access
+copies](#find-legal-open-access-copies) for its budget and optional key.
+
 ## Subject hierarchy
 
 Topics form an editable tree: **area > subfield > unit > chapter > subchapter**.
@@ -147,8 +152,78 @@ Link reviewed relationships with `kumaru academic link FILE.json`:
 `contains` is parent-to-child membership; the graph derives grandparents/all
 ancestors, descendants and siblings sharing an immediate parent. Multiple parents
 are allowed, but cycles are not. Other directed links are `cites`, `corroborates`,
-`criticizes` and `related`. A criticism edge alone is not factual-flaw evidence:
+`criticizes`, `related` and `open_copy` (from a work to a free copy of it; see
+[Find legal open-access copies](#find-legal-open-access-copies)). A criticism edge
+alone is not factual-flaw evidence:
 record a reviewed finding to change a legitimacy score.
+
+## Find legal open-access copies
+
+Many works that are paywalled at their publisher can be read legally elsewhere: an
+accepted manuscript in a university repository, a preprint on arXiv, or an open
+edition. `open-access` asks an index where a DOI work can be read free, and under
+which license:
+
+```powershell
+kumaru academic open-access SOURCE_ID                       # OpenAlex, the default
+kumaru academic open-access SOURCE_ID --provider unpaywall  # needs academic.contact_email
+kumaru academic open-access-batch --topic calculus --limit 20
+kumaru academic search calculus --provider openalex --open-access-only --query "fundamental theorem"
+```
+
+The work's `open_access` records the index's status for it, plus the license,
+version and PDF link of the publisher's copy when that copy is free:
+
+| Status | Meaning |
+|---|---|
+| `gold` | Open at the publisher. |
+| `diamond` | Open at the publisher, with no author fees. |
+| `hybrid` | An open article in a subscription journal. |
+| `bronze` | Free to read at the publisher, but with no license. |
+| `green` | Closed at the publisher; a free copy exists in a repository. |
+| `closed` | No free copy known. |
+
+Each free copy hosted elsewhere becomes its own unreviewed source, linked from the
+work by `open_copy`. The link's note names the host, version and license. A copy
+starts with `access: unknown` and no DOI of its own (so it is never merged into the
+work); inspect and review it like any other source.
+
+| Version | Meaning |
+|---|---|
+| `publishedVersion` | The publisher's final version. |
+| `acceptedVersion` | The peer-reviewed manuscript before typesetting. |
+| `submittedVersion` | A preprint, not yet peer reviewed. It can differ from the publication. |
+
+A license is evidence for your review, never an approval: collection still needs
+reviewed `permission` evidence. `cc0`, public domain, `cc-by` and `cc-by-sa` allow
+reuse on their conditions; `-nc` and `-nd` variants restrict it; a copy with no
+license, including every `bronze` one, is free to read but grants no reuse. Confirm
+the license on the page itself, because indexes can be wrong or out of date, and
+"not indexed" does not mean that no free copy exists. PDF links are kept as
+`pdf_url`; like every PDF they remain metadata-only.
+
+Providers:
+
+- **OpenAlex** (default) needs no account, and DOI lookups are free. Searches draw on
+  a daily budget: without a key, everyone on your network shares a small one, and
+  OpenAlex may briefly refuse anonymous searches under load. Kumaru waits once when
+  told to retry within 20 seconds. A free key (openalex.org, Settings, API key) gives
+  you your own budget. It is sent only in an `Authorization` header, so it never
+  appears in the metadata URLs that sources store.
+- **Unpaywall** (the same team and data as OpenAlex; its search was retired) answers
+  DOI lookups and requires your own email address. Kumaru sends the address only to
+  Unpaywall and stores the request URL without it.
+
+```powershell
+$env:KUMARU_ACADEMIC__OPENALEX_API_KEY = "YOUR_KEY"
+$env:KUMARU_ACADEMIC__CONTACT_EMAIL = "you@your-university.edu"
+```
+
+Batches check DOI works never checked first, then the least recently checked, up to
+20 per run. They skip containers and sources that are themselves free copies. A rate
+limit or outage stops the batch and reports it in `stopped`, rather than failing
+every remaining work. `kumaru config` prints both settings; redact them before
+sharing its output.
 
 ## Human review and permission
 
@@ -342,15 +417,17 @@ readiness; the example uses echo to avoid loading a model.
 | Method/path under `/v1/academic` | Operation |
 |---|---|
 | `GET /topics`, `PUT /topics/{id}` | Select/edit the hierarchy. `PUT` upserts, so check the ID is new before adding. |
-| `POST /search` | `{topic_id, query, provider, limit}` -> `{source_ids, skipped, ...}`. Crossref works without a title or DOI/URL are skipped and counted in `skipped`; a malformed response envelope still fails. |
+| `POST /search` | `{topic_id, query, provider, limit, open_access_only}` -> `{source_ids, skipped, ...}`. `provider` is `crossref`, `openalex` or `brave`; OpenAlex also returns the `copy_ids` it catalogued, and only OpenAlex accepts `open_access_only`. Crossref works without a title or DOI/URL are skipped and counted in `skipped`; a malformed response envelope still fails. |
 | `GET /sources`, `POST /sources` | Filter/paginate full metadata (arbitrary order, no total) or add a source. |
-| `GET /overview?topic_id=` | Aggregate counts for a subject subtree (`by_access`, `by_kind`, `by_origin`, `needs_review`, `pending_notices`, `claims`, `unreviewed_claims`), direct `topic_counts`, distinct rolled-up `topic_totals`, the scoring `formula` and `brave_configured`. |
-| `GET /library` | One page of source summaries with a server `total`. Filters: `topic_id` (subtree), `access`, `kind` (`works`/`containers`), `status` (`needs_review`/`human_verified`/`ai`), `q` (literal, case-insensitive substring of title, DOI, publisher and authors), `container_id`. `sort` is `updated`, `title`, `cited` or `year`; `limit` 1..100. Items include counts, the best in-scope `score` and never text or evidence. Invalid parameters are HTTP 400. |
+| `GET /overview?topic_id=` | Aggregate counts for a subject subtree (`by_access`, `by_kind`, `by_origin`, `needs_review`, `pending_notices`, `claims`, `unreviewed_claims`), direct `topic_counts`, distinct rolled-up `topic_totals`, the scoring `formula`, `brave_configured`, `openalex_key_configured` and `unpaywall_configured`. |
+| `GET /library` | One page of source summaries with a server `total`. Filters: `topic_id` (subtree), `access`, `kind` (`works`/`containers`), `status` (`needs_review`/`human_verified`/`ai`), `q` (literal, case-insensitive substring of title, DOI, publisher and authors), `container_id`. `sort` is `updated`, `title`, `cited` or `year`; `limit` 1..100. Items include counts, `open_access`, `free_copies`, `is_free_copy`, the best in-scope `score` and never text or evidence. Invalid parameters are HTTP 400. |
 | `GET /sources/{id}` | Metadata, topic scores, graph, reviews, notices, and `related`: id, title, kind, access and origin for every source in the graph. |
 | `POST /sources/{id}/review` | Apply an evidence-backed human review (origin, permission, access and `access_note`, topics, findings). |
 | `POST /relationships` | Add a directed graph edge. |
 | `POST /sources/{id}/inspect` | Inspect page metadata/access without retaining text. |
 | `POST /sources/{id}/collect` | Collect permitted text. |
+| `POST /sources/{id}/open-access?provider=` | Find free copies of one DOI work (`openalex` by default, or `unpaywall`) -> `{indexed, status, license, copy_ids, warning}`. |
+| `POST /open-access?topic_id=&limit=&provider=` | The same for up to 20 never/least-recently checked DOI works -> `{results, errors, stopped}`. |
 | `GET /sources/{id}/text` | Explicit untrusted-reference text response. |
 
 Listings and source details omit text. Network actions run in the server's

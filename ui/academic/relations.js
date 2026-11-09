@@ -24,6 +24,10 @@ const SENTENCES = [
     hint: "A criticism link alone does not change a score. Record a reviewed finding for that." },
   { value: "criticized", label: "This source is criticized by…", kind: "criticizes", reverse: true,
     hint: "A criticism link alone does not change a score. Record a reviewed finding for that." },
+  { value: "open_copy", label: "This source has a free copy at…", kind: "open_copy", reverse: false,
+    hint: "A free copy can be a different version; check it before relying on it." },
+  { value: "copy_of", label: "This source is a free copy of…", kind: "open_copy", reverse: true,
+    hint: "A free copy can be a different version; check it before relying on it." },
   { value: "related", label: "This source is related to…", kind: "related", reverse: false, hint: "Use this when none of the other relationships fit." },
 ];
 
@@ -63,6 +67,8 @@ function linkGroups(ctx) {
     ["Corroborated by", (link) => link.kind === "corroborates" && link.target_id === id, (link) => link.source_id],
     ["Criticizes", (link) => link.kind === "criticizes" && link.source_id === id, (link) => link.target_id],
     ["Criticized by", (link) => link.kind === "criticizes" && link.target_id === id, (link) => link.source_id],
+    ["Free copies", (link) => link.kind === "open_copy" && link.source_id === id, (link) => link.target_id],
+    ["Free copy of", (link) => link.kind === "open_copy" && link.target_id === id, (link) => link.source_id],
     ["Related", (link) => link.kind === "related", (link) => (link.source_id === id ? link.target_id : link.source_id)],
   ];
   return groups.map(([title, match, pick]) => [title, links.filter(match).map((link) => ({ card: ctx.detail.related[pick(link)] || unavailable(pick(link)), note: link.note }))])
@@ -81,7 +87,7 @@ export function renderRelationsTab(ctx) {
     el("div", { class: "tab-head" },
       el("h3", { class: "tab-title" }, "Relations"),
       button("Add relationship", { variant: "primary", iconName: "plus", focusId: "add-relationship", onclick: (event) => openRelationshipDialog({ source: ctx.source, trigger: event.currentTarget }) })),
-    nothing && emptyState({ title: "No relationships recorded", body: "Link this source to the container that lists it, to sources it cites, or to independent sources that corroborate it." }),
+    nothing && emptyState({ title: "No relationships recorded", body: "Link this source to the container that lists it, to sources it cites, to a free copy of it, or to independent sources that corroborate it." }),
     !nothing && el("div", { class: "family", role: "group", "aria-label": "Containment family" },
       column("Ancestors", ancestors, related, "None"),
       column("Parents", parents, related, "None"),

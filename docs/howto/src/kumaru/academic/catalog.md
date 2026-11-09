@@ -27,3 +27,10 @@ substring match with `%`/`_`/`\` escaped), and `source_cards(ids)` resolves titl
 one query. `claim_details`, `notice_details` and the source route use them so clients
 show titles instead of IDs. `claims(reviewed=)` filters in SQL, and
 `notice_details` filters affected claims by topic in SQL.
+
+Open access: rediscovery refreshes a source's `open_access` along with its other
+metadata, and `save_metadata` accepts it, because it is an index's report rather than
+a decision. `open_access_due(topic_id, limit)` returns DOI works never checked first,
+then the least recently checked (by `open_access.checked_at`), skipping containers and
+sources that are the target of an `open_copy` link. Library items add `open_access`,
+`free_copies` (outgoing `open_copy` links) and `is_free_copy`.

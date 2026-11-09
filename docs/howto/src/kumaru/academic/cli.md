@@ -14,3 +14,9 @@ Claim commands are `claim-add`, `claims`, `claim-show`, `claim-review`.
 Editorial commands are `notice-add`, `notices`, `notice-review`, `check-updates`,
 `monitor`. Claims/notices accept paginated listing flags; monitor batches cap at
 20 and explicitly return per-source errors.
+
+`search --provider openalex [--open-access-only]` adds OpenAlex discovery.
+`open-access SOURCE_ID [--provider openalex|unpaywall]` and
+`open-access-batch [--topic] [--limit 1..20] [--provider]` find legal free copies;
+see [openaccess.py](openaccess.md). Provider names are checked against an explicit
+map rather than cast from arbitrary strings.

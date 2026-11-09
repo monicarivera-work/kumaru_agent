@@ -46,6 +46,7 @@ LIBRARY_ITEM_KEYS = {
     "topic_reviewed", "doi", "publisher", "published_year", "citation_count", "reference_count",
     "authors", "author_count", "discovered_at", "updated_at", "collected_at", "word_count",
     "evidence_count", "claim_count", "child_count", "pending_notices", "withdrawn", "score",
+    "free_copies", "is_free_copy", "open_access",
 }
 
 

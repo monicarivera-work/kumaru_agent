@@ -10,3 +10,12 @@ notice states, evidence order) keep wording in one place.
 `meter()` draws a 0–max bar and hatches null values with a dash. Formatters use `Intl`
 (dates, relative time, tabular scores). Do not add `innerHTML` here or anywhere in the
 dashboard.
+
+Open-access wording lives here too: `OA_STATUS` (gold, diamond, hybrid, bronze, green,
+closed; a plain label such as "Green — free copy in a repository" and a short chip
+label such as "Green OA"), `OA_VERSIONS` (published version, accepted manuscript,
+submitted preprint), `OA_PROVIDERS`, and `licenseLabel()`, which turns a license code
+into what it allows: none stated is "free to read, not to reuse", CC0/public domain
+allows reuse, CC BY and CC BY-SA need attribution, NC/ND variants are restricted and
+anything else is "Other license (…) — check its terms". `RELATION_LABELS` includes
+`open_copy` ("Free copy").

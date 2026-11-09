@@ -1,6 +1,6 @@
 # `tests/`
 
-> The offline regression suite. 1380 tests, no GPU, no downloads, under a minute.
+> The offline regression suite. 1399 tests, no GPU, no downloads, under a minute.
 
 **Read this when:** you have changed something and want to know whether you broke it, or you are adding a feature and need to know where its test belongs.
 
@@ -73,6 +73,7 @@ $env:KUMARU_TEST_TOOLCHAINS = '1'; .\.venv\Scripts\python.exe -m pytest tests\te
 | `test_academic_reliability.py` | A claim inheriting its source's proof; containers, pending reviews or confirmed flaws counting as corroboration; claim findings escaping their topic or audit trail; **a retraction or correction leaving trusted text or claim support in place**; pending notices hidden by pagination; monitor errors reported as clean scans; a schema upgrade losing sources or reviews |
 | `test_academic_gui_api.py` | The dashboard's overview, library and detail endpoints miscounting (a multi-tagged source counted twice), putting text or evidence in summaries, filtering, sorting or paging wrongly, or skipping auth; access notes bypassing review history; **a network outage relabelling a source's access** instead of failing with 503; malformed Crossref records aborting discovery; ES modules served without a JavaScript content type |
 | `test_academic_robots.py` | robots.txt read first-match instead of RFC 9309's longest match (blocking pages a publisher allows), `*`/`$` patterns or percent-encoding ignored, the wrong user-agent group applied, or crawl delays shortened; **a crafted robots.txt rule taking more than linear time**; Cloudflare or AWS WAF challenges failing as errors or treated as outages instead of recorded as `inaccessible` |
+| `test_academic_open_access.py` | A license or free copy being treated as an approval; **a free copy carrying the work's DOI and being merged into it**, or a re-check overwriting a reviewed copy or the status of a copy that is also a work; one arXiv preprint catalogued three times; a publisher's own copy catalogued as a second source; **the OpenAlex key or the Unpaywall email reaching a stored URL**; Unpaywall called without your address; a malformed answer writing anything; a rate limit or outage failing every work in a batch instead of stopping it; a short `Retry-After` not honoured, or a long one waited out |
 
 ## Fixtures
 

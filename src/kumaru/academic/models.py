@@ -10,6 +10,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from kumaru.core.errors import RequestError
+
 TopicLevel = Literal["area", "subfield", "unit", "chapter", "subchapter"]
 Access = Literal["unknown", "open", "account", "paywall", "inaccessible"]
 Origin = Literal["unknown", "human_verified", "ai"]
@@ -18,11 +20,26 @@ EvidenceKind = Literal[
     "historical_acceptance", "credentials", "proof", "peer_review", "replication",
     "factual_criticism", "retraction", "corroboration", "origin", "permission",
 ]
-RelationKind = Literal["contains", "cites", "corroborates", "criticizes", "related"]
+# `open_copy` points from a work to a free copy of it elsewhere (often a repository).
+RelationKind = Literal["contains", "cites", "corroborates", "criticizes", "related", "open_copy"]
+OAStatus = Literal["gold", "diamond", "hybrid", "bronze", "green", "closed"]
+CopyVersion = Literal["submittedVersion", "acceptedVersion", "publishedVersion"]
+OAProvider = Literal["openalex", "unpaywall"]
 
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def normalized_doi(value: str) -> str:
+    value = value.strip().casefold()
+    for prefix in (
+        "https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "http://dx.doi.org/", "doi:",
+    ):
+        value = value.removeprefix(prefix)
+    if not value.startswith("10.") or "/" not in value or any(char.isspace() for char in value):
+        raise RequestError("A valid DOI (10.prefix/suffix) is required")
+    return value
 
 
 def canonical_url(value: str) -> str:
@@ -77,6 +94,28 @@ class Evidence(Record):
         return self
 
 
+class OpenAccess(Record):
+    """What an open-access index reported about this URL. Metadata, never a review.
+
+    `status` describes the work. The other fields describe this location: for a
+    work, its publisher's copy; for a free copy, the repository's.
+    """
+
+    status: OAStatus | None = None
+    license: str | None = Field(default=None, max_length=100)
+    version: CopyVersion | None = None
+    host_type: Literal["publisher", "repository"] | None = None
+    host: str | None = Field(default=None, max_length=500)
+    pdf_url: str | None = None
+    provider: OAProvider
+    metadata_url: str
+    checked_at: str = Field(default_factory=now)
+
+    _url = field_validator("pdf_url", "metadata_url")(
+        lambda v: canonical_url(v) if v is not None else None
+    )
+
+
 class Source(Record):
     id: str = ""
     url: str
@@ -107,6 +146,7 @@ class Source(Record):
     word_count: int = Field(default=0, ge=0)
     topic_word_counts: dict[str, int] = Field(default_factory=dict)
     truncated: bool = False
+    open_access: OpenAccess | None = None
 
     _url = field_validator("url", "metadata_url", "text_url")(
         lambda v: canonical_url(v) if v is not None else None

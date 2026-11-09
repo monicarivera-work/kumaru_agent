@@ -11,10 +11,13 @@ from pydantic import BaseModel, Field, ValidationError
 
 from kumaru.academic.catalog import Catalog
 from kumaru.academic.discovery import DateParts
+from kumaru.academic.models import normalized_doi
 from kumaru.academic.reliability import NoticeCreate, NoticeKind
 from kumaru.academic.web import FetchError, PublicWeb
 from kumaru.core.errors import KumaruError, RequestError
 from kumaru.core.logging import get_logger
+
+__all__ = ["UpdateMonitor", "check_batch", "check_updates", "normalized_doi"]
 
 logger = get_logger(__name__)
 
@@ -39,17 +42,6 @@ class EditorialMessage(BaseModel):
 class EditorialResult(BaseModel):
     status: str
     message: EditorialMessage
-
-
-def normalized_doi(value: str) -> str:
-    value = value.strip().casefold()
-    for prefix in (
-        "https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "http://dx.doi.org/", "doi:",
-    ):
-        value = value.removeprefix(prefix)
-    if not value.startswith("10.") or "/" not in value or any(char.isspace() for char in value):
-        raise RequestError("Monitoring requires a valid DOI")
-    return value
 
 
 def check_updates(catalog: Catalog, source_id: str, web: PublicWeb | None = None) -> dict:

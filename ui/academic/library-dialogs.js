@@ -2,7 +2,7 @@
 import { api } from "./api.js";
 import { openDialog, toast, toastError } from "./dialogs.js";
 import { ACCESS, ACCESS_ORDER, el, KINDS, plural } from "./dom.js";
-import { radioGroup, segmented, selectField, textField } from "./forms.js";
+import { checkField, radioGroup, segmented, selectField, textField } from "./forms.js";
 import { sourcePicker } from "./picker.js";
 import { emit, navigate, sourceHash, state } from "./state.js";
 import { breadcrumb, breadcrumbText, topicCheckboxTree } from "./topics.js";
@@ -12,31 +12,59 @@ export async function openDiscoverDialog(trigger) {
   const result = await openDialog({
     title: "Discover sources", trigger, size: "md", submitLabel: "Search",
     description: "Contacts an external provider; results are unreviewed candidates.",
-    build: () => [
-      el("p", { class: "dialog-subject" }, el("span", { class: "dialog-subject-label" }, "Subject"), breadcrumb(topicId)),
-      textField({
-        name: "query", label: "Narrow your search (optional)", maxlength: 500, placeholder: "For example: fundamental theorem",
-        hint: "Added to the subject path, which is sent to the provider with it. Do not put secrets here.",
-      }).node,
-      radioGroup({
+    build: () => {
+      const provider = radioGroup({
         name: "provider", legend: "Provider", value: "crossref",
         options: [
           { value: "crossref", label: "Crossref", hint: "Scholarly metadata: titles, authors, DOIs, citation counts." },
+          { value: "openalex", label: "OpenAlex",
+            hint: "Scholarly metadata with open-access status and licenses; also catalogues the free copies it lists."
+              + (state.openalexKeyConfigured ? "" : " Uses a small keyless budget shared by your network; set academic.openalex_api_key for your own.") },
           { value: "brave", label: "Brave web search", disabled: !state.braveConfigured,
             hint: state.braveConfigured ? "Broader web results." : "Unavailable: academic.brave_api_key is not set in the Kumaru configuration." },
         ],
-      }).node,
-    ],
-    onSubmit: (data) => api("/search", {
-      body: { topic_id: topicId, query: String(data.get("query")).trim(), provider: String(data.get("provider")), limit: 20 },
-    }),
+      });
+      const freeOnly = checkField({
+        name: "open_access_only", label: "Only works with a free copy",
+        hint: "OpenAlex only: keeps just the works it lists as free to read, at the publisher or in a repository.",
+      });
+      // The filter exists only at OpenAlex, so it is off and unchecked for the other providers.
+      const sync = () => {
+        const openalex = provider.value() === "openalex";
+        freeOnly.control.disabled = !openalex;
+        if (!openalex) freeOnly.control.checked = false;
+        freeOnly.node.classList.toggle("is-disabled", !openalex);
+      };
+      provider.inputs.forEach((input) => input.addEventListener("change", sync));
+      sync();
+      return [
+        el("p", { class: "dialog-subject" }, el("span", { class: "dialog-subject-label" }, "Subject"), breadcrumb(topicId)),
+        textField({
+          name: "query", label: "Narrow your search (optional)", maxlength: 500, placeholder: "For example: fundamental theorem",
+          hint: "Added to the subject path, which is sent to the provider with it. Do not put secrets here.",
+        }).node,
+        provider.node,
+        freeOnly.node,
+      ];
+    },
+    onSubmit: (data) => {
+      const provider = String(data.get("provider"));
+      return api("/search", {
+        body: {
+          topic_id: topicId, query: String(data.get("query")).trim(), provider, limit: 20,
+          open_access_only: provider === "openalex" && data.get("open_access_only") === "on",
+        },
+      });
+    },
   });
   if (!result || result === true) return;
   const skipped = result.skipped || 0;
+  const copies = result.copy_ids?.length || 0;
   toast({
     title: "Discovery finished",
     message: `${plural(result.source_ids.length, "candidate")} added or refreshed for ${breadcrumbText(topicId)}`
-      + `${skipped ? `; ${plural(skipped, "incomplete provider record")} skipped` : ""}. `
+      + `${skipped ? `; ${plural(skipped, "incomplete provider record")} skipped` : ""}`
+      + `${copies ? `; ${plural(copies, "free copy", "free copies")} catalogued` : ""}. `
       + "Authorship, accuracy and copying rights still need your review.",
   });
   emit("data-changed", { scope: "sources" });

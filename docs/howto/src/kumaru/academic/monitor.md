@@ -16,3 +16,6 @@ Do not automatically generate reviewed criticism, credentials or copying
 permission from a provider report. Human notice confirmation is handled
 transactionally by `Catalog.review_notice`.
 [Configuration and limits](../../../../ACADEMIC.md#corrections-concerns-and-retractions).
+
+DOI normalisation lives in `models.normalized_doi`, shared with open-access lookups;
+this module re-exports it for existing imports.

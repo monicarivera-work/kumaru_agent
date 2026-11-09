@@ -8,6 +8,8 @@ export const state = {
   queue: null, // catalogue-wide counts for the review queue and the header badge
   formula: null,
   braveConfigured: false,
+  openalexKeyConfigured: false, // without a key OpenAlex shares a small keyless daily budget
+  unpaywallConfigured: false, // Unpaywall needs academic.contact_email
   monitor: null,
   route: { view: "library", sourceId: null, tab: "overview", claimId: null },
   filters: { access: "", kind: "", status: "", q: "", sort: "updated", containerId: "", containerTitle: "", containerChildren: 0 },

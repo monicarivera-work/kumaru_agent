@@ -3,24 +3,82 @@
 import { collectBlockers, runSourceAction } from "./actions.js";
 import { scoreCard } from "./anatomy.js";
 import {
-  ACCESS, ACCESS_ORDER, button, el, fmtDate, fmtInt, fmtRelative, plural,
+  ACCESS, ACCESS_ORDER, button, el, fmtDate, fmtInt, fmtRelative, licenseLabel, link, OA_PROVIDERS, OA_STATUS, OA_VERSIONS, plural,
 } from "./dom.js";
 import { icon } from "./icons.js";
 import { openDiscoverDialog } from "./library-dialogs.js";
 import { openReviewDialog } from "./review.js";
-import { emit, navigate, state, viewHash } from "./state.js";
+import { emit, navigate, sourceHash, state, viewHash } from "./state.js";
 import { breadcrumb, breadcrumbText, topicName } from "./topics.js";
 
 const ROW_ICONS = { ok: "check", todo: "question", bad: "alert", info: "info" };
 const ROW_PREFIX = { ok: "Done. ", todo: "Needs attention. ", bad: "Blocked. ", info: "" };
 
-function checkRow({ label, tone, text, action }) {
+// `details` are extra status lines; a `{ caution }` line is drawn in the warning colour.
+function checkRow({ label, tone, text, details = [], action }) {
   return el("li", { class: `check-row tone-${tone}` },
     el("span", { class: "check-icon" }, icon(ROW_ICONS[tone], { size: 18 })),
     el("div", { class: "check-main" },
       el("strong", { class: "check-label" }, label),
-      el("p", { class: "check-status" }, el("span", { class: "sr-only" }, ROW_PREFIX[tone]), text)),
+      el("p", { class: "check-status" }, el("span", { class: "sr-only" }, ROW_PREFIX[tone]), text),
+      details.filter(Boolean).map((line) => (line.caution
+        ? el("p", { class: "check-status is-caution" }, line.caution) : el("p", { class: "check-status" }, line)))),
     action && button(action.label, { variant: "secondary", focusId: action.focusId, disabled: action.disabled, onclick: action.onclick }));
+}
+
+// What an open-access index reported: for a work its status and the publisher's copy, for a
+// free copy the version and license of that copy. Metadata for the reviewer, never a review.
+function openAccessRow(ctx) {
+  const { id, source, detail } = ctx;
+  const links = detail.graph.links.filter((item) => item.kind === "open_copy");
+  const copies = links.filter((item) => item.source_id === id).length;
+  const originals = links.filter((item) => item.target_id === id).map((item) => item.source_id);
+  const oa = source.open_access;
+  if (ctx.container || (!source.doi && !oa && !links.length)) return null;
+  const provider = OA_PROVIDERS[oa?.provider] || OA_PROVIDERS.openalex;
+  const checked = oa && fmtRelative(oa.checked_at);
+  const lookup = (label) => (source.doi
+    ? { label, focusId: "check-open-access", onclick: (event) => runSourceAction("openAccess", source, event.currentTarget) } : null);
+  const copiesLine = copies > 0 && [
+    el("button", { type: "button", class: "text-link", onclick: () => ctx.go("relations") }, plural(copies, "free copy", "free copies")),
+    " catalogued for review. Check each one’s version and license before relying on it.",
+  ];
+
+  if (originals.length) {
+    const works = originals.map((workId, index) => [index > 0 && ", ",
+      el("a", { class: "text-link", href: sourceHash(workId) }, detail.related[workId]?.title || "a work no longer in the catalogue")]);
+    const version = OA_VERSIONS[oa?.version] || "Version not stated";
+    return checkRow({
+      label: "Open access", tone: "info", text: ["Free copy of ", works, "."],
+      details: oa ? [
+        `${version}${oa.host ? ` at ${oa.host}` : ""}.`,
+        `${licenseLabel(oa.license)}.`,
+        oa.version === "submittedVersion" && { caution: "A preprint can differ from the peer-reviewed publication." },
+        [oa.pdf_url && [link(oa.pdf_url, "Read the PDF"), " · "], `Listed by ${provider} ${checked}.`],
+      ] : ["Version and license not recorded. Check them on the copy itself before relying on it."],
+    });
+  }
+  if (!oa) {
+    return checkRow({
+      label: "Open access", tone: "info",
+      text: source.doi ? "Not checked. Find free copies asks OpenAlex for legal free copies." : "No DOI, so no open-access index can be asked about this work.",
+      details: [copiesLine], action: lookup("Find free copies"),
+    });
+  }
+  const status = OA_STATUS[oa.status];
+  const hasCopy = Boolean(oa.license || oa.version || oa.host_type || oa.host || oa.pdf_url);
+  const own = hasCopy ? [OA_VERSIONS[oa.version], licenseLabel(oa.license)].filter(Boolean) : [];
+  const where = `${oa.host_type === "repository" ? "Repository copy" : "Publisher copy"}${oa.host ? ` (${oa.host})` : ""}`;
+  return checkRow({
+    label: "Open access", tone: "info",
+    text: status ? `${status.label}.` : `${provider} gave no open-access status for this DOI. That does not mean no free copy exists.`,
+    details: [
+      hasCopy && [`${where}: `, own.join(" · "), oa.pdf_url && [" · ", link(oa.pdf_url, "Read the PDF")]],
+      copiesLine || (status && oa.status !== "closed" && "No separate free copy catalogued."),
+      status ? `Reported by ${provider}; checked ${checked}.${oa.status === "closed" ? " That does not prove no free copy exists." : ""}` : `Checked ${checked}.`,
+    ],
+    action: lookup("Check again"),
+  });
 }
 
 function checklist(ctx) {
@@ -51,6 +109,7 @@ function checklist(ctx) {
     text: `${access.label}.${source.access_note ? ` ${source.access_note}` : ` ${access.meaning}`}`,
     action: { label: "Change access", onclick: review("access"), focusId: "check-access" },
   }));
+  rows.push(openAccessRow(ctx));
   rows.push(checkRow({
     label: "Topic coverage",
     tone: source.topic_reviewed ? "ok" : "todo",

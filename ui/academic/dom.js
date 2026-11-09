@@ -161,7 +161,36 @@ export const levelLabel = (id) => LEVELS.find((level) => level.id === id)?.label
 
 export const RELATION_LABELS = {
   contains: "Contains", cites: "Cites", corroborates: "Corroborates", criticizes: "Criticizes", related: "Related",
+  open_copy: "Free copy",
 };
+
+// What an open-access index reports. Metadata for a reviewer: a license is never an approval.
+export const OA_STATUS = {
+  gold: { label: "Gold — open at the publisher", short: "Gold OA" },
+  diamond: { label: "Diamond — open, no author fees", short: "Diamond OA" },
+  hybrid: { label: "Hybrid — open article in a paid journal", short: "Hybrid OA" },
+  bronze: { label: "Bronze — free to read, no license", short: "Bronze OA" },
+  green: { label: "Green — free copy in a repository", short: "Green OA" },
+  closed: { label: "Closed — no free copy known", short: "No free copy known" },
+};
+export const OA_VERSIONS = {
+  publishedVersion: "Published version",
+  acceptedVersion: "Accepted manuscript (peer reviewed, not typeset)",
+  submittedVersion: "Submitted preprint (not yet peer reviewed)",
+};
+export const OA_PROVIDERS = { openalex: "OpenAlex", unpaywall: "Unpaywall" };
+
+export function licenseLabel(value) {
+  const license = String(value || "").trim().toLowerCase();
+  if (!license) return "No license stated — free to read, not to reuse";
+  if (["cc0", "public-domain", "pd"].includes(license)) return "Public domain — reuse allowed";
+  if (license === "cc-by") return "CC BY — reuse with attribution";
+  if (license === "cc-by-sa") return "CC BY-SA — reuse with attribution, share alike";
+  if (license.startsWith("cc-by-nc") || license.startsWith("cc-by-nd")) {
+    return `${license.toUpperCase()} — reuse restricted (non-commercial or no derivatives)`;
+  }
+  return `Other license (${String(value).trim()}) — check its terms`;
+}
 
 export const pretty = (value) => String(value || "").replaceAll("_", " ");
 

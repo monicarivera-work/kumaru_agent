@@ -284,6 +284,10 @@ class AcademicConfig(_Base):
         default_factory=lambda: str(Path.home() / ".local" / "share" / "kumaru" / "academic.sqlite")
     )
     brave_api_key: str | None = None
+    # Optional: raises OpenAlex's free daily budget tenfold. Sent as a bearer header.
+    openalex_api_key: str | None = None
+    # Your own address, required by Unpaywall's API. Never stored with sources.
+    contact_email: str | None = Field(default=None, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     monitor_interval_s: int = Field(default=0, ge=0, le=604800)
     monitor_batch_size: int = Field(default=10, ge=1, le=20)
 

@@ -9,7 +9,7 @@ CLI and API. `analyze_page` extracts landing-page metadata and text using existi
 
 Redirects are followed manually so each hop gets DNS, robots and scheme checks.
 An HTTPS hop that redirects to plain HTTP (as `doi.org` does for many publishers)
-is retried as the HTTPS form of that target via `_https_upgrade`; plain HTTP is never
+is retried as the HTTPS form of that target via `https_upgrade`; plain HTTP is never
 requested after HTTPS. A redirect back to the same URL, or to a nonstandard port,
 still raises `AccessBlocked("HTTPS downgrades are not followed")`.
 
@@ -37,3 +37,10 @@ about the source: DNS failure, `httpx` transport errors and timeouts, robots
 `429`/`5xx`, provider `429`/`5xx`, and source pages answering `429`/`5xx`. `inspect_source` and `collect_source` re-raise
 it without touching the stored access category; every other `FetchError` still
 records `inaccessible`. Raise it only for conditions that could pass on retry.
+
+`PublicWeb.json` (provider APIs only) raises `RateLimited`, a `TransientFetchError`,
+for HTTP 429 and `ProviderMissing`, a plain `FetchError` (still HTTP 502), for 404 so
+DOI lookups can report "not indexed". When a 429 carries a numeric `Retry-After` of at
+most `MAX_RETRY_AFTER` (20) seconds, it waits that long and retries once; HTTP-date
+values and longer waits fail at once. `Page.retry_after` holds the parsed value.
+`https_upgrade(url)` is public so open-access lookups can store HTTPS-first URLs.

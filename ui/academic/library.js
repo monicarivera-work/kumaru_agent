@@ -2,15 +2,15 @@
 // and the honest empty, loading and error states.
 import { api, ApiError } from "./api.js";
 import { openConnectionDialog } from "./connection.js";
-import { applyPendingFocus } from "./dialogs.js";
+import { applyPendingFocus, toast, toastError } from "./dialogs.js";
 import {
-  ACCESS, ACCESS_ORDER, accessBadge, authorsLine, badge, button, clear, el, emptyState, fmtInt, kindIcon, meter, originBadge,
-  skeletonRows, uid,
+  ACCESS, ACCESS_ORDER, accessBadge, authorsLine, badge, button, clear, el, emptyState, fmtInt, kindIcon, meter, OA_PROVIDERS, OA_STATUS,
+  originBadge, plural, skeletonRows, uid,
 } from "./dom.js";
 import { icon } from "./icons.js";
 import { openAddSourceDialog, openDiscoverDialog } from "./library-dialogs.js";
 import { emit, gate, navigate, on, sourceHash, state } from "./state.js";
-import { breadcrumb, topicName } from "./topics.js";
+import { breadcrumb, breadcrumbText, topicName } from "./topics.js";
 
 const PAGE = 30;
 const requests = gate();
@@ -91,6 +91,20 @@ function scoreMeters(item) {
     el("span", { class: "mini" }, el("span", { class: "mini-label", "aria-hidden": "true" }, "U"), meter({ value: score?.usefulness ?? null, label: label("Usefulness", score?.usefulness), compact: true })));
 }
 
+// One quiet chip per row: a free copy says so; a work shows its free copies, else its reported status.
+function openAccessChip(item) {
+  if (item.is_free_copy) {
+    return badge({ tone: "dim", iconName: "link", label: "Free copy", title: "Catalogued as a free copy of another work. Its version and license can differ from the original." });
+  }
+  const status = OA_STATUS[item.open_access?.status];
+  if (item.free_copies > 0) {
+    return badge({ tone: "dim", iconName: "unlock", variant: "free", label: plural(item.free_copies, "free copy", "free copies"), title: status?.label });
+  }
+  if (!status) return null;
+  const closed = item.open_access.status === "closed";
+  return badge({ tone: "dim", iconName: closed ? "lock" : "unlock", variant: closed ? "solid" : "free", label: status.short, title: status.label });
+}
+
 function row(item) {
   const selected = state.route.sourceId === item.id;
   const meta = [authorsLine(item.authors, item.author_count), item.publisher, item.published_year].filter(Boolean).join(" · ");
@@ -106,7 +120,8 @@ function row(item) {
       el("span", { class: "row-badges" },
         accessBadge(item.access), originBadge(item.origin),
         item.pending_notices > 0 && badge({ tone: "warn", iconName: "alert", label: "Notice pending" }),
-        item.withdrawn && badge({ tone: "err", iconName: "ban", label: "Retracted" }))),
+        item.withdrawn && badge({ tone: "err", iconName: "ban", label: "Retracted" }),
+        openAccessChip(item))),
     scoreMeters(item)));
 }
 
@@ -174,7 +189,7 @@ function renderEmpty() {
     title: `No sources in ${topicName(state.topicId)} yet`,
     body: "Discovery contacts an external provider and returns unreviewed candidates. You can also add a source you already know; nothing is approved automatically.",
     actions: [
-      button("Discover with Crossref", { variant: "primary", iconName: "search", onclick: (event) => openDiscoverDialog(event.currentTarget) }),
+      button("Discover sources", { variant: "primary", iconName: "search", onclick: (event) => openDiscoverDialog(event.currentTarget) }),
       button("Add a known source", { iconName: "plus", onclick: (event) => openAddSourceDialog(event.currentTarget) }),
     ],
   }));
@@ -208,7 +223,58 @@ export async function reload({ scrollTop = false } = {}) {
   }
 }
 
-export function initLibrary({ list, context, footer, filters, search, sort, discover }) {
+/* ─── Free copies ─── */
+
+const BATCH = 20;
+
+function freeCopyReport(result, scope) {
+  const checked = result.results.length;
+  const failed = result.errors.length;
+  const details = result.errors.map((item) => item.error).join("\n");
+  if (!checked && !failed) {
+    return { title: "Nothing to check", message: `No works with a DOI in ${scope}. Free-copy searches need an individual work with a DOI.` };
+  }
+  if (!checked) {
+    return {
+      kind: "error", title: "Free-copy search failed", details,
+      message: result.stopped ? `Stopped before any work was checked: ${result.stopped}` : `${plural(failed, "lookup")} failed; no work was checked.`,
+    };
+  }
+  const provider = OA_PROVIDERS[result.results[0].provider] || OA_PROVIDERS.openalex;
+  const copies = result.results.reduce((sum, item) => sum + item.copy_ids.length, 0);
+  const unindexed = result.results.filter((item) => !item.indexed).length;
+  return {
+    title: "Free-copy search finished", details,
+    message: [
+      `Checked ${plural(checked, "work")}; ${plural(copies, "free copy", "free copies")} catalogued.`,
+      unindexed > 0 && `${plural(unindexed, "work")} not found in ${provider}.`,
+      failed > 0 && `${plural(failed, "lookup")} failed.`,
+      result.stopped && `Stopped early: ${result.stopped}`,
+      copies > 0 && "Copies are unreviewed: confirm each one’s version and license before relying on it.",
+    ].filter(Boolean).join(" "),
+  };
+}
+
+// Batch: DOI works never checked come first, then the least recently checked.
+async function findFreeCopies(trigger) {
+  const label = trigger.querySelector("span");
+  const original = label.textContent;
+  const topicId = state.topicId;
+  trigger.disabled = true;
+  label.textContent = "Searching…";
+  try {
+    const result = await api("/open-access", { method: "POST", params: { topic_id: topicId, limit: BATCH } });
+    toast(freeCopyReport(result, topicId ? breadcrumbText(topicId) : "the catalogue"));
+    emit("data-changed", { scope: "sources" });
+  } catch (error) {
+    toastError(error, "Free-copy search failed");
+  } finally {
+    trigger.disabled = false;
+    label.textContent = original;
+  }
+}
+
+export function initLibrary({ list, context, footer, filters, search, sort, discover, freeCopies }) {
   hosts = { list, context, footer, filters, search };
   let timer = 0;
   search.addEventListener("input", () => {
@@ -217,6 +283,7 @@ export function initLibrary({ list, context, footer, filters, search, sort, disc
   });
   sort.addEventListener("change", () => { state.filters.sort = sort.value; offset = 0; reload(); });
   discover.addEventListener("click", (event) => openDiscoverDialog(event.currentTarget));
+  freeCopies.addEventListener("click", (event) => findFreeCopies(event.currentTarget));
   list.addEventListener("keydown", (event) => {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
     const rows = [...list.querySelectorAll(".row")];

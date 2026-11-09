@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from pydantic import BaseModel, ValidationError
 
 from kumaru.core.errors import ConfigError, RequestError
+
+if TYPE_CHECKING:
+    from kumaru.academic.models import OAProvider
 
 app = typer.Typer(help="Discover, review and collect academic sources.", no_args_is_help=True)
 
@@ -60,20 +63,62 @@ def search(
     ctx: typer.Context,
     topic: str,
     query: str = typer.Option("", "--query", "-q"),
-    provider: str = typer.Option("crossref", "--provider"),
+    provider: str = typer.Option("crossref", "--provider", help="crossref, openalex or brave"),
     limit: int = typer.Option(20, "--limit", min=1, max=20),
+    open_access_only: bool = typer.Option(
+        False, "--open-access-only", help="OpenAlex only: keep just the works with a free copy.",
+    ),
 ) -> None:
     """Discover academic metadata; does not approve or download full text."""
     from kumaru.academic.discovery import Provider, discover
 
-    if provider not in {"crossref", "brave"}:
-        raise RequestError("Provider must be crossref or brave")
+    choices: dict[str, Provider] = {"crossref": "crossref", "brave": "brave", "openalex": "openalex"}
+    if provider not in choices:
+        raise RequestError("Provider must be crossref, openalex or brave")
     catalog, cfg = ctx.obj
-    # Dispatch explicitly instead of casting arbitrary CLI strings.
-    selected: Provider = "brave" if provider == "brave" else "crossref"
     emit(discover(
-        catalog, topic, query=query, provider=selected, limit=limit,
-        brave_api_key=cfg.brave_api_key,
+        catalog, topic, query=query, provider=choices[provider], limit=limit,
+        brave_api_key=cfg.brave_api_key, openalex_api_key=cfg.openalex_api_key,
+        open_access_only=open_access_only,
+    ))
+
+
+def oa_provider(value: str) -> OAProvider:
+    choices: dict[str, OAProvider] = {"openalex": "openalex", "unpaywall": "unpaywall"}
+    if value not in choices:
+        raise RequestError("Open-access provider must be openalex or unpaywall")
+    return choices[value]
+
+
+@app.command("open-access")
+def open_access(
+    ctx: typer.Context, source_id: str,
+    provider: str = typer.Option("openalex", "--provider", help="openalex or unpaywall"),
+) -> None:
+    """Find legal free copies of one DOI work and catalogue them, unreviewed, with their licenses."""
+    from kumaru.academic.openaccess import find_open_access
+
+    catalog, cfg = ctx.obj
+    emit(find_open_access(
+        catalog, source_id, provider=oa_provider(provider),
+        openalex_api_key=cfg.openalex_api_key, contact_email=cfg.contact_email,
+    ))
+
+
+@app.command("open-access-batch")
+def open_access_batch(
+    ctx: typer.Context,
+    topic: str | None = typer.Option(None, "--topic"),
+    limit: int = typer.Option(10, "--limit", min=1, max=20),
+    provider: str = typer.Option("openalex", "--provider", help="openalex or unpaywall"),
+) -> None:
+    """Find free copies for DOI works never checked first, then the least recently checked."""
+    from kumaru.academic.openaccess import find_open_access_batch
+
+    catalog, cfg = ctx.obj
+    emit(find_open_access_batch(
+        catalog, topic_id=topic, limit=limit, provider=oa_provider(provider),
+        openalex_api_key=cfg.openalex_api_key, contact_email=cfg.contact_email,
     ))
 
 

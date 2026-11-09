@@ -26,3 +26,10 @@ domain errors (the older `GET /sources` keeps FastAPI's 422). Source, claim and
 notice details add titles (`related`, `source`, `references`, `dependent_sources`,
 `affected_claims`), and `GET /claims` accepts `reviewed`. A `TransientFetchError`
 from an action route is HTTP 503.
+
+Open access: `POST /sources/{id}/open-access?provider=` and the batch
+`POST /open-access?topic_id=&limit=&provider=` share network admission with the other
+action routes. They read `academic.openalex_api_key` and `academic.contact_email` from
+configuration; `GET /overview` reports only whether each is set
+(`openalex_key_configured`, `unpaywall_configured`), never the values. `POST /search`
+accepts `open_access_only`.

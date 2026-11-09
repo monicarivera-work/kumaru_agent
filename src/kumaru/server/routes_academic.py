@@ -10,7 +10,8 @@ from pydantic import Field
 
 from kumaru.academic.catalog import Catalog
 from kumaru.academic.discovery import Provider, discover
-from kumaru.academic.models import Access, Record, Relationship, Review, Source, Topic
+from kumaru.academic.models import Access, OAProvider, Record, Relationship, Review, Source, Topic
+from kumaru.academic.openaccess import find_open_access, find_open_access_batch
 from kumaru.academic.reliability import ClaimCreate, ClaimReview, NoticeCreate, NoticeReview
 from kumaru.academic.web import PublicWeb, collect_source, inspect_source
 from kumaru.core.errors import RequestError
@@ -26,6 +27,7 @@ class Search(Record):
     query: str = Field(default="", max_length=500)
     provider: Provider = "crossref"
     limit: int = Field(default=20, ge=1, le=20)
+    open_access_only: bool = False
 
 
 class BusyError(RequestError):
@@ -60,10 +62,11 @@ def put_topic(topic_id: str, body: Topic, request: Request) -> Topic:
 
 @router.post("/search", dependencies=[Depends(network_slot)])
 def search(body: Search, request: Request) -> dict:
+    cfg = request.app.state.kumaru.config.academic
     return discover(
         catalog(request), body.topic_id, query=body.query, provider=body.provider,
-        limit=body.limit,
-        brave_api_key=request.app.state.kumaru.config.academic.brave_api_key,
+        limit=body.limit, brave_api_key=cfg.brave_api_key,
+        openalex_api_key=cfg.openalex_api_key, open_access_only=body.open_access_only,
     )
 
 
@@ -87,7 +90,10 @@ def sources(
 @router.get("/overview")
 def overview(request: Request, topic_id: str | None = None) -> dict:
     result = catalog(request).overview(topic_id or None)
-    result["brave_configured"] = bool(request.app.state.kumaru.config.academic.brave_api_key)
+    cfg = request.app.state.kumaru.config.academic
+    result["brave_configured"] = bool(cfg.brave_api_key)
+    result["openalex_key_configured"] = bool(cfg.openalex_api_key)
+    result["unpaywall_configured"] = bool(cfg.contact_email)
     return result
 
 
@@ -150,6 +156,27 @@ def inspect(source_id: str, request: Request) -> dict:
 @router.post("/sources/{source_id}/collect", dependencies=[Depends(network_slot)])
 def collect(source_id: str, request: Request) -> dict:
     return collect_source(catalog(request), source_id, PublicWeb()).model_dump(exclude={"text"})
+
+
+@router.post("/sources/{source_id}/open-access", dependencies=[Depends(network_slot)])
+def open_access(source_id: str, request: Request, provider: OAProvider = "openalex") -> dict:
+    cfg = request.app.state.kumaru.config.academic
+    return find_open_access(
+        catalog(request), source_id, provider=provider,
+        openalex_api_key=cfg.openalex_api_key, contact_email=cfg.contact_email,
+    )
+
+
+@router.post("/open-access", dependencies=[Depends(network_slot)])
+def open_access_batch(
+    request: Request, topic_id: str | None = None, provider: OAProvider = "openalex",
+    limit: int = Query(10, ge=1, le=20),
+) -> dict:
+    cfg = request.app.state.kumaru.config.academic
+    return find_open_access_batch(
+        catalog(request), topic_id=topic_id or None, limit=limit, provider=provider,
+        openalex_api_key=cfg.openalex_api_key, contact_email=cfg.contact_email,
+    )
 
 
 @router.get("/sources/{source_id}/text")

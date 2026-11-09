@@ -92,6 +92,8 @@ async function refreshOverview() {
   state.queue = global;
   state.formula = scoped.formula;
   state.braveConfigured = scoped.brave_configured;
+  state.openalexKeyConfigured = Boolean(scoped.openalex_key_configured);
+  state.unpaywallConfigured = Boolean(scoped.unpaywall_configured);
   renderQueueBadge();
   emit("overview-changed");
 }
@@ -203,7 +205,7 @@ initConnectionPill($("connection-pill"));
 renderSubjects($("subjects-host"));
 initLibrary({
   list: $("library-list"), context: $("library-context"), footer: $("library-footer"), filters: $("filters-host"),
-  search: $("library-search"), sort: $("library-sort"), discover: $("discover-button"),
+  search: $("library-search"), sort: $("library-sort"), discover: $("discover-button"), freeCopies: $("free-copies-button"),
 });
 initInspector($("inspector-body"));
 initViews({ containers: $("containers-body"), queue: $("queue-body") });

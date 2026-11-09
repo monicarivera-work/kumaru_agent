@@ -9,7 +9,9 @@ Routes: `#/library`, `#/containers`, `#/queue`, `#/source/<id>[/<tab>[/<claimId>
 Back/Forward work; if a dialog has unsaved edits, a navigation asks first and restores
 the hash when the user cancels; `beforeunload` is guarded the same way. Bootstrap loads
 topics, the scoped and catalogue-wide overview and monitor status, then applies the
-route. A 401 shows "API key needed", a network failure "Server unreachable".
+route. A 401 shows "API key needed", a network failure "Server unreachable". Each
+overview refresh copies the provider flags into state: `brave_configured`,
+`openalex_key_configured` and `unpaywall_configured`.
 
 Safety invariants live in the modules: DOM is built with `el()`/text nodes (never
 `innerHTML`), links are http(s) only, the API key stays in `api.js` memory, and

@@ -24,6 +24,8 @@ from kumaru.core.errors import RequestError
 
 USER_AGENT = "KumaruAcademic/0.1"
 MAX_BYTES = 2_000_000
+# A provider's 429 may say how long to wait; honour it once if that is this short.
+MAX_RETRY_AFTER = 20
 _LOCK = threading.Lock()
 _LAST_REQUEST: dict[str, float] = {}
 
@@ -36,6 +38,14 @@ class TransientFetchError(FetchError):
     """A network or provider outage that says nothing about the source itself."""
 
     http_status = 503
+
+
+class ProviderMissing(FetchError):
+    """A metadata provider answered 404: it has no record for the request."""
+
+
+class RateLimited(TransientFetchError):
+    """A provider answered 429: too fast, or its daily allowance is spent."""
 
 
 class AccessBlocked(RequestError):
@@ -53,6 +63,7 @@ class Page:
     content_type: str
     body: bytes
     challenge: str = ""
+    retry_after: float | None = None
 
     @property
     def text(self) -> str:
@@ -90,7 +101,7 @@ def public_addresses(host: str, port: int) -> list[str]:
     return addresses
 
 
-def _https_upgrade(url: str) -> str | None:
+def https_upgrade(url: str) -> str | None:
     """The HTTPS form of a plain-HTTP URL on the default port, if it has one."""
     parts = urlsplit(url)
     try:
@@ -114,6 +125,12 @@ def _challenge(headers: httpx.Headers) -> str:
     if headers.get("x-amzn-waf-action", "").strip().casefold() in {"challenge", "captcha"}:
         return "AWS WAF"
     return ""
+
+
+def _retry_after(headers: httpx.Headers) -> float | None:
+    """Seconds from a numeric Retry-After header; HTTP dates are not honoured."""
+    value = headers.get("retry-after", "").strip()
+    return float(value) if value.isdecimal() else None
 
 
 class PublicWeb:
@@ -167,7 +184,7 @@ class PublicWeb:
                     )
                 return Page(
                     url, response.status_code, response.headers.get("content-type", ""), bytes(body),
-                    _challenge(response.headers),
+                    _challenge(response.headers), _retry_after(response.headers),
                 )
         except httpx.TransportError as exc:
             raise TransientFetchError(
@@ -223,7 +240,7 @@ class PublicWeb:
                 # DOI resolvers often register plain-HTTP publisher URLs that the
                 # publisher upgrades again. Request the HTTPS form instead, so
                 # nothing is sent over plain HTTP once a fetch has used HTTPS.
-                upgraded = _https_upgrade(target)
+                upgraded = https_upgrade(target)
                 if upgraded is None or upgraded == url:
                     raise AccessBlocked("HTTPS downgrades are not followed")
                 target = upgraded
@@ -232,8 +249,15 @@ class PublicWeb:
 
     def json(self, url: str, *, headers: dict[str, str] | None = None) -> dict:
         page = self.fetch(url, robots=False, headers=headers)
-        if page.status == 429 or page.status >= 500:
+        if page.status == 429 and page.retry_after is not None and page.retry_after <= MAX_RETRY_AFTER:
+            time.sleep(page.retry_after)
+            page = self.fetch(url, robots=False, headers=headers)
+        if page.status == 429:
+            raise RateLimited("Search provider returned HTTP 429")
+        if page.status >= 500:
             raise TransientFetchError(f"Search provider returned HTTP {page.status}")
+        if page.status == 404:
+            raise ProviderMissing("Search provider has no record for this request (HTTP 404)")
         if page.status != 200:
             raise FetchError(f"Search provider returned HTTP {page.status}")
         try:

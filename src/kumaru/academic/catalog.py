@@ -241,7 +241,7 @@ class Catalog:
                     name: getattr(candidate, name)
                     for name in (
                         "citation_count", "reference_count", "metadata_url", "doi",
-                        "publisher", "published_year",
+                        "publisher", "published_year", "open_access",
                     )
                     if getattr(candidate, name) is not None
                 }
@@ -293,7 +293,10 @@ class Catalog:
         return self.get(id_)
 
     def save_metadata(self, id_: str, updates: dict) -> Source:
-        allowed = {"title", "authors", "publisher", "doi", "access", "access_note", "content_type"}
+        allowed = {
+            "title", "authors", "publisher", "doi", "access", "access_note", "content_type",
+            "open_access",
+        }
         if not set(updates) <= allowed:
             raise RequestError("Metadata updates cannot approve provenance, permissions or content")
         with self.connection() as db:
@@ -342,6 +345,34 @@ class Catalog:
                 [*args, limit, offset],
             )
             return [Source.model_validate_json(row[0]) for row in rows]
+
+    def open_access_due(self, *, topic_id: str | None = None, limit: int = 10) -> list[Source]:
+        """DOI works never checked for free copies first, then the least recently checked.
+
+        Sources catalogued as someone's free copy are skipped: they are the answer.
+        """
+        if not 1 <= limit <= 20:
+            raise RequestError("Open-access batches check 1..20 works")
+        clauses = [
+            "COALESCE(json_extract(payload, '$.doi'), '') != ''",
+            "json_extract(payload, '$.kind') != 'sources_of_sources'",
+            "id NOT IN (SELECT target_id FROM links WHERE kind = 'open_copy')",
+        ]
+        args: list[str | int] = []
+        if topic_id:
+            scope = sorted(self.descendants(topic_id))
+            clauses.append(
+                "id IN (SELECT source_id FROM source_topics WHERE topic_id IN " + _in(scope) + ")"
+            )
+            args.extend(scope)
+        with self.connection() as db:
+            rows = db.execute(
+                "SELECT json_remove(payload, '$.text') FROM sources WHERE " + " AND ".join(clauses)
+                + " ORDER BY json_extract(payload, '$.open_access.checked_at') IS NOT NULL, "
+                "json_extract(payload, '$.open_access.checked_at'), id LIMIT ?",
+                [*args, limit],
+            ).fetchall()
+        return [Source.model_validate_json(row[0]) for row in rows]
 
     def source_cards(self, ids: Iterable[str]) -> dict[str, dict]:
         """Titles for source IDs, so clients never have to show raw identifiers."""
@@ -497,7 +528,9 @@ class Catalog:
             ).fetchall()
             sources = [Source.model_validate_json(row[0]) for row in rows]
             page = [source.id for source in sources]
-            counts: dict[str, dict[str, int]] = {"claims": {}, "children": {}, "pending": {}}
+            counts: dict[str, dict[str, int]] = {
+                "claims": {}, "children": {}, "pending": {}, "copies": {}, "copy_of": {},
+            }
             if page:
                 for name, query in (
                     ("claims", "SELECT source_id, count(*) FROM claims WHERE source_id IN "),
@@ -505,10 +538,14 @@ class Catalog:
                                  "WHERE kind = 'contains' AND source_id IN "),
                     ("pending", "SELECT source_id, count(*) FROM notices WHERE "
                                 "json_extract(payload, '$.state') = 'reported' AND source_id IN "),
+                    ("copies", "SELECT source_id, count(*) FROM links "
+                               "WHERE kind = 'open_copy' AND source_id IN "),
+                    ("copy_of", "SELECT target_id, count(*) FROM links "
+                                "WHERE kind = 'open_copy' AND target_id IN "),
                 ):
                     counts[name] = {
                         row[0]: row[1]
-                        for row in db.execute(query + _in(page) + " GROUP BY source_id", page)
+                        for row in db.execute(query + _in(page) + " GROUP BY 1", page)
                     }
         items = [
             dict(
@@ -524,6 +561,9 @@ class Catalog:
                 claim_count=counts["claims"].get(source.id, 0),
                 child_count=counts["children"].get(source.id, 0),
                 pending_notices=counts["pending"].get(source.id, 0),
+                free_copies=counts["copies"].get(source.id, 0),
+                is_free_copy=counts["copy_of"].get(source.id, 0) > 0,
+                open_access=source.open_access.model_dump() if source.open_access else None,
                 withdrawn=any(
                     item.kind == "retraction" and item.reviewed and item.value > 0
                     for item in source.evidence

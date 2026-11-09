@@ -1,6 +1,6 @@
 // The Inspector: header, actions and tabs for the selected source, or the library at a glance.
 import { api } from "./api.js";
-import { checkBlockers, collectBlockers, runSourceAction } from "./actions.js";
+import { checkBlockers, collectBlockers, openAccessBlockers, runSourceAction } from "./actions.js";
 import { renderClaimsTab } from "./claims.js";
 import { applyPendingFocus, toast } from "./dialogs.js";
 import {
@@ -58,6 +58,9 @@ function header(ctx) {
   const meta = [authors, source.publisher, source.published_year].filter(Boolean).join(" · ");
   const blockers = collectBlockers(source, summary);
   const checkMissing = checkBlockers(source);
+  const copiesMissing = openAccessBlockers(source);
+  // Both lookups usually share one rule (a DOI on an individual work), so they share one note.
+  const shared = checkMissing.length > 0 && checkMissing.join() === copiesMissing.join();
   const action = (key, label, options = {}) => button(label, { focusId: `action-${key}`, ...options });
   return el("header", { class: "inspector-head" },
     el("button", { type: "button", class: "btn btn-quiet back-button", onclick: () => navigate(viewHash("library")) }, icon("back"), el("span", {}, "Library")),
@@ -82,9 +85,15 @@ function header(ctx) {
       action("inspect", "Inspect page", { iconName: "search", onclick: (event) => runSourceAction("inspect", source, event.currentTarget) }),
       action("collect", "Collect permitted text", { disabled: blockers.length > 0, describedBy: blockers.length ? "collect-note" : undefined, onclick: (event) => runSourceAction("collect", source, event.currentTarget) }),
       action("check", "Check editorial updates", { disabled: checkMissing.length > 0, describedBy: checkMissing.length ? "check-note" : undefined, onclick: (event) => runSourceAction("check", source, event.currentTarget) }),
+      action("open-access", "Find free copies", {
+        disabled: copiesMissing.length > 0, describedBy: copiesMissing.length ? (shared ? "check-note" : "open-access-note") : undefined,
+        onclick: (event) => runSourceAction("openAccess", source, event.currentTarget),
+      }),
       action("link", "Link source…", { iconName: "link", onclick: (event) => openRelationshipDialog({ source, trigger: event.currentTarget }) })),
     blockers.length > 0 && el("p", { class: "action-note", id: "collect-note" }, `Collect permitted text needs ${blockers.join(", ")}.`),
-    checkMissing.length > 0 && el("p", { class: "action-note", id: "check-note" }, `Editorial checks need ${checkMissing.join(", ")}.`));
+    checkMissing.length > 0 && el("p", { class: "action-note", id: "check-note" },
+      `${shared ? "Editorial checks and free-copy searches need" : "Editorial checks need"} ${checkMissing.join(", ")}.`),
+    copiesMissing.length > 0 && !shared && el("p", { class: "action-note", id: "open-access-note" }, `Free-copy searches need ${copiesMissing.join(", ")}.`));
 }
 
 function tabStrip(ctx) {
