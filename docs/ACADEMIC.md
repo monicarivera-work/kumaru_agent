@@ -113,6 +113,11 @@ or the source page itself is not evidence about the source's access. Those reque
 stored access category and note untouched, so a local network outage cannot relabel
 good sources.
 
+A bot-mitigation challenge is different: it is the site's answer, and this client can
+never pass it. Responses that Cloudflare (`cf-mitigated: challenge`) or AWS WAF
+(`x-amzn-waf-action: challenge` or `captcha`) mark as challenges record `inaccessible`
+with the service named, whatever their status code (usually `403` or `202`).
+
 ```powershell
 kumaru academic list --containers --access paywall
 kumaru academic inspect SOURCE_ID
@@ -122,7 +127,10 @@ Inspection stores metadata and access observations, **not page text**. Public
 abstracts/landing pages may still conceal full-text restrictions, so access
 classification is conservative evidence for review, not a definitive paywall
 detector. No login, payment, cookie import, JavaScript execution or bypass is
-attempted. Containers are never full-text collected or scored as if their
+attempted. Many mainstream publishers' landing pages answer with a bot challenge, a
+paywall marker or a dead DOI target; those works stay catalogued with the reason, and
+their Crossref metadata remains available for review and scoring. Containers are
+never full-text collected or scored as if their
 reputation established the truth of all their contents.
 
 Link reviewed relationships with `kumaru academic link FILE.json`:
@@ -297,13 +305,18 @@ JavaScript-only sites and gated full text remain metadata-only. Each response is
 bounded to 2 MB, with 20-second HTTP timeouts, public HTTP(S) only, DNS validation
 and IP-pinned TLS connections using the system's trusted CA certificates.
 Non-public addresses, mixed public/private DNS
-answers, custom ports, credential URLs and HTTPS downgrades are refused.
+answers, custom ports and credential URLs are refused. A redirect from HTTPS to a
+plain-HTTP URL (common for DOI resolvers) is followed only as its HTTPS form; nothing
+is sent over plain HTTP, and a site that insists on downgrading is refused.
 Every redirect is checked. Cross-host full-text redirects require separately
 cataloguing/reviewing the destination so permissions are not transferred silently.
 
-Robots rules are honored at each page/redirect. Requests are paced by host (at
+Robots rules are honored at each page/redirect, matched as RFC 9309 specifies: the
+longest matching rule wins (`Allow` on a tie), `*` and a final `$` are patterns, and
+a group naming `KumaruAcademic` replaces the `*` group. Requests are paced by host (at
 least one second, including declared crawl delays/rates). Missing robots (404)
-allows access; policy failures fail closed. Retrieval never recursively follows
+allows access; policy failures, including a challenge on robots.txt itself, fail
+closed. Retrieval never recursively follows
 page links or bulk-downloads a repository. For large catalogues, paginate `list`
 with `--limit` (up to 500) and `--offset`.
 

@@ -1,6 +1,6 @@
 # `tests/`
 
-> The offline regression suite. 1209 tests, no GPU, no downloads, under a minute.
+> The offline regression suite. 1380 tests, no GPU, no downloads, under a minute.
 
 **Read this when:** you have changed something and want to know whether you broke it, or you are adding a feature and need to know where its test belongs.
 
@@ -8,7 +8,7 @@
 
 ## What it does
 
-Exercises every layer that does not require a model: config resolution, the registry, core types, the backend contract, agent policies, the tool loop and its project folder, the HTTP API including SSE streaming, the training data pipeline and distillation data.
+Exercises every layer that does not require a model: config resolution, the registry, core types, the backend contract, agent policies, the tool loop and its project folder, the HTTP API including SSE streaming, the training data pipeline and distillation data, and academic source discovery and review.
 
 ## Why it exists — and why it has no GPU tests
 
@@ -69,6 +69,10 @@ $env:KUMARU_TEST_TOOLCHAINS = '1'; .\.venv\Scripts\python.exe -m pytest tests\te
 | `test_train_runner.py` | Training preflight missing a data file the task will read (LoRA `train_file` and `eval_file`; pretraining `text_file` or its `train_file` fallback), or accepting a directory as one, so a bad path fails at minute 0 instead of after the tokenizer and model load |
 | `test_distill.py` | **Test questions leaking into training data**, including ones that open like other questions or are copied into several training prompts; wrong, cut-off or wrongly-stepped answers being kept; the two arms covering different questions or splits; the manifest's counts not adding up; the report's training advice failing when nothing was held out; the three distillation recipes differing in more than the factor each tests, or the pilot changing the batch size it may only split differently |
 | `test_finetune_lora.py` | A recipe setting silently dropped on its way to transformers, as `warmup_ratio` was once (transformers 5.2 removed it, so runs trained without warmup); `peak_gpu_memory_gb` misreporting |
+| `test_academic.py` | A source's identity changing with URL case or fragment, or credential and custom-port URLs being accepted; topic trees taking cycles or misplaced levels; rediscovery overwriting reviews; text collected or exported without reviewed human provenance, rights and topic coverage; scores fabricated for unknown sources or containers, credited across topics, or inflated by length or duplicate corroboration; **a fetch reaching a private address, re-resolving DNS after the check, or following an HTTPS redirect over plain HTTP**; gates, robots or AI disclosures being bypassed; the API working without `academic.enabled` or auth |
+| `test_academic_reliability.py` | A claim inheriting its source's proof; containers, pending reviews or confirmed flaws counting as corroboration; claim findings escaping their topic or audit trail; **a retraction or correction leaving trusted text or claim support in place**; pending notices hidden by pagination; monitor errors reported as clean scans; a schema upgrade losing sources or reviews |
+| `test_academic_gui_api.py` | The dashboard's overview, library and detail endpoints miscounting (a multi-tagged source counted twice), putting text or evidence in summaries, filtering, sorting or paging wrongly, or skipping auth; access notes bypassing review history; **a network outage relabelling a source's access** instead of failing with 503; malformed Crossref records aborting discovery; ES modules served without a JavaScript content type |
+| `test_academic_robots.py` | robots.txt read first-match instead of RFC 9309's longest match (blocking pages a publisher allows), `*`/`$` patterns or percent-encoding ignored, the wrong user-agent group applied, or crawl delays shortened; **a crafted robots.txt rule taking more than linear time**; Cloudflare or AWS WAF challenges failing as errors or treated as outages instead of recorded as `inaccessible` |
 
 ## Fixtures
 

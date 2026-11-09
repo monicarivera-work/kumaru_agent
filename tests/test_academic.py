@@ -502,6 +502,34 @@ def test_robots_redirects_and_authenticated_header_policy(monkeypatch):
         web.fetch("https://example.org/api", robots=False)
 
 
+def test_plain_http_redirects_are_upgraded_never_downgraded(monkeypatch):
+    web = PublicWeb()
+    requested = []
+    redirects = {
+        "https://doi.org/10.1/x": "http://publisher.example/landing?id=1",
+        "https://explicit.example/a": "http://explicit.example:80/b",
+        "https://forced.example/a": "http://forced.example/a",
+        "https://ported.example/a": "http://ported.example:8080/a",
+    }
+
+    def request(url, headers=None, delay=1):
+        requested.append(url)
+        if url.endswith("/robots.txt"):
+            return Page(url, 404, "text/plain", b"")
+        if url in redirects:
+            return Page(redirects[url], 302, "redirect", b"")
+        return Page(url, 200, "text/plain", b"landing")
+
+    monkeypatch.setattr(web, "_request", request)
+    assert web.fetch("https://doi.org/10.1/x").url == "https://publisher.example/landing?id=1"
+    assert "https://publisher.example/robots.txt" in requested
+    assert web.fetch("https://explicit.example/a").url == "https://explicit.example/b"
+    for url in ("https://forced.example/a", "https://ported.example/a"):
+        with pytest.raises(AccessBlocked, match="downgrades"):
+            web.fetch(url)
+    assert not any(url.startswith("http:") for url in requested)
+
+
 def test_offline_cli_and_export_into_existing_learning_workflow(tmp_path, catalog):
     runner = CliRunner()
     prefix = ["academic", "--database", str(catalog.path)]

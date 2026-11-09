@@ -12,13 +12,13 @@ import threading
 import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlsplit
-from urllib.robotparser import RobotFileParser
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
 from kumaru.academic.catalog import Catalog
 from kumaru.academic.models import Access, Review, Source, canonical_url, now
+from kumaru.academic.robots import RobotsRules, parse_robots
 from kumaru.agent.doc_chunks import html_blocks
 from kumaru.core.errors import RequestError
 
@@ -52,6 +52,7 @@ class Page:
     status: int
     content_type: str
     body: bytes
+    challenge: str = ""
 
     @property
     def text(self) -> str:
@@ -89,11 +90,37 @@ def public_addresses(host: str, port: int) -> list[str]:
     return addresses
 
 
+def _https_upgrade(url: str) -> str | None:
+    """The HTTPS form of a plain-HTTP URL on the default port, if it has one."""
+    parts = urlsplit(url)
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme != "http" or port not in {None, 80}:
+        return None
+    try:
+        return canonical_url(urlunsplit((
+            "https", parts.netloc.removesuffix(":80"), parts.path, parts.query, "",
+        )))
+    except ValueError:
+        return None
+
+
+def _challenge(headers: httpx.Headers) -> str:
+    """The bot-mitigation service that answered with a browser challenge, if any."""
+    if headers.get("cf-mitigated", "").strip().casefold() == "challenge":
+        return "Cloudflare"
+    if headers.get("x-amzn-waf-action", "").strip().casefold() in {"challenge", "captcha"}:
+        return "AWS WAF"
+    return ""
+
+
 class PublicWeb:
     def __init__(self, *, max_bytes: int = MAX_BYTES, timeout: float = 20) -> None:
         self.max_bytes = max_bytes
         self.timeout = timeout
-        self.robots: dict[str, RobotFileParser] = {}
+        self.robots: dict[str, RobotsRules] = {}
 
     def _request(self, url: str, headers: dict[str, str] | None = None, delay: float = 1) -> Page:
         url = canonical_url(url)
@@ -140,6 +167,7 @@ class PublicWeb:
                     )
                 return Page(
                     url, response.status_code, response.headers.get("content-type", ""), bytes(body),
+                    _challenge(response.headers),
                 )
         except httpx.TransportError as exc:
             raise TransientFetchError(
@@ -153,10 +181,12 @@ class PublicWeb:
         origin = f"{parts.scheme}://{parts.netloc}"
         if origin not in self.robots:
             page = self.fetch(origin + "/robots.txt", robots=False)
-            parser = RobotFileParser()
-            parser.set_url(origin + "/robots.txt")
+            if page.challenge:
+                raise AccessBlocked(
+                    f"Browser challenge ({page.challenge}) on robots.txt; no attempt to bypass it.",
+                )
             if page.status == 404:
-                parser.parse(["User-agent: *", "Allow: /"])
+                rules = RobotsRules()
             elif page.status in {401, 403}:
                 raise AccessBlocked("robots.txt disallows automated access")
             elif page.status == 429 or page.status >= 500:
@@ -164,15 +194,15 @@ class PublicWeb:
             elif page.status != 200:
                 raise FetchError(f"Cannot establish robots policy (HTTP {page.status})")
             else:
-                parser.parse(page.text.splitlines())
-            self.robots[origin] = parser
+                rules = parse_robots(page.text, USER_AGENT)
+            self.robots[origin] = rules
         rules = self.robots[origin]
-        if not rules.can_fetch(USER_AGENT, url):
+        if not rules.allowed(url):
             raise AccessBlocked("robots.txt disallows this source")
-        delay = float(rules.crawl_delay(USER_AGENT) or rules.crawl_delay("*") or 1)
-        rate = rules.request_rate(USER_AGENT) or rules.request_rate("*")
-        if rate and rate.requests:
-            delay = max(delay, rate.seconds / rate.requests)
+        delay = rules.crawl_delay or 1
+        if rules.request_rate and rules.request_rate[0]:
+            requests, seconds = rules.request_rate
+            delay = max(delay, seconds / requests)
         if delay > 60:
             raise AccessBlocked("Site crawl delay exceeds the interactive retrieval budget")
         return max(1, delay)
@@ -188,9 +218,16 @@ class PublicWeb:
                 return page
             if headers:
                 raise FetchError("Authenticated search API redirects are not followed")
-            if urlsplit(url).scheme == "https" and urlsplit(page.url).scheme != "https":
-                raise AccessBlocked("HTTPS downgrades are not followed")
-            url = page.url
+            target = page.url
+            if urlsplit(url).scheme == "https" and urlsplit(target).scheme != "https":
+                # DOI resolvers often register plain-HTTP publisher URLs that the
+                # publisher upgrades again. Request the HTTPS form instead, so
+                # nothing is sent over plain HTTP once a fetch has used HTTPS.
+                upgraded = _https_upgrade(target)
+                if upgraded is None or upgraded == url:
+                    raise AccessBlocked("HTTPS downgrades are not followed")
+                target = upgraded
+            url = target
         raise FetchError("Academic source exceeded five redirects")
 
     def json(self, url: str, *, headers: dict[str, str] | None = None) -> dict:
@@ -237,6 +274,10 @@ class Metadata(HTMLParser):
 
 
 def analyze_page(page: Page) -> tuple[dict, str]:
+    if page.challenge:
+        # Whatever the status (Cloudflare uses 403, AWS WAF 202), this client
+        # can never pass the challenge, and it is not an outage on our side.
+        raise AccessBlocked(f"Browser challenge ({page.challenge}); no attempt to bypass it.")
     if page.status == 429 or page.status >= 500:
         raise TransientFetchError(f"Source returned HTTP {page.status}; retry later")
     if page.status in {401, 402, 403, 404, 451}:

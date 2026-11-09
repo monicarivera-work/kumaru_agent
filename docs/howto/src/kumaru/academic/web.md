@@ -7,6 +7,21 @@ Robots rules, pacing, response limits and explicit access errors apply equally t
 CLI and API. `analyze_page` extracts landing-page metadata and text using existing
 `doc_chunks.html_blocks`; no scripts or page links are executed/followed.
 
+Redirects are followed manually so each hop gets DNS, robots and scheme checks.
+An HTTPS hop that redirects to plain HTTP (as `doi.org` does for many publishers)
+is retried as the HTTPS form of that target via `_https_upgrade`; plain HTTP is never
+requested after HTTPS. A redirect back to the same URL, or to a nonstandard port,
+still raises `AccessBlocked("HTTPS downgrades are not followed")`.
+
+Robots rules come from [`robots.py`](robots.md), which follows RFC 9309 (longest
+match) rather than `urllib.robotparser` (first match, no wildcards). `Page.challenge`
+names Cloudflare (`cf-mitigated: challenge`) or AWS WAF (`x-amzn-waf-action:
+challenge`/`captcha`) when either answers with a browser challenge. `analyze_page`
+turns that into `AccessBlocked` (`inaccessible`) whatever the status, so a `202`
+challenge is classified instead of failing as an unexpected status, and a challenge
+on robots.txt fails closed. Other services' challenges are still caught by the page-text
+phrases when they answer `200`.
+
 `inspect_source` stores metadata only. `collect_source` gates on reviewed human
 provenance, rights and topic coverage, then records text/hash/time/final URL.
 AI disclosure revokes trust. Gated, unsupported and unavailable sources remain
